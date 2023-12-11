@@ -15,7 +15,7 @@ namespace Oxide.Plugins
     // periodic global status broadcast timer
     protected Timer broadcastTimer;
     // workbench unlock announcement broadcast timers
-    protected Timer[] unlockTimers = null;
+    protected Timer[] unlockTimers;
     // set of users that have already received a "can't craft" warning
     private HashSet<int> craftWarnedSet;
     private static readonly List<int> DEFAULT_WB_SECONDS = new() {
