@@ -1,41 +1,48 @@
-﻿using Newtonsoft.Json;
-using Oxide.Core;
-using Oxide.Core.Libraries.Covalence;
+﻿using Oxide.Core.Libraries.Covalence;
 using System;
 using System.Collections.Generic;
-using System.IO;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 
 namespace Oxide.Plugins
 {
-  [Info("Timed Workbench Redux", "HunterZ", "2.0.0")]
-  [Description("Overhaul of original plugin by DizzasTeR, which delays the ability to craft workbenches until some time has elapsed")]
-  class TimedWorkbench : RustPlugin
+  [Info("HZ Workbench", "HunterZ", "2.1.0")]
+  [Description("Overhaul of original Timed Workbench plugin by DizzasTeR, which delays the ability to craft workbenches until some time has elapsed")]
+  class HZWorkbench : RustPlugin
   {
     #region Vars
-    // data managed via config file
-    private Configuration config;
     // periodic global status broadcast timer
     protected Timer broadcastTimer;
     // workbench unlock announcement broadcast timers
     protected Timer[] unlockTimers = null;
     // set of users that have already received a "can't craft" warning
     private HashSet<int> craftWarnedSet;
-    private static readonly long[] DEFAULT_WB_SECONDS = { 86400L, 172800L, 259200L };
+    private static readonly List<int> DEFAULT_WB_SECONDS = new() {
+      86400, 172800, 259200
+    };
     // ordered list of workbench IDs
-    private static readonly long[] ID_WORKBENCH = { 1524187186L, -41896755L, -1607980696L };
+    private static readonly int[] ID_WORKBENCH = {
+      1524187186, -41896755, -1607980696
+    };
+
+    # region Config Strings
+    private const string CFG_KEY_BROADCAST = "BroadcastConfig";
+    private const string CFG_KEY_WIPE = "LastWipeUTC";
+    private static readonly string[] CFG_KEY_WB = {
+      "WB1Config", "WB2Config", "WB3Config"
+    };
+    # endregion Config Strings
 
     # region Permission Strings
-
-    const string PERMISSION_ADMIN = "timedworkbench.admin";
-    const string PERMISSION_INFO = "timedworkbench.info";
-    const string PERMISSION_MODIFY = "timedworkbench.modify";
-    const string PERMISSION_RELOAD = "timedworkbench.reload";
-    const string PERMISSION_RESET = "timedworkbench.reset";
-    const string PERMISSION_SKIPLOCK = "timedworkbench.skiplock";
-    const string PERMISSION_WIPE = "timedworkbench.wipe";
-
+    private const string PERMISSION_ADMIN = "hzworkbench.admin";
+    private const string PERMISSION_BROADCAST = "hzworkbench.broadcast";
+    private const string PERMISSION_INFO = "hzworkbench.info";
+    private const string PERMISSION_MODIFY = "hzworkbench.modify";
+    private const string PERMISSION_RELOAD = "hzworkbench.reload";
+    private const string PERMISSION_RESET = "hzworkbench.reset";
+    private const string PERMISSION_SKIPLOCK = "hzworkbench.skiplock";
+    private const string PERMISSION_WIPE = "hzworkbench.wipe";
     # endregion Permission Strings
 
     #endregion Vars
@@ -46,8 +53,8 @@ namespace Oxide.Plugins
     // if positive optional parameter is specified, it is used as a passthrough
     private double GetWipeElapsedSeconds(double wipeElapsedSeconds = -1.0)
     {
-      return wipeElapsedSeconds > 0 ?
-        wipeElapsedSeconds : (DateTime.UtcNow - config.LastWipe).TotalSeconds;
+      return wipeElapsedSeconds > 0 ? wipeElapsedSeconds :
+        (DateTime.UtcNow - GetLastWipe()).TotalSeconds;
     }
 
     // returns unlock status for given workbench index (0-2 => level 1-3)
@@ -57,15 +64,15 @@ namespace Oxide.Plugins
     //
     // wipe elapsed seconds can optionally be specified to avoid repeated
     //  lookups when calling from a loop
-    private long GetUnlockStatus(int index, double wipeElapsedSeconds = -1.0)
+    private int GetUnlockStatus(int index, double wipeElapsedSeconds = -1.0)
     {
       wipeElapsedSeconds = GetWipeElapsedSeconds(wipeElapsedSeconds);
-      double unlockDelaySeconds = config.WBSeconds[index];
+      double unlockDelaySeconds = GetWbSeconds(index);
 
       if (unlockDelaySeconds < 0.0)
       {
         // no auto unlock (must be manually unlocked)
-        return -1L;
+        return -1;
       }
 
       if (unlockDelaySeconds > 0.0)
@@ -74,20 +81,20 @@ namespace Oxide.Plugins
         double unlockSecondsRemaining =
           unlockDelaySeconds - wipeElapsedSeconds;
         return unlockSecondsRemaining > 0 ?
-          (long)unlockSecondsRemaining : 0L;
+          (int)unlockSecondsRemaining : 0;
       }
 
       // 0.0 => always unlocked
-      return 0L;
+      return 0;
     }
 
     // returns an array of unlock times for workbenches
     // see GetUnlockTime() for value meanings
-    private long[] GetUnlockStatus()
+    private int[] GetUnlockStatus()
     {
       double wipeElapsedSeconds = GetWipeElapsedSeconds();
       // unrolled loop for simplicity
-      return new long[]
+      return new int[]
       {
         GetUnlockStatus(0, wipeElapsedSeconds),
         GetUnlockStatus(1, wipeElapsedSeconds),
@@ -102,7 +109,7 @@ namespace Oxide.Plugins
       if (index < 0 || index > 2) { return null; }
 
       wipeElapsedSeconds = GetWipeElapsedSeconds(wipeElapsedSeconds);
-      long status = GetUnlockStatus(index, wipeElapsedSeconds);
+      int status = GetUnlockStatus(index, wipeElapsedSeconds);
 
       if (status > 0)
       {
@@ -112,8 +119,25 @@ namespace Oxide.Plugins
       return null;
     }
 
+    private void SetBroadcastTimer()
+    {
+      // destroy existing timer (if any)
+      if (broadcastTimer != null)
+      {
+        broadcastTimer.Destroy();
+        broadcastTimer = null;
+      }
+      // only set new timer if config value is positive (i.e. broadcast period
+      //  in seconds)
+      int broadcastConfig = GetBroadcastConfig();
+      if (broadcastConfig > 0)
+      {
+        broadcastTimer = timer.Every(broadcastConfig, () => { ReportStatus(null); });
+      }
+    }
+
     // destroy all existing timers managed by unlockTimers
-    private void DestroyTimers()
+    private void DestroyUnlockTimers()
     {
       if (unlockTimers == null) { return; }
       for (int index = 0; index < 3; ++index)
@@ -129,8 +153,8 @@ namespace Oxide.Plugins
     private void SetUnlockTimers()
     {
       // timers don't auto-destruct, so wipe them to avoid double-firing
-      DestroyTimers();
-      double wipeElapsedSeconds = (DateTime.UtcNow - config.LastWipe).TotalSeconds;
+      DestroyUnlockTimers();
+      double wipeElapsedSeconds = GetWipeElapsedSeconds();
       unlockTimers = new Timer[]{
         GetTimer(0, wipeElapsedSeconds),
         GetTimer(1, wipeElapsedSeconds),
@@ -139,7 +163,7 @@ namespace Oxide.Plugins
     }
 
     // generate color locked/unlocked status text for twinfo command
-    private string UnlockStatusString(long status) => status == 0 ?
+    private string UnlockStatusString(int status) => status == 0 ?
       Colorize("unlocked", "green") : Colorize("locked", "red");
 
     // return true if player is null, server, or admin, or has permission, else
@@ -169,7 +193,7 @@ namespace Oxide.Plugins
       sb.AppendLine(FormatMessage(player, "StatusBanner"));
       for (int index = 0; index < 3; ++index)
       {
-        string wbNumStr = (index + 1).ToString();
+        string wbNumStr = (index + 1).ToString(CultureInfo.CurrentCulture);
         switch (status[index])
         {
           case < 0:
@@ -187,7 +211,7 @@ namespace Oxide.Plugins
           case > 0:
           {
             var timeSpan = TimeSpan.FromSeconds(status[index]);
-            sb.AppendLine(FormatMessage(player, "StatusTime", wbNumStr, timeSpan.ToString("g")));
+            sb.AppendLine(FormatMessage(player, "StatusTime", wbNumStr, timeSpan.ToString("g", CultureInfo.CurrentCulture)));
           }
           break;
         }
@@ -200,7 +224,7 @@ namespace Oxide.Plugins
     {
       // don't report unlock if nobody is online
       if (BasePlayer.activePlayerList.IsNullOrEmpty()) { return; }
-      SendMessage(null, "UnlockNotice", (index + 1).ToString());
+      SendMessage(null, "UnlockNotice", (index + 1).ToString(CultureInfo.CurrentCulture));
     }
 
     #endregion Utilities
@@ -212,9 +236,11 @@ namespace Oxide.Plugins
     {
       lang.RegisterMessages(new Dictionary<string, string>
       {
+        ["BroadcastDisabled"]  = "Status broadcast disabled",
+        ["BroadcastSet"] = "Status broadcast period set to {0} second(s)",
         ["CannotCraft"] = "Cannot craft this item (unlocks in {0})",
         ["CannotCraftManual"] = "Cannot craft this item (unlocks manually/never)",
-        ["InfoBanner"] = "Now @{0} / T1 {1} (@{2}) / T2 {3} (@{4}) / T3 {5} (@{6})",
+        ["InfoBanner"] = "Now @{0} / T1 {1} (@{2}/{3}) / T2 {4} (@{5}/{6}) / T3 {7} (@{8}/{9})",
         ["InvalidWorkbench"] = "Invalid workbench number specified!",
         ["ModifiedManual"] = "WB {0} is now always locked",
         ["ModifiedTime"] = "WB {0} now unlocks in {1} second(s) after wipe",
@@ -239,7 +265,12 @@ namespace Oxide.Plugins
       bool isServer = player == null || player.IsServer;
       string msg = string.Format(lang.GetMessage(langCode, this, isServer ? null : player.Id), args);
       if (isServer)
-        msg = msg.Replace("<color=red>", "").Replace("<color=green>", "").Replace("</color>", "");
+        // note: cannot supply StringComparison enum value here, as it results
+        //  in a "not implemented" exception in some cases
+        msg = msg
+          .Replace("<color=red>", string.Empty)
+          .Replace("<color=green>", string.Empty)
+          .Replace("</color>", string.Empty);
       return msg;
     }
 
@@ -273,14 +304,16 @@ namespace Oxide.Plugins
 
     #region Hooks
 
+    // called by Oxide after config load
     protected void Init()
     {
-      broadcastTimer = timer.Repeat(300f, 0, () => { ReportStatus(null); });
+      SetBroadcastTimer();
       SetUnlockTimers();
       craftWarnedSet = new();
 
       // Permissions
       permission.RegisterPermission(PERMISSION_ADMIN, this);
+      permission.RegisterPermission(PERMISSION_BROADCAST, this);
       permission.RegisterPermission(PERMISSION_INFO, this);
       permission.RegisterPermission(PERMISSION_MODIFY, this);
       permission.RegisterPermission(PERMISSION_RELOAD, this);
@@ -300,6 +333,7 @@ namespace Oxide.Plugins
         bp.userCraftable = true;
       }
 
+      AddCovalenceCommand("twbroadcast", nameof(CommandBroadcast));
       AddCovalenceCommand("twinfo", nameof(CommandInfo));
       AddCovalenceCommand("twmodify", nameof(CommandModify));
       AddCovalenceCommand("twreload", nameof(CommandReload));
@@ -307,13 +341,18 @@ namespace Oxide.Plugins
       AddCovalenceCommand("twwipe", nameof(CommandWipe));
     }
 
-    protected void OnNewSave(string filename)
+    // called by Oxide on plugin unload
+    protected void Unload()
     {
-      // Update the LastWipe in config as a new wipe was detected.
-      config.LastWipe = DateTime.UtcNow;
-      SaveConfig();
+      // clean up any timers
 
-      Puts("OnNewSave(): Reset wipe time to " + config.LastWipe.ToString("R"));
+      if (broadcastTimer != null)
+      {
+        broadcastTimer.Destroy();
+        broadcastTimer = null;
+      }
+
+      DestroyUnlockTimers();
     }
 
     protected object CanCraft(PlayerBlueprints playerBlueprints, ItemDefinition itemDefinition)
@@ -343,7 +382,7 @@ namespace Oxide.Plugins
         {
           craftWarnedSet.Add(playerHashCode);
           var timeSpan = TimeSpan.FromSeconds(secondsLeft);
-          SendMessage(player, "CannotCraft", timeSpan.ToString("g"));
+          SendMessage(player, "CannotCraft", timeSpan.ToString("g", CultureInfo.CurrentCulture));
         }
         return false;
       }
@@ -374,6 +413,30 @@ namespace Oxide.Plugins
 
     #region Commands
 
+    private void CommandBroadcast(IPlayer player, string command, string[] args)
+    {
+      if (!HasPermission(player, PERMISSION_BROADCAST)) { return; }
+
+      if (args.Length < 1)
+      {
+        player.Reply(string.Format(lang.GetMessage("SyntaxError", this, player.Id), command));
+        return;
+      }
+
+      int broadcastConfig = Convert.ToInt32(args[0]);
+      SetBroadcastConfig(broadcastConfig);
+      SetBroadcastTimer();
+
+      if (broadcastConfig > 0)
+      {
+        SendMessage(player, "BroadcastSet", args[0]);
+      }
+      else
+      {
+        SendMessage(player, "BroadcastDisabled");
+      }
+    }
+
     private void CommandInfo(IPlayer player)
     {
       if (!HasPermission(player, PERMISSION_INFO)) { return; }
@@ -381,10 +444,16 @@ namespace Oxide.Plugins
       var status = GetUnlockStatus();
 
       SendMessage(player, "InfoBanner",
-        GetWipeElapsedSeconds().ToString(),
-        UnlockStatusString(status[0]), status[0].ToString(),
-        UnlockStatusString(status[1]), status[1].ToString(),
-        UnlockStatusString(status[2]), status[2].ToString()
+        GetWipeElapsedSeconds().ToString(CultureInfo.CurrentCulture),
+        UnlockStatusString(status[0]),
+        status[0].ToString(CultureInfo.CurrentCulture),
+        GetWbSeconds(0).ToString(CultureInfo.CurrentCulture),
+        UnlockStatusString(status[1]),
+        status[1].ToString(CultureInfo.CurrentCulture),
+        GetWbSeconds(1).ToString(CultureInfo.CurrentCulture),
+        UnlockStatusString(status[2]),
+        status[2].ToString(CultureInfo.CurrentCulture),
+        GetWbSeconds(2).ToString(CultureInfo.CurrentCulture)
       );
     }
 
@@ -398,7 +467,7 @@ namespace Oxide.Plugins
         return;
       }
 
-      long wbIndex;
+      int wbIndex;
       switch (args[0])
       {
         case "1": wbIndex = 0; break;
@@ -411,11 +480,9 @@ namespace Oxide.Plugins
         }
       }
 
-      long seconds = Convert.ToInt64(args[1]);
-      if (seconds < 0) { seconds = -1; }
-      config.WBSeconds[wbIndex] = seconds;
-
-      SaveConfig();
+      int seconds = Convert.ToInt32(args[1]);
+      SetWbSeconds(wbIndex, seconds);
+      SetUnlockTimers();
 
       if (seconds < 0)
       {
@@ -423,7 +490,7 @@ namespace Oxide.Plugins
       }
       else if (seconds > 0)
       {
-        SendMessage(player, "ModifiedTime", args[0], seconds.ToString());
+        SendMessage(player, "ModifiedTime", args[0], seconds.ToString(CultureInfo.CurrentCulture));
       }
       else
       {
@@ -436,6 +503,7 @@ namespace Oxide.Plugins
       if (!HasPermission(player, PERMISSION_RELOAD)) { return; }
 
       LoadConfig();
+      SetUnlockTimers();
       SendMessage(player, "ReloadConfig");
     }
 
@@ -443,8 +511,9 @@ namespace Oxide.Plugins
     {
       if (!HasPermission(player, PERMISSION_RESET)) { return; }
 
-      config.WBSeconds = DEFAULT_WB_SECONDS;
-      SaveConfig();
+      SetWbSeconds(DEFAULT_WB_SECONDS);
+      SetUnlockTimers();
+
       SendMessage(player, "ResetConfig");
       CommandInfo(player);
     }
@@ -453,61 +522,81 @@ namespace Oxide.Plugins
     {
       if (!HasPermission(player, PERMISSION_WIPE)) { return; }
 
-      config.LastWipe = DateTime.UtcNow;
-      SaveConfig();
+      DateTime wipeTime = DateTime.UtcNow;
+      SetLastWipe(wipeTime);
+      SetUnlockTimers();
 
-      SendMessage(player, "PluginWipe", config.LastWipe.ToString("R"));
-      Puts("CommandWipe(): Reset wipe time to " + config.LastWipe.ToString("R"));
+      SendMessage(player, "PluginWipe", wipeTime.ToString("R", CultureInfo.CurrentCulture));
+      Puts("CommandWipe(): Reset wipe time to " + wipeTime.ToString("R", CultureInfo.CurrentCulture));
     }
 
     #endregion Commands
 
     #region Configuration
 
-    class Configuration
-    {
-      [JsonProperty(PropertyName = "Last wipe time in UTC")]
-      public DateTime LastWipe { get; set; } = DateTime.UtcNow;
-
-      [JsonProperty(PropertyName = "Workbench unlock delays in seconds (-1 for no auto unlock, 0 for always unlocked)")]
-      public long[] WBSeconds { get; set; } = DEFAULT_WB_SECONDS;
-    }
-
+    // need to append logic to check for map wipe since last load
     protected override void LoadConfig()
     {
       base.LoadConfig();
-      try
-      {
-        config = Config.ReadObject<Configuration>();
-      }
-      catch
-      {
-        config = null;
-      }
-      if (config == null)
-      {
-        LoadDefaultConfig();
-      }
       var serverWipeTime = SaveRestore.SaveCreatedTime;
-      if (config.LastWipe < serverWipeTime)
+      if (GetLastWipe() < serverWipeTime)
       {
-        config.LastWipe = serverWipeTime;
-        Puts("LoadConfig(): Reset wipe time to " + config.LastWipe.ToString("R"));
+        SetLastWipe(serverWipeTime);
+        Puts("LoadConfig(): Reset wipe time to " + serverWipeTime.ToString("R", CultureInfo.CurrentCulture));
       }
-      SaveConfig();
     }
 
     protected override void LoadDefaultConfig()
     {
-      string configPath = $"{Interface.Oxide.ConfigDirectory}{Path.DirectorySeparatorChar}{Name}.json";
-      Puts($"Config file not found, creating a new configuration file at {configPath}");
-      config = new Configuration();
+      Puts("LoadDefaultConfig(): Creating a new configuration file");
+      // note: don't use SetXYZ() here because they will cause redundant saves
+      Config[CFG_KEY_BROADCAST] = 300;
+      Config[CFG_KEY_WIPE] = DateTime.UtcNow;
+      Config[CFG_KEY_WB[0]] = DEFAULT_WB_SECONDS[0];
+      Config[CFG_KEY_WB[1]] = DEFAULT_WB_SECONDS[1];
+      Config[CFG_KEY_WB[2]] = DEFAULT_WB_SECONDS[2];
     }
 
-    protected override void SaveConfig()
+    int GetBroadcastConfig()
     {
-      SetUnlockTimers();
-      Config.WriteObject(config);
+      return (int)Config[CFG_KEY_BROADCAST];
+    }
+
+    void SetBroadcastConfig(int broadcastConfig)
+    {
+      Config[CFG_KEY_BROADCAST] = broadcastConfig;
+      SaveConfig();
+    }
+
+    DateTime GetLastWipe()
+    {
+      return (DateTime)Config[CFG_KEY_WIPE];
+    }
+
+    void SetLastWipe(DateTime wipeTime)
+    {
+      Config[CFG_KEY_WIPE] = wipeTime;
+      SaveConfig();
+    }
+
+    int GetWbSeconds(int index)
+    {
+      return (int)Config[CFG_KEY_WB[index]];
+    }
+
+    void SetWbSeconds(List<int> seconds)
+    {
+      Config[CFG_KEY_WB[0]] = seconds[0];
+      Config[CFG_KEY_WB[1]] = seconds[1];
+      Config[CFG_KEY_WB[2]] = seconds[2];
+      SaveConfig();
+    }
+
+    void SetWbSeconds(int index, int seconds)
+    {
+      if (seconds < 0) { seconds = -1; }
+      Config[CFG_KEY_WB[index]] = seconds;
+      SaveConfig();
     }
 
     #endregion Configuration
