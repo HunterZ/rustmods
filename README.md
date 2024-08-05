@@ -1,2 +1,2 @@
 # rustmods
-Mods for the PC game Rust
+My mods/plugins for the PC game Rust

@@ -2,3 +2,4 @@
 #  server install)
 *.cs
 !HZWorkbench.cs
+!SuperPVxInfo.cs
