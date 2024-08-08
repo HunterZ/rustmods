@@ -81,8 +81,16 @@ namespace Oxide.Plugins
 
     private void Init()
     {
-      PlayerWatcher.Instance = this;
       LoadData();
+      PlayerWatcher.AllowForceUpdate =
+        null == _configData || _configData.forceUpdates;
+      PlayerWatcher.Instance = this;
+      PlayerWatcher.PvpAboveHeight =
+        null == _configData ? 1000.0f : _configData.pvpAboveHeight;
+      PlayerWatcher.PvpBelowHeight =
+        null == _configData ? -50.0f : _configData.pvpBelowHeight;
+      PlayerWatcher.UpdateIntervalSeconds =
+        null == _configData ? 1.0f : _configData.updateIntervalSeconds;
       if (null != _configData &&
           !string.IsNullOrEmpty(_configData.toggleCommand))
       {
@@ -134,6 +142,7 @@ namespace Oxide.Plugins
       watcher.Init(
         IsPlayerInBase(player), IsPlayerInPVPDelay(player.userID.Get()),
         GetPlayerZoneType(player), player);
+      watcher.StartWatching();
     }
 
     private void OnPlayerDisconnected(BasePlayer player, string reason)
@@ -964,8 +973,16 @@ namespace Oxide.Plugins
 
     public class PlayerWatcher : FacepunchBehaviour
     {
+      // true if force updates should be allowed
+      public static bool AllowForceUpdate { get; set; }
       // reference back to plugin
       public static SuperPVxInfo? Instance { get; set; }
+      // consider at/above this height to be PvP
+      public static float PvpAboveHeight { get; set; }
+      // consider at/below this height to be PvP
+      public static float PvpBelowHeight { get; set; }
+      // config-based update interval
+      public static float UpdateIntervalSeconds { get; set; }
       // true if abandoned/raidable base exit check requested
       private bool _checkBase;
       public bool CheckBase {
@@ -984,8 +1001,6 @@ namespace Oxide.Plugins
         get { return _checkZone; }
         set { ForceUpdate |= value != _checkZone; _checkZone = value; }
       }
-      // time since last check
-      public float ElapsedSeconds { get; set; }
       // coordinates of current abandoned/raidable base (if applicable)
       public Vector3 BaseLocation { get; set; }
       // radius of current abandoned/raidable base (if applicable)
@@ -1026,20 +1041,6 @@ namespace Oxide.Plugins
       public bool? WasBelowPvpHeight { get; set; }
       // true if in safe zone on last check
       public bool? WasInSafeZone { get; set; }
-
-      private bool CanUpdate(bool allowForceUpdate, float updateIntervalSeconds)
-      {
-        ElapsedSeconds += Time.deltaTime;
-        // abort if not a forced update and interval has not completed
-        if (!(ForceUpdate && allowForceUpdate) &&
-            ElapsedSeconds < updateIntervalSeconds)
-        {
-          return false;
-        }
-        ElapsedSeconds = 0.0f;
-        ForceUpdate = false;
-        return true;
-      }
 
       private bool? CheckPeriodic(
         bool current, bool? previous,
@@ -1088,24 +1089,21 @@ namespace Oxide.Plugins
           PVxType.PVE : Instance._configData.defaultType;
       }
 
-      public void Awake()
+      public void StartWatching()
       {
-        ElapsedSeconds = 0.0f;
+        // use this instead of Update() because the overhead of time counting is
+        //  ridiculous for our comparatively slow desired update rates
+        InvokeRepeating("Watch", 0.0f, UpdateIntervalSeconds);
       }
 
-      public void Update()
+      public void Watch()
       {
-        if (null == Instance || null == Instance._configData) return;
-
-        if (!CanUpdate(
-          Instance._configData.forceUpdates,
-          Instance._configData.updateIntervalSeconds))
+        // abort if plugin reference or player invalid
+        if (null == Player || null == Instance ||
+            !Instance.IsValidPlayer(Player, true))
         {
           return;
         }
-
-        // abort if plugin reference or player invalid
-        if (null == Player || !Instance.IsValidPlayer(Player, true)) return;
 
         // gather some up-front data
 
@@ -1148,7 +1146,7 @@ namespace Oxide.Plugins
 
         // height check
         bool isAbovePvpHeight =
-          Player.transform.position.y > Instance._configData.pvpAboveHeight;
+          Player.transform.position.y > PvpAboveHeight;
         WasAbovePvpHeight = CheckPeriodic(
           isAbovePvpHeight, WasAbovePvpHeight,
           "PVP Height Entry", "PVP Height Exit"
@@ -1156,7 +1154,7 @@ namespace Oxide.Plugins
 
         // depth check
         bool isBelowPvpHeight =
-          Player.transform.position.y < Instance._configData.pvpBelowHeight;
+          Player.transform.position.y < PvpBelowHeight;
         WasBelowPvpHeight = CheckPeriodic(
           isBelowPvpHeight, WasBelowPvpHeight,
           "PVP Depth Entry", "PVP Depth Exit"
@@ -1178,6 +1176,7 @@ namespace Oxide.Plugins
 
       public void OnDestroy()
       {
+        CancelInvoke();
         Init();
         Destroy(this);
       }
@@ -1189,7 +1188,6 @@ namespace Oxide.Plugins
         _checkBase = false;
         _checkPvpDelay = false;
         _checkZone = false;
-        ElapsedSeconds = 0.0f;
         ForceUpdate = false;
         _inBaseType = inBaseType;
         _inPvpBubble = false;
