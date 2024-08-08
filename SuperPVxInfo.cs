@@ -19,9 +19,30 @@ namespace Oxide.Plugins
     [PluginReference] private readonly Plugin?
       ZoneManager, DynamicPVP, RaidableBases, AbandonedBases;
 
-    private const string UinameMain = "SuperPVxInfoUI";
+    // NOTE: this is not to be used directly for sending messages, but rather
+    //  for populating the default language dictionary, and for enumerating
+    //  which messages exist
+    private readonly Dictionary<string, string> NotifyMessages = new()
+    {
+      ["Unexpected Exit From Abandoned Or Raidable Base"] =
+        "{0}Left Abandoned/Raidable Base Zone",
+      ["Safe Zone Entry"] =
+        "{0}Entering Safe Zone",
+      ["Safe Zone Exit"] =
+        "{0}Leaving Safe Zone",
+      ["PVP Height Entry"] =
+        "{0}WARNING: Entering Sky/Portal PVP Zone",
+      ["PVP Height Exit"] =
+        "{0}Leaving Sky/Portal PVP Zone",
+      ["PVP Depth Entry"] =
+        "{0}WARNING: Entering Train Tunnels PVP Zone",
+      ["PVP Depth Exit"] =
+        "{0}Leaving Train Tunnels PVP Zone"
+    };
 
     public enum PVxType { PVE, PVP, PVPDelay, SafeZone }
+
+    private const string UinameMain = "SuperPVxInfoUI";
 
     // core methods
 
@@ -41,15 +62,22 @@ namespace Oxide.Plugins
     private void SendCannedMessage(BasePlayer player, string key)
     {
       if (null == _configData ||
-          !_configData.PlayerMessages.TryGetValue(key, out string message) ||
-          string.IsNullOrEmpty(message))
+          !_configData.NotifyEnabled.TryGetValue(key, out bool enabled) ||
+          !enabled)
       {
         return;
       }
-      SendReply(player, message);
+      var message = lang.GetMessage(key, this, player.UserIDString);
+      if (null == message) return;
+      SendReply(player, string.Format(message, _configData.notifyPrefix));
     }
 
     // Oxide API handlers
+
+    protected override void LoadDefaultMessages()
+    {
+        lang.RegisterMessages(NotifyMessages, this);
+    }
 
     private void Init()
     {
@@ -66,9 +94,8 @@ namespace Oxide.Plugins
     {
       if (null != _storedData)
       {
-        var deadMappings = _storedData.Mappings.Where(
-          x => string.IsNullOrEmpty(GetZoneName(x.Key))).Select(
-            x => x.Key).ToArray();
+        var deadMappings = _storedData.Mappings.Select(x => x.Key).Where(
+          y => string.IsNullOrEmpty(GetZoneName(y))).ToArray();
         foreach (var mappingKey in deadMappings)
         {
           PrintWarning($"Purging unknown/obsolete zoneId={mappingKey} from database");
@@ -791,25 +818,11 @@ namespace Oxide.Plugins
       [JsonProperty(PropertyName = "PVP Zone Names (case insensitive substrings / none to disable)")]
       public HashSet<string> PvpZoneManagerNames { get; set; } = new();
 
-      [JsonProperty(PropertyName = "Player Notifications (empty string to disable)")]
-      public Dictionary<string, string> PlayerMessages { get; set; }
-        = new()
-      {
-        ["Unexpected Exit From Abandoned Or Raidable Base"] =
-          "[SuperPVxInfo]: Left Abandoned/Raidable Base Zone",
-        ["Safe Zone Entry"] =
-          "[SuperPVxInfo]: Entering Safe Zone",
-        ["Safe Zone Exit"] =
-          "[SuperPVxInfo]: Leaving Safe Zone",
-        ["PVP Height Entry"] =
-          "[SuperPVxInfo]: WARNING: Entering Sky/Portal PVP Zone",
-        ["PVP Height Exit"] =
-          "[SuperPVxInfo]: Leaving Sky/Portal PVP Zone",
-        ["PVP Depth Entry"] =
-          "[SuperPVxInfo]: WARNING: Entering Train Tunnels PVP Zone",
-        ["PVP Depth Exit"] =
-          "[SuperPVxInfo]: Leaving Train Tunnels PVP Zone"
-      };
+      [JsonProperty(PropertyName = "Player Notification Prefix (empty string to disable)")]
+      public string notifyPrefix = $"[SuperPVxInfo]: ";
+
+      [JsonProperty(PropertyName = "Player Notification Toggles")]
+      public Dictionary<string, bool> NotifyEnabled { get; set; } = new();
 
       [JsonProperty(PropertyName = "UI Settings")]
       public Dictionary<PVxType, UiSettings> UISettings { get; set; } = new()
@@ -855,12 +868,30 @@ namespace Oxide.Plugins
         {
           LoadDefaultConfig();
         }
-        else if (
-          PVxType.PVPDelay == _configData.defaultType ||
-          PVxType.SafeZone == _configData.defaultType)
+        else
         {
-          PrintWarning($"Forcing nonsensical configured default type {_configData.defaultType} to PVE");
-          _configData.defaultType = PVxType.PVE;
+          // only PVE and PVP are allowed as the default server PVx types
+          if (PVxType.PVE != _configData.defaultType &&
+              PVxType.PVP != _configData.defaultType)
+          {
+            PrintWarning($"Forcing nonsensical configured default type {_configData.defaultType} to PVE");
+            _configData.defaultType = PVxType.PVE;
+          }
+          // add default toggle states for any missing notifications
+          foreach (var msgKey in NotifyMessages.Select(x => x.Key).Where(
+            y => !_configData.NotifyEnabled.ContainsKey(y)))
+          {
+            PrintWarning($"Adding new player notification toggle in disabled state: \"{msgKey}\"");
+            _configData.NotifyEnabled.Add(msgKey, false);
+          }
+          // remove toggle states for any unrecognized notifications in config
+          var deadMsgKeys = _configData.NotifyEnabled.Select(x => x.Key).Where(
+            y => !NotifyMessages.ContainsKey(y)).ToArray();
+          foreach (var deadMsgKey in deadMsgKeys)
+          {
+            PrintWarning($"Removing unknown/obsolete player notification toggle: \"{deadMsgKey}\"");
+            _configData.NotifyEnabled.Remove(deadMsgKey);
+          }
         }
       }
       catch (Exception ex)
@@ -868,8 +899,6 @@ namespace Oxide.Plugins
         PrintError($"Exception while loading configuration file:\n{ex}");
         LoadDefaultConfig();
       }
-
-
       SaveConfig();
     }
 
@@ -882,6 +911,12 @@ namespace Oxide.Plugins
       _configData.PveExclusionNames.Add("exclude");
       _configData.PveZoneManagerNames.Add("PVE");
       _configData.PvpZoneManagerNames.Add("PVP");
+      // also need to set default notification toggle states here, as the config
+      //  class doesn't have access to the message dictionary
+      foreach (var msgKvp in NotifyMessages)
+      {
+        _configData.NotifyEnabled.Add(msgKvp.Key, true);
+      }
     }
 
     protected override void SaveConfig()
