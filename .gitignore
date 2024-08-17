@@ -2,4 +2,5 @@
 #  server install)
 *.cs
 !HZWorkbench.cs
+!PlayerBasePvpZones.cs
 !SuperPVxInfo.cs
