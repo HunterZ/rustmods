@@ -1497,7 +1497,7 @@ namespace Oxide.Plugins
       public string prefixNotify = "[PBPZ] ";
 
       [JsonProperty(PropertyName = "Zone exit PvP delay in seconds (0 for none)")]
-      public float pvpDelaySeconds = 300.0f;
+      public float pvpDelaySeconds = 5.0f;
 
       [JsonProperty(PropertyName = "Zone sphere darkness (0 to disable, maximum 10)")]
       public uint sphereDarkness = 0;

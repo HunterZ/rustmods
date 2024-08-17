@@ -1,13 +1,13 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Globalization;
-using System.Linq;
-using Newtonsoft.Json;
+﻿using Newtonsoft.Json;
 using Newtonsoft.Json.Converters;
 using Oxide.Core;
 using Oxide.Core.Libraries.Covalence;
 using Oxide.Core.Plugins;
 using Oxide.Game.Rust.Cui;
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
 using UnityEngine;
 
 namespace Oxide.Plugins
@@ -17,7 +17,7 @@ namespace Oxide.Plugins
   public class SuperPVxInfo : RustPlugin
   {
     [PluginReference] private readonly Plugin?
-      ZoneManager, DynamicPVP, RaidableBases, AbandonedBases;
+      AbandonedBases, DynamicPVP, PlayerBasePvpZones, RaidableBases, ZoneManager;
 
     // NOTE: this is not to be used directly for sending messages, but rather
     //  for populating the default language dictionary, and for enumerating
@@ -154,7 +154,7 @@ namespace Oxide.Plugins
       DestroyUI(player);
     }
 
-    private void OnPlayerRespawn(BasePlayer player, BasePlayer.SpawnPoint spawnPoint)
+    private void OnPlayerRespawned(BasePlayer player)
     {
       NextTick(() =>
       {
@@ -400,6 +400,12 @@ namespace Oxide.Plugins
     //  can't be relied upon for some reason
     private bool IsPlayerInPVPDelay(ulong playerID)
     {
+      if (PlayerBasePvpZones != null && !string.IsNullOrEmpty(Convert.ToString(
+          PlayerBasePvpZones.Call("OnPlayerBasePvpDelayQuery", playerID))))
+      {
+        return true;
+      }
+
       if (DynamicPVP != null && Convert.ToBoolean(
           DynamicPVP.Call("IsPlayerInPVPDelay", playerID)))
       {
@@ -646,6 +652,26 @@ namespace Oxide.Plugins
         {
           SetPvpBubble(player, false);
         }
+      });
+    }
+
+    // PlayerBasePvpZones hook handlers
+
+    private void OnPlayerBasePvpDelayStart(ulong playerId, string zoneId)
+    {
+      NextTick(() =>
+      {
+        var player = BasePlayer.FindByID(playerId);
+        SetPvpDelay(player, true);
+      });
+    }
+
+    private void OnPlayerBasePvpDelayStop(ulong playerId, string zoneId)
+    {
+      NextTick(() =>
+      {
+        var player = BasePlayer.FindByID(playerId);
+        SetPvpDelay(player, false);
       });
     }
 
