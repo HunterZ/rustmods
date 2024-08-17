@@ -1018,17 +1018,6 @@ namespace Oxide.Plugins
       _pvpDelayTimers.TryGetValue(playerID, out var delayData) ?
         delayData.Item2 : string.Empty;
 
-    // called when a player respawns after dying
-    private void OnPlayerRespawned(BasePlayer player)
-    {
-      var playerID = player.userID.Get();
-
-      if (!playerID.IsSteamId()) return;
-
-      // either the player is in a zone or not, so remove any active PvP delay
-      PlayerBasePvpDelayStop(playerID);
-    }
-
     #endregion Oxide/RustPlugin API/Hooks
 
     #region ZoneManager Integration
@@ -1047,10 +1036,11 @@ namespace Oxide.Plugins
       _zoneIdPrefix + networkableID.ToString();
 
     // get options array for ZoneManager zone creation
-    private string[] GetZoneOptions(float radius) =>
+    private string[] GetZoneOptions(string zoneName, float radius) =>
       _configData.zoneMessages ?
         new[]
         {
+          "name", zoneName,
           "radius", radius.ToString(),
           "enter_message", lang.GetMessage("MessageZoneEnter", this),
           "leave_message", lang.GetMessage("MessageZoneExit", this)
@@ -1102,7 +1092,8 @@ namespace Oxide.Plugins
       if (null == toolCupboardID) return false;
       return ZM_CreateOrUpdateZone(
         GetZoneID((NetworkableId)toolCupboardID),
-        GetZoneOptions(buildingData.Radius), buildingData.Location);
+        GetZoneOptions(_zoneIdPrefix + "building", buildingData.Radius),
+        buildingData.Location);
     }
 
     // create or update a ZoneManager zone for given shelter record
@@ -1117,7 +1108,8 @@ namespace Oxide.Plugins
       if (null == legacyShelterID) return false;
       return ZM_CreateOrUpdateZone(
         GetZoneID((NetworkableId)legacyShelterID),
-        GetZoneOptions(shelterData.Radius), shelterData.Location);
+        GetZoneOptions(_zoneIdPrefix + "shelter", shelterData.Radius),
+        shelterData.Location);
     }
 
     // create or update a ZoneManager zone for given tugboat record
@@ -1132,7 +1124,9 @@ namespace Oxide.Plugins
       if (null == tugboatID) return false;
       var zoneID = GetZoneID((NetworkableId)tugboatID);
       if (!ZM_CreateOrUpdateZone(
-        zoneID, GetZoneOptions(tugboatData.Radius), tugboatData.Location))
+        zoneID,
+        GetZoneOptions(_zoneIdPrefix + "tugboat", tugboatData.Radius),
+        tugboatData.Location))
       {
         return false;
       }
@@ -1221,6 +1215,9 @@ namespace Oxide.Plugins
         // player may still be in an overlapping base zone
         if (zones.Count > 0) stillInZone = true;
       }
+
+      // abort if player is asleep or dead
+      if (player.IsDead() || player.IsSleeping()) return;
 
       // (re)start pvp delay, but only if not still in a base zone
       if (!stillInZone) PlayerBasePvpDelayStart(playerID, zoneID);
