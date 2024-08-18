@@ -1,0 +1,10 @@
+{
+  "dotnet.defaultSolution": "RustPlugins.sln",
+  "dotnet.backgroundAnalysis.analyzerDiagnosticsScope": "fullSolution",
+  "dotnet.server.useOmnisharp": true,
+  "omnisharp.useModernNet": false,
+  "launch": {
+    "configurations": [],
+    "compounds": []
+  }
+}
