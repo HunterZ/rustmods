@@ -11,7 +11,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-  [Info("Player Base PvP Zones", "HunterZ", "1.0.0")]
+  [Info("Player Base PvP Zones", "HunterZ", "1.0.1")]
   [Description("Maintains Zone Manager / TruePVE exclusion zones around player bases")]
   public class PlayerBasePvpZones : RustPlugin
   {
@@ -548,7 +548,8 @@ namespace Oxide.Plugins
 
       // create + record new tugboat data record
       var tugboatData = new TugboatData(
-        tugboat, _configData.tugboat.radius, _configData.tugboat.global);
+        tugboat, _configData.tugboat.radius,
+        _configData.tugboat.forceNetworking, _configData.tugboat.forceBuoyancy);
       _tugboatData.Add(tugboatID, tugboatData);
 
       // create zone
@@ -1418,24 +1419,29 @@ namespace Oxide.Plugins
       // constructor - requires a base center point, and then Update() can be
       //  used to move it and/or set a radius
       public TugboatData(
-        VehiclePrivilege tugboat, float radius = 1.0f, bool global = false)
+        VehiclePrivilege tugboat, float radius = 1.0f,
+        bool? forceNetworking = null, bool forceBuoyancy = false)
         : base(tugboat.GetParentEntity().CenterPoint(), radius)
       {
         Tugboat = tugboat;
         var tugboatParent = tugboat.GetParentEntity();
         if (null == tugboatParent) return;
-        if (global && SphereDarkness > 0)
+        if (null != forceNetworking && SphereDarkness > 0)
         {
           // this keeps the spheres from disappearing by also keeping the
           //  tugboat from de-rendering (credit: bmgjet & Karuza)
-          tugboatParent.EnableGlobalBroadcast(true);
+          tugboatParent.EnableGlobalBroadcast((bool)forceNetworking);
           // ...and this keeps the tugboats from sinking and popping back up
-          // (credit: bmgjet)
-          var buoyancy = tugboatParent.GetComponent<Buoyancy>();
-          if (buoyancy != null)
+          // (credit: bmgjet for idea + code)
+          // NOTE: Ryan says this may not be needed anymore?
+          if (forceBuoyancy)
           {
-            buoyancy.CancelInvoke("CheckSleepState");
-            buoyancy.Invoke(new Action(buoyancy.Wake), 0f); //Force Awake
+            var buoyancy = tugboatParent.GetComponent<Buoyancy>();
+            if (buoyancy != null)
+            {
+              buoyancy.CancelInvoke("CheckSleepState");
+              buoyancy.Invoke(new Action(buoyancy.Wake), 0f); //Force Awake
+            }
           }
         }
         // parent spheres to the tugboat
@@ -1443,6 +1449,9 @@ namespace Oxide.Plugins
         {
           sphere.ServerPosition = Vector3.zero;
           sphere.SetParent(tugboatParent);
+          // match networking with parent (avoids need to force global tugboats)
+          // (credit: WhiteThunder)
+          sphere.EnableGlobalBroadcast(tugboatParent.globalBroadcast);
         }
       }
 
@@ -1535,8 +1544,11 @@ namespace Oxide.Plugins
 
     private sealed class TugboatConfigData
     {
-      [JsonProperty(PropertyName = "Tugboat global networking (if spheres enabled)")]
-      public bool global = true;
+      [JsonProperty(PropertyName = "Tugboat force global rendering on/off when spheres enabled (null=skip)")]
+      public bool? forceNetworking = null;
+
+      [JsonProperty(PropertyName = "Tugboat force enable buoyancy when forcing global rendering")]
+      public bool forceBuoyancy = false;
 
       [JsonProperty(PropertyName = "Tugboat zone radius")]
       public float radius = 32.0f;
