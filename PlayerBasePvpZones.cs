@@ -1,6 +1,5 @@
 ﻿// Requires: ZoneManager
 
-using Facepunch.Nexus.Logging;
 using Newtonsoft.Json;
 using Oxide.Core;
 using Oxide.Core.Plugins;
@@ -11,7 +10,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-  [Info("Player Base PvP Zones", "HunterZ", "1.0.1")]
+  [Info("Player Base PvP Zones", "HunterZ", "1.0.2")]
   [Description("Maintains Zone Manager / TruePVE exclusion zones around player bases")]
   public class PlayerBasePvpZones : RustPlugin
   {
