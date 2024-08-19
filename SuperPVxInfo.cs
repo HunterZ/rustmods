@@ -12,12 +12,13 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-  [Info("Super PVx Info", "HunterZ", "1.0.1")]
+  [Info("Super PVx Info", "HunterZ", "1.0.2")]
   [Description("Displays PvE/PvP/etc. status on player's HUD")]
   public class SuperPVxInfo : RustPlugin
   {
     [PluginReference] private readonly Plugin?
-      AbandonedBases, DynamicPVP, PlayerBasePvpZones, RaidableBases, ZoneManager;
+      AbandonedBases, DynamicPVP, PlayerBasePvpZones, PopupNotifications,
+      RaidableBases, ZoneManager;
 
     // NOTE: this is not to be used directly for sending messages, but rather
     //  for populating the default language dictionary, and for enumerating
@@ -62,14 +63,25 @@ namespace Oxide.Plugins
     private void SendCannedMessage(BasePlayer player, string key)
     {
       if (null == _configData ||
-          !_configData.NotifyEnabled.TryGetValue(key, out bool enabled) ||
+          !_configData.NotifySettings.Enabled.TryGetValue(
+            key, out bool enabled) ||
           !enabled)
       {
         return;
       }
       var message = lang.GetMessage(key, this, player.UserIDString);
       if (null == message) return;
-      SendReply(player, string.Format(message, _configData.notifyPrefix));
+      if (_configData.NotifySettings.ChatEnabled)
+      {
+        SendReply(player, string.Format(
+          message, _configData.NotifySettings.ChatPrefix));
+      }
+      if (_configData.NotifySettings.PopupNotificationsEnabled &&
+          null != PopupNotifications)
+      {
+        PopupNotifications.Call("CreatePopupNotification", string.Format(
+          message, _configData.NotifySettings.PopupNotificationsPrefix));
+      }
     }
 
     // Oxide API handlers
@@ -118,6 +130,12 @@ namespace Oxide.Plugins
       foreach (var player in BasePlayer.activePlayerList)
       {
         OnPlayerConnected(player);
+      }
+
+      if (true ==_configData?.NotifySettings.PopupNotificationsEnabled &&
+          null == PopupNotifications)
+      {
+        PrintWarning("Notify via PopupNotifications enabled, but required plugin is missing");
       }
     }
 
@@ -736,6 +754,24 @@ namespace Oxide.Plugins
 
     // config file handling
 
+    private sealed class NotificationSettings
+    {
+      [JsonProperty(PropertyName = "Player Notification Toggles")]
+      public Dictionary<string, bool> Enabled { get; set; } = new();
+
+      [JsonProperty(PropertyName = "Notify via chat")]
+      public bool ChatEnabled { get; set; } = false;
+
+      [JsonProperty(PropertyName = "Chat notification prefix (empty string to disable)")]
+      public string ChatPrefix { get; set; } = "[SuperPVxInfo]: ";
+
+      [JsonProperty(PropertyName = "Notify via PopupNotifications")]
+      public bool PopupNotificationsEnabled { get; set; } = true;
+
+      [JsonProperty(PropertyName = "PopupNotifications prefix (empty string to disable)")]
+      public string PopupNotificationsPrefix { get; set; } = "";
+    }
+
     private sealed class UiSettings
     {
       [JsonProperty(PropertyName = "Min Anchor")]
@@ -783,6 +819,7 @@ namespace Oxide.Plugins
       {
         get
         {
+          // generate JSON for a PVxType on first use, and cache it in _json
           if (string.IsNullOrEmpty(_json))
           {
             _json = new CuiElementContainer
@@ -859,11 +896,8 @@ namespace Oxide.Plugins
       [JsonProperty(PropertyName = "PVP Zone Names (case insensitive substrings / none to disable)")]
       public HashSet<string> PvpZoneManagerNames { get; set; } = new();
 
-      [JsonProperty(PropertyName = "Player Notification Prefix (empty string to disable)")]
-      public string notifyPrefix = $"[SuperPVxInfo]: ";
-
-      [JsonProperty(PropertyName = "Player Notification Toggles")]
-      public Dictionary<string, bool> NotifyEnabled { get; set; } = new();
+      [JsonProperty(PropertyName = "Notification Settings")]
+      public NotificationSettings NotifySettings {get; set; } = new();
 
       [JsonProperty(PropertyName = "UI Settings")]
       public Dictionary<PVxType, UiSettings> UISettings { get; set; } = new()
@@ -920,18 +954,18 @@ namespace Oxide.Plugins
           }
           // add default toggle states for any missing notifications
           foreach (var msgKey in NotifyMessages.Select(x => x.Key).Where(
-            y => !_configData.NotifyEnabled.ContainsKey(y)))
+            y => !_configData.NotifySettings.Enabled.ContainsKey(y)))
           {
             PrintWarning($"Adding new player notification toggle in disabled state: \"{msgKey}\"");
-            _configData.NotifyEnabled.Add(msgKey, false);
+            _configData.NotifySettings.Enabled.Add(msgKey, false);
           }
           // remove toggle states for any unrecognized notifications in config
-          var deadMsgKeys = _configData.NotifyEnabled.Select(x => x.Key).Where(
+          var deadMsgKeys = _configData.NotifySettings.Enabled.Select(x => x.Key).Where(
             y => !NotifyMessages.ContainsKey(y)).ToArray();
           foreach (var deadMsgKey in deadMsgKeys)
           {
             PrintWarning($"Removing unknown/obsolete player notification toggle: \"{deadMsgKey}\"");
-            _configData.NotifyEnabled.Remove(deadMsgKey);
+            _configData.NotifySettings.Enabled.Remove(deadMsgKey);
           }
         }
       }
@@ -956,7 +990,7 @@ namespace Oxide.Plugins
       //  class doesn't have access to the message dictionary
       foreach (var msgKvp in NotifyMessages)
       {
-        _configData.NotifyEnabled.Add(msgKvp.Key, true);
+        _configData.NotifySettings.Enabled.Add(msgKvp.Key, true);
       }
     }
 
