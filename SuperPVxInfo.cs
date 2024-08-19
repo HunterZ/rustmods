@@ -756,20 +756,20 @@ namespace Oxide.Plugins
 
     private sealed class NotificationSettings
     {
-      [JsonProperty(PropertyName = "Player Notification Toggles")]
-      public Dictionary<string, bool> Enabled { get; set; } = new();
-
-      [JsonProperty(PropertyName = "Notify via chat")]
+      [JsonProperty(PropertyName = "Chat notify enabled")]
       public bool ChatEnabled { get; set; } = false;
 
-      [JsonProperty(PropertyName = "Chat notification prefix (empty string to disable)")]
+      [JsonProperty(PropertyName = "Chat notify prefix (empty string to disable)")]
       public string ChatPrefix { get; set; } = "[SuperPVxInfo]: ";
 
-      [JsonProperty(PropertyName = "Notify via PopupNotifications")]
+      [JsonProperty(PropertyName = "PopupNotifications notify enabled")]
       public bool PopupNotificationsEnabled { get; set; } = true;
 
-      [JsonProperty(PropertyName = "PopupNotifications prefix (empty string to disable)")]
+      [JsonProperty(PropertyName = "PopupNotifications notify prefix (empty string to disable)")]
       public string PopupNotificationsPrefix { get; set; } = "";
+
+      [JsonProperty(PropertyName = "Individual Notification Toggles")]
+      public Dictionary<string, bool> Enabled { get; set; } = new();
     }
 
     private sealed class UiSettings
