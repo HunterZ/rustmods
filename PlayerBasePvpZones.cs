@@ -1,16 +1,16 @@
 ﻿// Requires: ZoneManager
 
+using Facepunch;
 using Newtonsoft.Json;
 using Oxide.Core;
 using Oxide.Core.Plugins;
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using UnityEngine;
 
 namespace Oxide.Plugins
 {
-  [Info("Player Base PvP Zones", "HunterZ", "1.0.2")]
+  [Info("Player Base PvP Zones", "HunterZ", "1.0.3")]
   [Description("Maintains Zone Manager / TruePVE exclusion zones around player bases")]
   public class PlayerBasePvpZones : RustPlugin
   {
@@ -20,8 +20,7 @@ namespace Oxide.Plugins
     private ConfigData _configData = new();
 
     // active building zones by TC ID
-    private readonly Dictionary<NetworkableId, BuildingData> _buildingData =
-      new();
+    private Dictionary<NetworkableId, BuildingData> _buildingData = new();
 
     // active building zone check delay timers by TC ID
     private Dictionary<NetworkableId, Timer> _buildingCheckTimers = new();
@@ -43,8 +42,7 @@ namespace Oxide.Plugins
     private readonly Dictionary<ulong, (Timer, string)> _pvpDelayTimers = new();
 
     // active legacy shelter zones by shelter ID
-    private readonly Dictionary<NetworkableId, ShelterData> _shelterData =
-      new();
+    private Dictionary<NetworkableId, ShelterData> _shelterData = new();
 
     // legacy shelter zone creation delay timers by shelter ID
     private Dictionary<NetworkableId, Timer> _shelterCreateTimers = new();
@@ -53,8 +51,7 @@ namespace Oxide.Plugins
     private Dictionary<NetworkableId, Timer> _shelterDeleteTimers = new();
 
     // active tugboat zones by tugboat ID
-    private readonly Dictionary<NetworkableId, TugboatData> _tugboatData =
-      new();
+    private Dictionary<NetworkableId, TugboatData> _tugboatData = new();
 
     // tugboat zone deletion delay timers by tugboat ID
     private Dictionary<NetworkableId, Timer> _tugboatDeleteTimers = new();
@@ -709,10 +706,9 @@ namespace Oxide.Plugins
       Puts($"OnServerInitialized():  Created {_shelterData.Count} shelter zones...");
 
       // create zones immediately for all existing tugboats
-      foreach (var tugboat in
-        BaseNetworkable.serverEntities.OfType<VehiclePrivilege>())
+      foreach (var serverEntity in BaseNetworkable.serverEntities)
       {
-        if (IsValid(tugboat))
+        if (serverEntity is VehiclePrivilege tugboat && IsValid(tugboat))
         {
           CreateTugboatData(tugboat);
         }
@@ -722,13 +718,28 @@ namespace Oxide.Plugins
       Puts("OnServerInitialized(): ...Startup complete.");
     }
 
+    private void DestroyBaseDataDictionary<T>(
+      ref Dictionary<NetworkableId, T> dict, Action<NetworkableId> deleter)
+    {
+      var networkableIds = Pool.GetList<NetworkableId>();
+      foreach (var (networkableId, _) in dict)
+      {
+        networkableIds.Add(networkableId);
+      }
+      foreach(var networkableId in networkableIds)
+      {
+        deleter(networkableId);
+      }
+      dict.Clear();
+      Pool.FreeList(ref networkableIds);
+    }
+
     private void DestroyTimerDictionary<T>(
       ref Dictionary<T, Timer> dict, string desc)
     {
       if (dict.Count <= 0) return;
       Puts($"Unload():  Destroying {dict.Count} {desc} timer(s)...");
       foreach (var (_, dTimer) in dict) dTimer?.Destroy();
-      dict.Clear();
     }
 
     private void Unload()
@@ -737,12 +748,7 @@ namespace Oxide.Plugins
       if (_buildingData.Count > 0)
       {
         Puts($"Unload():  Destroying {_buildingData.Count} building zone records...");
-        // this uses Linq but is a one-time thing
-        foreach (var toolCupboardID in _buildingData.Keys.ToArray())
-        {
-          DeleteBuildingData(toolCupboardID);
-        }
-        _buildingData.Clear();
+        DestroyBaseDataDictionary(ref _buildingData, DeleteBuildingData);
       }
       DestroyTimerDictionary(ref _buildingCheckTimers, "building check");
       DestroyTimerDictionary(ref _buildingCreateTimers, "building creation");
@@ -754,7 +760,7 @@ namespace Oxide.Plugins
         {
           var zones = playerZoneData.Value;
           if (null == zones) continue;
-          Facepunch.Pool.Free(ref zones);
+          Pool.Free(ref zones);
         }
         _playerZones.Clear();
       }
@@ -767,24 +773,14 @@ namespace Oxide.Plugins
       if (_shelterData.Count > 0)
       {
         Puts($"Unload():  Destroying {_shelterData.Count} shelter zone records...");
-        // this uses Linq but is a one-time thing
-        foreach (var legacyShelterID in _shelterData.Keys.ToArray())
-        {
-          DeleteShelterData(legacyShelterID);
-        }
-        _shelterData.Clear();
+        DestroyBaseDataDictionary(ref _shelterData, DeleteShelterData);
       }
       DestroyTimerDictionary(ref _shelterCreateTimers, "shelter creation");
       DestroyTimerDictionary(ref _shelterDeleteTimers, "shelter deletion");
       if (_tugboatData.Count > 0)
       {
         Puts($"Unload():  Destroying {_tugboatData.Count} tugboat zone records...");
-        // this uses Linq but is a one-time thing
-        foreach (var tugboatID in _tugboatData.Keys.ToArray())
-        {
-          DeleteTugboatData(tugboatID);
-        }
-        _tugboatData.Clear();
+        DestroyBaseDataDictionary(ref _tugboatData, DeleteTugboatData);
       }
       DestroyTimerDictionary(ref _tugboatDeleteTimers, "tugboat deletion");
 
@@ -1182,7 +1178,7 @@ namespace Oxide.Plugins
       if (!_playerZones.TryGetValue(playerID, out var zones))
       {
         // no zone record - create one
-        zones = Facepunch.Pool.Get<HashSet<NetworkableId>>();
+        zones = Pool.Get<HashSet<NetworkableId>>();
         _playerZones.Add(playerID, zones);
       }
       zones.Add((NetworkableId)networkableId);
@@ -1306,7 +1302,7 @@ namespace Oxide.Plugins
         Radius = radius;
         // sphere darkness is accomplished by creating multiple sphers (seems
         //  silly but appears to perform okay)
-        _sphereList = Facepunch.Pool.GetList<SphereEntity>();
+        _sphereList = Pool.GetList<SphereEntity>();
         CreateSpheres();
       }
 
@@ -1344,7 +1340,7 @@ namespace Oxide.Plugins
       {
         ClearEntity(true);
         DestroySpheres();
-        Facepunch.Pool.FreeList(ref _sphereList);
+        Pool.FreeList(ref _sphereList);
       }
 
       // set/update base location and/or radius

@@ -1,4 +1,5 @@
-﻿using Newtonsoft.Json;
+﻿using Facepunch;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Converters;
 using Oxide.Core;
 using Oxide.Core.Libraries.Covalence;
@@ -12,7 +13,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-  [Info("Super PVx Info", "HunterZ", "1.0.2")]
+  [Info("Super PVx Info", "HunterZ", "1.0.3")]
   [Description("Displays PvE/PvP/etc. status on player's HUD")]
   public class SuperPVxInfo : RustPlugin
   {
@@ -114,17 +115,19 @@ namespace Oxide.Plugins
     {
       if (null != _storedData)
       {
-        var deadMappings = _storedData.Mappings.Select(x => x.Key).Where(
-          y => string.IsNullOrEmpty(GetZoneName(y))).ToArray();
-        foreach (var mappingKey in deadMappings)
+        // purge any mappings that Zone Manager doesn't recognize
+        var deadZoneIds = Pool.GetList<string>();
+        foreach (var (zoneId, _) in _storedData.Mappings)
         {
-          PrintWarning($"Purging unknown/obsolete zoneId={mappingKey} from database");
-          _storedData.Mappings.Remove(mappingKey);
+          if (!ZM_CheckZoneID(zoneId)) deadZoneIds.Add(zoneId);
         }
-        if (deadMappings.Any())
+        foreach (var deadZoneId in deadZoneIds)
         {
-          SaveData();
+          PrintWarning($"Purging unknown/obsolete zoneId={deadZoneId} from database");
+          _storedData.Mappings.Remove(deadZoneId);
         }
+        if (deadZoneIds.Count > 0) SaveData();
+        Pool.FreeList(ref deadZoneIds);
       }
 
       foreach (var player in BasePlayer.activePlayerList)
@@ -190,30 +193,35 @@ namespace Oxide.Plugins
 
     // TruePVE hook handlers
 
-    private void AddOrUpdateMapping(string key, string ruleset)
+    private void AddOrUpdateMapping(string zoneId, string ruleset)
     {
       if (null == _storedData) return;
-      if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(ruleset))
+      if (string.IsNullOrEmpty(zoneId) || string.IsNullOrEmpty(ruleset))
       {
         return;
       }
 
-      _storedData.Mappings[key] = ruleset;
+      _storedData.Mappings[zoneId] = ruleset;
       SaveData();
     }
 
-    private void RemoveMapping(string key)
+    private void RemoveMapping(string zoneId)
     {
       if (null == _storedData) return;
-      if (string.IsNullOrEmpty(key)) return;
+      if (string.IsNullOrEmpty(zoneId)) return;
 
-      _storedData.Mappings.Remove(key);
+      _storedData.Mappings.Remove(zoneId);
       SaveData();
     }
 
     // ZoneManager helper methods
 
-    private string[] GetPlayerZoneIDs(BasePlayer player)
+    bool ZM_CheckZoneID(string zoneId)
+    {
+      return ZoneManager?.Call("CheckZoneID", zoneId) is string s && null != s;
+    }
+
+    private string[] ZM_GetPlayerZoneIDs(BasePlayer player)
     {
       if (ZoneManager?.Call("GetPlayerZoneIDs", player) is string[] s)
       {
@@ -261,9 +269,9 @@ namespace Oxide.Plugins
 
         // check Zone Manager flags
 #pragma warning disable CS8604 // Possible null reference argument.
-        if (GetZoneFlag(zoneId, "pvpgod"))
+        if (ZM_GetZoneFlag(zoneId, "pvpgod"))
         {
-          if (GetZoneFlag(zoneId, "pvegod"))
+          if (ZM_GetZoneFlag(zoneId, "pvegod"))
 #pragma warning restore CS8604 // Possible null reference argument.
           {
             // no-PvP *and* no-PvE => treat as safe zone
@@ -285,16 +293,16 @@ namespace Oxide.Plugins
       float smallestRadius = float.MaxValue;
       string? smallestId = null;
       string? smallestName = null;
-      var zoneIDs = GetPlayerZoneIDs(player);
+      var zoneIDs = ZM_GetPlayerZoneIDs(player);
       foreach (var zoneId in zoneIDs)
       {
         if (string.IsNullOrEmpty(zoneId)) continue;
-        var zoneName = GetZoneName(zoneId);
+        var zoneName = ZM_GetZoneName(zoneId);
 
         // get whichever of 2D zone size or radius is greater than zero
-        var zoneMagnitude2D = GetZoneSize(zoneId).Magnitude2D();
+        var zoneMagnitude2D = ZM_GetZoneSize(zoneId).Magnitude2D();
         float zoneRadius = zoneMagnitude2D < float.Epsilon ?
-            GetZoneRadius(zoneId) : zoneMagnitude2D;
+            ZM_GetZoneRadius(zoneId) : zoneMagnitude2D;
         if (zoneRadius < float.Epsilon) continue;
         // if zone is the smallest we've seen, record it as such
         if (zoneRadius < smallestRadius)
@@ -308,7 +316,7 @@ namespace Oxide.Plugins
       return (smallestId, smallestName);
     }
 
-    private bool GetZoneFlag(string zoneId, string zoneFlag)
+    private bool ZM_GetZoneFlag(string zoneId, string zoneFlag)
     {
       if (ZoneManager?.Call("HasFlag", zoneId, zoneFlag) is bool flagState)
       {
@@ -317,7 +325,7 @@ namespace Oxide.Plugins
       return false;
     }
 
-    private string GetZoneName(string zoneId)
+    private string ZM_GetZoneName(string zoneId)
     {
       if (ZoneManager?.Call("GetZoneName", zoneId) is string zoneName)
       {
@@ -326,7 +334,7 @@ namespace Oxide.Plugins
       return "";
     }
 
-    private float GetZoneRadius(string zoneId)
+    private float ZM_GetZoneRadius(string zoneId)
     {
       if (ZoneManager?.Call("GetZoneRadius", zoneId) is float zoneRadius)
       {
@@ -335,7 +343,7 @@ namespace Oxide.Plugins
       return 0.0f;
     }
 
-    private Vector3 GetZoneSize(string zoneId)
+    private Vector3 ZM_GetZoneSize(string zoneId)
     {
       if (ZoneManager?.Call("GetZoneSize", zoneId) is Vector3 zoneSize)
       {
@@ -400,12 +408,14 @@ namespace Oxide.Plugins
           // && rbEvents.Exists(x => x.intruders.Contains(player))
       )
       {
-        // get subset of bases (probably 0 or 1) that player is in
-        var rbPlayerEvents = rbEvents.Where(x => x.intruders.Contains(player));
-        if (rbPlayerEvents.Any())
+        // look for a base that the player is in
+        foreach (var (_, _, allowPVP, _, _, _, _, _, _, _, intruders, _, _, _, _, _, _) in rbEvents)
         {
-          // base found; return its type
-          return rbPlayerEvents.First().allowPVP ? PVxType.PVP : PVxType.PVE;
+          if (intruders.Contains(player))
+          {
+            // base found; return its type
+            return allowPVP ? PVxType.PVP : PVxType.PVE;
+          }
         }
       }
 
@@ -960,13 +970,17 @@ namespace Oxide.Plugins
             _configData.NotifySettings.Enabled.Add(msgKey, false);
           }
           // remove toggle states for any unrecognized notifications in config
-          var deadMsgKeys = _configData.NotifySettings.Enabled.Select(x => x.Key).Where(
-            y => !NotifyMessages.ContainsKey(y)).ToArray();
+          var deadMsgKeys = Pool.GetList<string>();
+          foreach (var (key, _) in _configData.NotifySettings.Enabled)
+          {
+            if (!NotifyMessages.ContainsKey(key)) deadMsgKeys.Add(key);
+          }
           foreach (var deadMsgKey in deadMsgKeys)
           {
             PrintWarning($"Removing unknown/obsolete player notification toggle: \"{deadMsgKey}\"");
             _configData.NotifySettings.Enabled.Remove(deadMsgKey);
           }
+          Pool.FreeList(ref deadMsgKeys);
         }
       }
       catch (Exception ex)
