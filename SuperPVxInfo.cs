@@ -13,7 +13,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-  [Info("Super PVx Info", "HunterZ", "1.0.3")]
+  [Info("Super PVx Info", "HunterZ", "1.0.4")]
   [Description("Displays PvE/PvP/etc. status on player's HUD")]
   public class SuperPVxInfo : RustPlugin
   {
@@ -80,8 +80,11 @@ namespace Oxide.Plugins
       if (_configData.NotifySettings.PopupNotificationsEnabled &&
           null != PopupNotifications)
       {
-        PopupNotifications.Call("CreatePopupNotification", string.Format(
-          message, _configData.NotifySettings.PopupNotificationsPrefix));
+        PopupNotifications.Call(
+          "CreatePopupNotification",
+          string.Format(
+            message, _configData.NotifySettings.PopupNotificationsPrefix),
+          player);
       }
     }
 
