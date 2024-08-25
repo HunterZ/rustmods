@@ -13,7 +13,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-  [Info("Super PVx Info", "HunterZ", "1.1.0")]
+  [Info("Super PVx Info", "HunterZ", "1.1.1")]
   [Description("Displays PvE/PvP/etc. status on player's HUD")]
   public class SuperPVxInfo : RustPlugin
   {
@@ -1050,13 +1050,22 @@ namespace Oxide.Plugins
       public bool forceUpdates = true;
 
       [JsonProperty(PropertyName = "PVE Exclusion Mapping Names (case insensitive substrings / none to disable)")]
-      public HashSet<string> PveExclusionNames { get; set; } = new();
+      public HashSet<string> PveExclusionNames { get; set; } = new()
+      {
+        "exclude"
+      };
 
       [JsonProperty(PropertyName = "PVE Zone Names (case insensitive substrings / none to disable)")]
-      public HashSet<string> PveZoneManagerNames { get; set; } = new();
+      public HashSet<string> PveZoneManagerNames { get; set; } = new()
+      {
+        "PVE"
+      };
 
       [JsonProperty(PropertyName = "PVP Zone Names (case insensitive substrings / none to disable)")]
-      public HashSet<string> PvpZoneManagerNames { get; set; } = new();
+      public HashSet<string> PvpZoneManagerNames { get; set; } = new()
+      {
+        "PVP"
+      };
 
       [JsonProperty(PropertyName = "Notification Settings")]
       public NotificationSettings NotifySettings {get; set; } = new();
