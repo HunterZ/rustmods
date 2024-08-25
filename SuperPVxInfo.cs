@@ -13,18 +13,24 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-  [Info("Super PVx Info", "HunterZ", "1.0.4")]
+  [Info("Super PVx Info", "HunterZ", "1.1.0")]
   [Description("Displays PvE/PvP/etc. status on player's HUD")]
   public class SuperPVxInfo : RustPlugin
   {
+    #region Plugin Data
+
+    public enum PVxType { PVE, PVP, PVPDelay, SafeZone }
+
     [PluginReference] private readonly Plugin?
       AbandonedBases, DynamicPVP, PlayerBasePvpZones, PopupNotifications,
-      RaidableBases, ZoneManager;
+      RaidableBases, SimpleStatus, ZoneManager;
+
+    private ConfigData? _configData;
 
     // NOTE: this is not to be used directly for sending messages, but rather
     //  for populating the default language dictionary, and for enumerating
     //  which messages exist
-    private readonly Dictionary<string, string> NotifyMessages = new()
+    private readonly Dictionary<string, string> _notifyMessages = new()
     {
       ["Unexpected Exit From Abandoned Or Raidable Base"] =
         "{0}Left Abandoned/Raidable Base Zone",
@@ -42,11 +48,13 @@ namespace Oxide.Plugins
         "{0}Leaving Train Tunnels PVP Zone"
     };
 
-    public enum PVxType { PVE, PVP, PVPDelay, SafeZone }
+    private StoredData? _storedData;
 
-    private const string UinameMain = "SuperPVxInfoUI";
+    private const string _uiName = "SuperPVxInfoUI";
 
-    // core methods
+    #endregion Plugin Data
+
+    #region Utility Methods
 
     private bool IsValidPlayer(BasePlayer player, bool checkConnected)
     {
@@ -88,11 +96,13 @@ namespace Oxide.Plugins
       }
     }
 
-    // Oxide API handlers
+    #endregion Utility Methods
+
+    #region Oxide Methods
 
     protected override void LoadDefaultMessages()
     {
-        lang.RegisterMessages(NotifyMessages, this);
+        lang.RegisterMessages(_notifyMessages, this);
     }
 
     private void Init()
@@ -133,6 +143,9 @@ namespace Oxide.Plugins
         Pool.FreeList(ref deadZoneIds);
       }
 
+      // setup SimpleStatus integration if appropriate
+      SS_CreateStatuses();
+
       foreach (var player in BasePlayer.activePlayerList)
       {
         OnPlayerConnected(player);
@@ -149,7 +162,7 @@ namespace Oxide.Plugins
     {
       foreach (var player in BasePlayer.activePlayerList)
       {
-        OnPlayerDisconnected(player, UinameMain);
+        OnPlayerDisconnected(player, _uiName);
       }
       PlayerWatcher.Instance = null;
     }
@@ -194,7 +207,9 @@ namespace Oxide.Plugins
       });
     }
 
-    // TruePVE hook handlers
+    #endregion Oxide Methods
+
+    #region TruePVE Hook Handlers
 
     private void AddOrUpdateMapping(string zoneId, string ruleset)
     {
@@ -217,7 +232,11 @@ namespace Oxide.Plugins
       SaveData();
     }
 
-    // ZoneManager helper methods
+    #endregion TruePVE Hook Handlers
+
+    #region ZoneManager Integration
+
+    #region ZoneManager Utilities
 
     bool ZM_CheckZoneID(string zoneId)
     {
@@ -271,11 +290,9 @@ namespace Oxide.Plugins
         }
 
         // check Zone Manager flags
-#pragma warning disable CS8604 // Possible null reference argument.
         if (ZM_GetZoneFlag(zoneId, "pvpgod"))
         {
           if (ZM_GetZoneFlag(zoneId, "pvegod"))
-#pragma warning restore CS8604 // Possible null reference argument.
           {
             // no-PvP *and* no-PvE => treat as safe zone
             return PVxType.SafeZone;
@@ -379,7 +396,9 @@ namespace Oxide.Plugins
       });
     }
 
-    // ZoneManager hook handlers
+    #endregion ZoneManager Utilities
+
+    #region ZoneManager Hook Handlers
 
     private void OnEnterZone(string zoneId, BasePlayer player)
     {
@@ -392,8 +411,11 @@ namespace Oxide.Plugins
       CheckZone(player);
     }
 
-    // DynamicPVP / RaidableBases / AbandonedBases / CargoTrainTunnel helper
-    //  methods
+    #endregion ZoneManager Hook Handlers
+
+    #endregion ZoneManager Integration
+
+    #region PVP Plugins Integration
 
     // check whether player is in any Raidable Base
     // TODO: add Abandoned Bases support?
@@ -512,7 +534,7 @@ namespace Oxide.Plugins
       watcher.Force();
     }
 
-    // RaidableBases hook handlers
+    #region RaidableBases Hook Handlers
 
     private void OnPlayerEnteredRaidableBase(
       BasePlayer player, Vector3 location, bool allowPVP, int mode, string id,
@@ -594,7 +616,9 @@ namespace Oxide.Plugins
       });
     }
 
-    // AbandonedBases hook handlers
+    #endregion RaidableBases Hook Handlers
+
+    #region AbandonedBases Hook Handlers
 
     private void OnPlayerEnteredAbandonedBase(
       BasePlayer player, Vector3 eventPos, float radius, bool allowPVP,
@@ -655,7 +679,9 @@ namespace Oxide.Plugins
       });
     }
 
-    // CargoTrainTunnel hook handlers
+    #endregion AbandonedBases Hook Handlers
+
+    #region CargoTrainTunnel Hook Handlers
 
     private void OnPlayerEnterPVPBubble(
       TrainEngine trainEngine, BasePlayer player)
@@ -686,7 +712,9 @@ namespace Oxide.Plugins
       });
     }
 
-    // PlayerBasePvpZones hook handlers
+    #endregion CargoTrainTunnel Hook Handlers
+
+    #region PlayerBasePvpZones Hook Handlers
 
     private void OnPlayerBasePvpDelayStart(ulong playerId, string zoneId)
     {
@@ -706,7 +734,9 @@ namespace Oxide.Plugins
       });
     }
 
-    // DynamicPVP hook handlers
+    #endregion PlayerBasePvpZones Hook Handlers
+
+    #region DynamicPVP Hook Handlers
 
     private void OnPlayerAddedToPVPDelay(
       ulong playerId, string zoneId, float pvpDelayTime)
@@ -727,7 +757,11 @@ namespace Oxide.Plugins
       });
     }
 
-    // command handlers
+    #endregion DynamicPVP Hook Handlers
+
+    #endregion PVP Plugins Integration
+
+    #region Command Handlers
 
     private void ToggleUI(IPlayer iPlayer, string command, string[] args)
     {
@@ -739,33 +773,93 @@ namespace Oxide.Plugins
       }
       else
       {
-        OnPlayerDisconnected(player, UinameMain);
+        OnPlayerDisconnected(player, _uiName);
       }
     }
 
-    // UI methods
+    #endregion Command Handlers
 
-    private void CreatePVxUI(BasePlayer player, PVxType type)
+    #region UI Handling
+
+    private void CreateUI(
+      BasePlayer player, PVxType type, PVxType? oldType = null)
     {
-      DestroyUI(player);
-      if (_configData == null) return;
-      // don't create UI if default type and not configured to show that
-      if (type == _configData.defaultType && !_configData.showDefault) return;
-      // abort if no UI settings for PVx type
-      if (!_configData.UISettings.TryGetValue(type, out UiSettings settings) ||
-          string.IsNullOrEmpty(settings.Json))
+      if (null == _configData || oldType == type) return;
+
+      // CUI
+
+      // destroy old UI (if there was one)
+      if (null != oldType) CuiHelper.DestroyUi(player, _uiName);
+
+      // create UI for new type if configured and enabled
+      if (_configData.UISettings.TryGetValue(type, out var cuiSettings) &&
+          cuiSettings.Enabled)
       {
-        return;
+        var cuiJson = cuiSettings.Json;
+        if (!string.IsNullOrEmpty(cuiJson))
+        {
+          CuiHelper.AddUi(player, cuiJson);
+        }
       }
-      CuiHelper.AddUi(player, settings.Json);
+
+      // Simple Status
+      if (null == SimpleStatus) return;
+
+      // clear old status (if there was one)
+      if (null != oldType)
+      {
+        SimpleStatus.CallHook(
+          "SetStatus", player.UserIDString, oldType.ToString(), 0);
+      }
+
+      // enable status for new type if configured and enabled
+      if (_configData.SimpleStatusSettings.TryGetValue(type, out var ssSettings)
+          && ssSettings.Enabled)
+      {
+        SimpleStatus.CallHook(
+          "SetStatus", player.UserIDString, type.ToString());
+      }
     }
 
-    private static void DestroyUI(BasePlayer player)
+    // forcefully destroy any active UIs for the given player
+    private void DestroyUI(BasePlayer player)
     {
-      CuiHelper.DestroyUi(player, UinameMain);
+      CuiHelper.DestroyUi(player, _uiName);
+      SS_HideAllStatuses(player);
     }
 
-    // config file handling
+    #region SimpleStatus Integration
+
+    // hide SimpleStatus statues for all enabled PVxType values
+    private void SS_HideAllStatuses(BasePlayer player)
+    {
+      if (null == SimpleStatus || null == _configData) return;
+      foreach (var (type, ssData) in _configData.SimpleStatusSettings)
+      {
+        if (null == ssData || !ssData.Enabled) continue;
+        SimpleStatus.CallHook(
+          "SetStatus", player.UserIDString, type.ToString(), 0);
+      }
+    }
+
+    // register SimpleStatus statuses for each enabled PVxType value
+    // NOTE: apparently there is no corresponding destroy API
+    private void SS_CreateStatuses()
+    {
+      if (null == SimpleStatus || null == _configData) return;
+      foreach (var (type, ssData) in _configData.SimpleStatusSettings)
+      {
+        if (null == ssData || !ssData.Enabled) continue;
+        SimpleStatus.CallHook(
+          "CreateStatus", this, type.ToString(), ssData.ToDict());
+      }
+    }
+
+    #endregion SimpleStatus Integration
+
+    #endregion UI Handling
+
+    #region Config File Handling
 
     private sealed class NotificationSettings
     {
@@ -787,6 +881,9 @@ namespace Oxide.Plugins
 
     private sealed class UiSettings
     {
+      [JsonProperty(PropertyName = "Enabled")]
+      public bool Enabled { get; set; } = true;
+
       [JsonProperty(PropertyName = "Min Anchor")]
       public string MinAnchor { get; set; } = "0.5 0";
 
@@ -833,6 +930,8 @@ namespace Oxide.Plugins
         get
         {
           // generate JSON for a PVxType on first use, and cache it in _json
+          // ...unless this PVxType is disabled, in which case return the
+          //  default empty string
           if (string.IsNullOrEmpty(_json))
           {
             _json = new CuiElementContainer
@@ -848,7 +947,7 @@ namespace Oxide.Plugins
                   CursorEnabled = false,
                   FadeOut = FadeOut,
                 },
-                Layer, UinameMain
+                Layer, _uiName
               },
               {
                 new CuiLabel
@@ -865,7 +964,7 @@ namespace Oxide.Plugins
                   },
                   FadeOut = FadeOut,
                 },
-                UinameMain, CuiHelper.GetGuid()
+                _uiName, CuiHelper.GetGuid()
               }
             }.ToJson();
           }
@@ -874,7 +973,60 @@ namespace Oxide.Plugins
       }
     }
 
-    private ConfigData? _configData;
+    // Class for managing Simple Status settings for an individual PVxType enum
+    //  value
+    // Supports user-friendly JSON configuration values and uses them to
+    //  produce a dictionary to be passed to Simple Status hooks.
+    private sealed class SimpleStatusSettings
+    {
+      [JsonProperty(PropertyName = "Enabled")]
+      public bool Enabled { get; set; } = false;
+
+      [JsonProperty(PropertyName = "Background Color")]
+      public string Color { get; set; } = "0.5 0.5 0.5 1.0";
+
+      [JsonProperty(PropertyName = "Title Text")]
+      public string TitleText { get; set; } = "PVx STATUS";
+
+      [JsonProperty(PropertyName = "Title Color")]
+      public string TitleColor { get; set; } = "1.0 1.0 1.0 1.0";
+
+      [JsonProperty(PropertyName = "Status Text")]
+      public string StatusText { get; set; } = "UNKNOWN";
+
+      [JsonProperty(PropertyName = "Status Color")]
+      public string StatusColor { get; set; } = "1.0 1.0 1.0 1.0";
+
+      [JsonProperty(PropertyName = "Icon Path")]
+      public string IconPath { get; set; } = "assets/icons/resource.png";
+
+      [JsonProperty(PropertyName = "Icon Color")]
+      public string IconColor { get; set; } = "1.0 1.0 1.0 1.0";
+
+      // dictionary containing SimpleStatus values
+      [JsonIgnore]
+      private Dictionary<string, object>? _dict = null;
+      // accessor for SimpleStatus values dictionary
+      // Populates and returns the dictionary on first call, and returns the
+      //  cached dictionary on subsequent calls
+      public Dictionary<string, object> ToDict()
+      {
+        if (null == _dict)
+        {
+          _dict = new()
+          {
+            ["color"] = Color,
+            ["title"] = TitleText,
+            ["titleColor"] = TitleColor,
+            ["text"] = StatusText,
+            ["textColor"] = StatusColor,
+            ["icon"] = IconPath,
+            ["iconColor"] = IconColor
+          };
+        }
+        return _dict;
+      }
+    }
 
     private sealed class ConfigData
     {
@@ -887,9 +1039,6 @@ namespace Oxide.Plugins
 
       [JsonProperty(PropertyName = "Assume PVP Above Height")]
       public float pvpAboveHeight = 1000.0f;
-
-      [JsonProperty(PropertyName = "Show UI For Server Default PVx Type")]
-      public bool showDefault = true;
 
       [JsonProperty(PropertyName = "Toggle UI Command (empty string to disable)")]
       public string toggleCommand = "pvxui";
@@ -912,11 +1061,12 @@ namespace Oxide.Plugins
       [JsonProperty(PropertyName = "Notification Settings")]
       public NotificationSettings NotifySettings {get; set; } = new();
 
-      [JsonProperty(PropertyName = "UI Settings")]
+      [JsonProperty(PropertyName = "Default UI Settings")]
       public Dictionary<PVxType, UiSettings> UISettings { get; set; } = new()
       {
         [PVxType.PVE] = new UiSettings
         {
+          Enabled = true,
           Text = "PVE",
           TextSize = 14,
           TextColor = "1.0 1.0 1.0 1.0",
@@ -924,6 +1074,7 @@ namespace Oxide.Plugins
         },
         [PVxType.PVP] = new UiSettings
         {
+          Enabled = true,
           Text = "PVP",
           TextSize = 14,
           TextColor = "1.0 1.0 1.0 1.0",
@@ -931,6 +1082,7 @@ namespace Oxide.Plugins
         },
         [PVxType.PVPDelay] = new UiSettings
         {
+          Enabled = true,
           Text = "WAIT",
           TextSize = 14,
           TextColor = "1.0 1.0 1.0 1.0",
@@ -938,10 +1090,61 @@ namespace Oxide.Plugins
         },
         [PVxType.SafeZone] = new UiSettings
         {
+          Enabled = true,
           Text = "SAFE",
           TextSize = 14,
           TextColor = "1.0 1.0 1.0 1.0",
           BackgroundColor = "0.0 0.0 1.0 0.8"
+        }
+      };
+
+      [JsonProperty(PropertyName = "Simple Status UI Settings")]
+      public Dictionary<PVxType, SimpleStatusSettings>
+        SimpleStatusSettings { get; set; } = new()
+      {
+        [PVxType.PVE] = new SimpleStatusSettings
+        {
+          Enabled = false,
+          Color = "0.0 0.7 0.0 0.8",
+          TitleText = "PVE",
+          TitleColor = "1.0 1.0 1.0 1.0",
+          StatusText = "SuperPVxInfo",
+          StatusColor = "0.0 1.0 0.0 0.2",
+          IconPath = "assets/icons/resource.png",
+          IconColor = "0.5 1.0 0.5 1.0"
+        },
+        [PVxType.PVP] = new SimpleStatusSettings
+        {
+          Enabled = false,
+          Color = "0.7 0.0 0.0 0.8",
+          TitleText = "PVP",
+          TitleColor = "1.0 1.0 1.0 1.0",
+          StatusText = "SuperPVxInfo",
+          StatusColor = "1.0 0.0 0.0 0.2",
+          IconPath = "assets/icons/warning_2.png",
+          IconColor = "1.0 0.5 0.5 1.0"
+        },
+        [PVxType.PVPDelay] = new SimpleStatusSettings
+        {
+          Enabled = false,
+          Color = "0.7 0.7 0.0 0.8",
+          TitleText = "WAIT",
+          TitleColor = "1.0 1.0 1.0 1.0",
+          StatusText = "SuperPVxInfo",
+          StatusColor = "1.0 1.0 0.0 0.2",
+          IconPath = "assets/icons/stopwatch.png",
+          IconColor = "1.0 1.0 0.5 1.0"
+        },
+        [PVxType.SafeZone] = new SimpleStatusSettings
+        {
+          Enabled = false,
+          Color = "0.0 0.0 0.7 0.8",
+          TitleText = "SAFE",
+          TitleColor = "1.0 1.0 1.0 1.0",
+          StatusText = "SuperPVxInfo",
+          StatusColor = "0.0 0.0 1.0 0.2",
+          IconPath = "assets/icons/peace.png",
+          IconColor = "0.5 0.5 1.0 1.0"
         }
       };
     }
@@ -966,7 +1169,7 @@ namespace Oxide.Plugins
             _configData.defaultType = PVxType.PVE;
           }
           // add default toggle states for any missing notifications
-          foreach (var msgKey in NotifyMessages.Select(x => x.Key).Where(
+          foreach (var msgKey in _notifyMessages.Select(x => x.Key).Where(
             y => !_configData.NotifySettings.Enabled.ContainsKey(y)))
           {
             PrintWarning($"Adding new player notification toggle in disabled state: \"{msgKey}\"");
@@ -976,7 +1179,7 @@ namespace Oxide.Plugins
           var deadMsgKeys = Pool.GetList<string>();
           foreach (var (key, _) in _configData.NotifySettings.Enabled)
           {
-            if (!NotifyMessages.ContainsKey(key)) deadMsgKeys.Add(key);
+            if (!_notifyMessages.ContainsKey(key)) deadMsgKeys.Add(key);
           }
           foreach (var deadMsgKey in deadMsgKeys)
           {
@@ -1005,7 +1208,7 @@ namespace Oxide.Plugins
       _configData.PvpZoneManagerNames.Add("PVP");
       // also need to set default notification toggle states here, as the config
       //  class doesn't have access to the message dictionary
-      foreach (var msgKvp in NotifyMessages)
+      foreach (var msgKvp in _notifyMessages)
       {
         _configData.NotifySettings.Enabled.Add(msgKvp.Key, true);
       }
@@ -1016,9 +1219,9 @@ namespace Oxide.Plugins
       Config.WriteObject(_configData);
     }
 
-    // data file handling
+    #endregion Config File Handling
 
-    private StoredData? _storedData;
+    #region Data File Handling
 
     private sealed class StoredData
     {
@@ -1052,8 +1255,11 @@ namespace Oxide.Plugins
       Interface.Oxide.DataFileSystem.WriteObject(Name, _storedData);
     }
 
-    // player watcher class
+    #endregion Data File Handling
 
+    #region Player Watcher
+
+    // player watcher class
     public class PlayerWatcher : FacepunchBehaviour
     {
       // true if force updates should be allowed
@@ -1262,7 +1468,7 @@ namespace Oxide.Plugins
         if (newPvxState == _lastPvxState) return;
 
         // (re)create GUI for new state
-        Instance.CreatePVxUI(_player, newPvxState);
+        Instance.CreateUI(_player, newPvxState, _lastPvxState);
 
         // record new state
         _lastPvxState = newPvxState;
@@ -1296,5 +1502,7 @@ namespace Oxide.Plugins
         _wasInSafeZone = null;
       }
     }
+
+    #endregion Player Watcher
   }
 }
