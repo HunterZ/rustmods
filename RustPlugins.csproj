@@ -43,5 +43,6 @@
     <Reference Include="../../RustDedicated_Data/Managed/*.dll">
       <Private>false</Private>
     </Reference>
+    <Reference Remove="../../RustDedicated_Data/Managed/Oxide.References.dll"/>
   </ItemGroup>
 </Project>
