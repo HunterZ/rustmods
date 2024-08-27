@@ -3,14 +3,13 @@
 using Facepunch;
 using Newtonsoft.Json;
 using Oxide.Core;
-using Oxide.Core.Plugins;
 using System;
 using System.Collections.Generic;
 using UnityEngine;
 
 namespace Oxide.Plugins
 {
-  [Info("Player Base PvP Zones", "HunterZ", "1.0.3")]
+  [Info("Player Base PvP Zones", "HunterZ", "1.0.4")]
   [Description("Maintains Zone Manager / TruePVE exclusion zones around player bases")]
   public class PlayerBasePvpZones : RustPlugin
   {
@@ -113,8 +112,15 @@ namespace Oxide.Plugins
 
     // remove+destroy timer stored in the given dictionary under the given key
     private bool CancelDictionaryTimer<T>(
-      ref Dictionary<T, Timer> dictionary, T key) =>
-        dictionary.Remove(key, out var cTimer) && cTimer.Destroy();
+      ref Dictionary<T, Timer> dictionary, T key)
+    {
+      if (dictionary.Remove(key, out var cTimer))
+      {
+        cTimer.Destroy();
+        return true;
+      }
+      return false;
+    }
 
     // BuildingBlock wrapper for GetToolCupboard()
     private BuildingPrivlidge? GetToolCupboard(BuildingBlock buildingBlock) =>
@@ -692,7 +698,7 @@ namespace Oxide.Plugins
       Puts($"OnServerInitialized():  Created {_buildingData.Count} building zones...");
 
       // create zones immediately for all existing player-owned legacy shelters
-      foreach (var (_, shelterList) in LegacyShelter.sheltersPerPlayer)
+      foreach (var (_, shelterList) in LegacyShelter.SheltersPerPlayer)
       {
         foreach (var shelter in shelterList)
         {
