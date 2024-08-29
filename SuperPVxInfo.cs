@@ -13,7 +13,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-  [Info("Super PVx Info", "HunterZ", "1.1.1")]
+  [Info("Super PVx Info", "HunterZ", "1.2.0")]
   [Description("Displays PvE/PvP/etc. status on player's HUD")]
   public class SuperPVxInfo : RustPlugin
   {
@@ -22,8 +22,8 @@ namespace Oxide.Plugins
     public enum PVxType { PVE, PVP, PVPDelay, SafeZone }
 
     [PluginReference] private readonly Plugin?
-      AbandonedBases, DynamicPVP, PlayerBasePvpZones, PopupNotifications,
-      RaidableBases, SimpleStatus, ZoneManager;
+      AbandonedBases, DynamicPVP, DangerousTreasures, PlayerBasePvpZones,
+      PopupNotifications, RaidableBases, SimpleStatus, ZoneManager;
 
     private ConfigData? _configData;
 
@@ -34,6 +34,8 @@ namespace Oxide.Plugins
     {
       ["Unexpected Exit From Abandoned Or Raidable Base"] =
         "{0}Left Abandoned/Raidable Base Zone",
+      ["Unexpected Exit From Dangerous Treasures Event"] =
+        "{0}Left Dangerous Treasures Zone",
       ["Safe Zone Entry"] =
         "{0}Entering Safe Zone",
       ["Safe Zone Exit"] =
@@ -171,9 +173,12 @@ namespace Oxide.Plugins
     {
       if (!IsValidPlayer(player, true)) return;
 
-      // abort if a watcher is already attached
+      // abort if an active watcher is already attached
+      // isActiveAndEnabled is needed because sometimes reloading the plugin
+      //  causes it to catch a watcher that is still in the process of being
+      //  destroyed
       var watcher = player.GetComponent<PlayerWatcher>();
-      if (watcher != null) return;
+      if (watcher != null && watcher.isActiveAndEnabled) return;
 
       watcher = player.gameObject.AddComponent<PlayerWatcher>();
       watcher.Init(
@@ -201,6 +206,7 @@ namespace Oxide.Plugins
 
         // check everything because the player could be anywhere now
         if (watcher.InBaseType != null) watcher.CheckBase = true;
+        watcher.CheckEvent = true;
         watcher.CheckZone = true;
         watcher.CheckPvpDelay = true;
         watcher.Force();
@@ -448,6 +454,16 @@ namespace Oxide.Plugins
       return null;
     }
 
+    // check whether player is in a Dangerous Treasures event
+    // note that this is only useful for unexpected exits (e.g. respawning)
+    //  because we don't get a PvP-versus-PvE indication from this
+    private bool IsPlayerInEvent(BasePlayer player)
+    {
+      return null != DangerousTreasures &&
+             Convert.ToBoolean(DangerousTreasures.Call(
+              "EventTerritory", player.transform.position));
+    }
+
     // check if player has any PVP delays active
     // this should only be called when hook-reported states don't exist yet, or
     //  can't be relied upon for some reason
@@ -531,6 +547,24 @@ namespace Oxide.Plugins
         watcher.CheckZone = true;
       }
       watcher.InPvpDelay = state;
+      watcher.Force();
+    }
+
+    // common logic for PVx event hooks
+    private void SetPvxEvent(BasePlayer player, PVxType eventType, bool state)
+    {
+      if (!IsValidPlayer(player, true)) return;
+      var watcher = GetPlayerWatcher(player);
+      if (null == watcher) return;
+      if (state)
+      {
+        watcher.InPvxEvent = eventType;
+      }
+      else
+      {
+        watcher.CheckZone = true;
+        watcher.InPvxEvent = null;
+      }
       watcher.Force();
     }
 
@@ -680,6 +714,22 @@ namespace Oxide.Plugins
     }
 
     #endregion AbandonedBases Hook Handlers
+
+    #region DangerousTreasures Hook Handlers
+
+    private void OnPlayerEnteredDangerousEvent(
+      BasePlayer player, Vector3 eventPos, bool allowPVP)
+    {
+      SetPvxEvent(player, allowPVP ? PVxType.PVP : PVxType.PVE, true);
+    }
+
+    private void OnPlayerExitedDangerousEvent(
+      BasePlayer player, Vector3 eventPos, bool allowPVP)
+    {
+      SetPvxEvent(player, allowPVP ? PVxType.PVP : PVxType.PVE, false);
+    }
+
+    #endregion DangerousTreasures Hook Handlers
 
     #region CargoTrainTunnel Hook Handlers
 
@@ -1287,6 +1337,12 @@ namespace Oxide.Plugins
         get { return _checkBase; }
         set { _forceUpdate |= value != _checkBase; _checkBase = value; }
       }
+      // true if dangerous treasures exit check requested
+      private bool _checkEvent;
+      public bool CheckEvent {
+        get { return _checkEvent; }
+        set { _forceUpdate |= value != _checkEvent; _checkEvent = value; }
+      }
       // true if PVP delay check requested
       private bool _checkPvpDelay;
       public bool CheckPvpDelay {
@@ -1310,6 +1366,12 @@ namespace Oxide.Plugins
       public PVxType? InBaseType {
         get { return _inBaseType; }
         set { _forceUpdate |= value != _inBaseType; _inBaseType = value; }
+      }
+      // in dangerous treasures PVx event
+      private PVxType? _inEventType;
+      public PVxType? InPvxEvent {
+        get { return _inEventType; }
+        set { _forceUpdate |= value != _inEventType; _inEventType = value; }
       }
       // in cargo train event PvP bubble
       private bool _inPvpBubble;
@@ -1365,21 +1427,23 @@ namespace Oxide.Plugins
         // current order of precedence (subject to change):
         // - in Facepunch safe zone => PvE
         // - in ZoneManager safe zone => PvE
-        // - in PvP base/bubble/zone => PvP
+        // - in PvP base/bubble/event/zone => PvP
         // - above PvP height => PvP
         // - below PvP depth => PvP
         // - pvp exit delay active => PvP
-        // - in PvE base/zone => PvE
+        // - in PvE base/event/zone => PvE
         // - configured default
         if (isInSafeZone)                    return PVxType.SafeZone;
         if (PVxType.SafeZone == _inZoneType) return PVxType.SafeZone;
         if (PVxType.PVP == _inBaseType)      return PVxType.PVP;
         if (_inPvpBubble)                    return PVxType.PVP;
+        if (PVxType.PVP == _inEventType)     return PVxType.PVP;
         if (PVxType.PVP == _inZoneType)      return PVxType.PVP;
         if (isAbovePvpHeight)                return PVxType.PVP;
         if (isBelowPvpHeight)                return PVxType.PVP;
         if (_inPvpDelay)                     return PVxType.PVPDelay;
         if (PVxType.PVE == _inBaseType)      return PVxType.PVE;
+        if (PVxType.PVE == _inEventType)     return PVxType.PVE;
         if (PVxType.PVE == _inZoneType)      return PVxType.PVE;
         // defer to default state (or PVE if somehow not defined)
         return Instance?._configData == null ?
@@ -1432,6 +1496,18 @@ namespace Oxide.Plugins
             if (_inPvpDelay) _checkPvpDelay = true;
           }
           _checkBase = false;
+        }
+
+        // check for exit from PVx event on request
+        if (_checkEvent)
+        {
+          if (null != _inEventType && !Instance.IsPlayerInEvent(_player))
+          {
+            _inEventType = null;
+            Instance.SendCannedMessage(
+              _player, "Unexpected Exit From Dangerous Treasures Event");
+          }
+          _checkEvent = false;
         }
 
         // get zone type on request (if any)
