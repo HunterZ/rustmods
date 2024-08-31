@@ -13,7 +13,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-  [Info("Super PVx Info", "HunterZ", "1.2.0")]
+  [Info("Super PVx Info", "HunterZ", "1.2.1")]
   [Description("Displays PvE/PvP/etc. status on player's HUD")]
   public class SuperPVxInfo : RustPlugin
   {
@@ -58,18 +58,14 @@ namespace Oxide.Plugins
 
     #region Utility Methods
 
-    private bool IsValidPlayer(BasePlayer player, bool checkConnected)
-    {
-      if (player.IsNpc || !player.userID.IsSteamId()) return false;
-      if (checkConnected && !player.IsConnected) return false;
-      return true;
-    }
+    private bool IsValidPlayer(BasePlayer player, bool checkConnected) =>
+      null != player &&
+      !player.IsNpc &&
+      player.userID.IsSteamId() &&
+      (!checkConnected || player.IsConnected);
 
-    private PlayerWatcher? GetPlayerWatcher(BasePlayer player)
-    {
-      if (!IsValidPlayer(player, true)) return null;
-      return player.GetComponent<PlayerWatcher>();
-    }
+    private PlayerWatcher? GetPlayerWatcher(BasePlayer player) =>
+      IsValidPlayer(player, true) ? player.GetComponent<PlayerWatcher>() : null;
 
     private void SendCannedMessage(BasePlayer player, string key)
     {
@@ -104,7 +100,7 @@ namespace Oxide.Plugins
 
     protected override void LoadDefaultMessages()
     {
-        lang.RegisterMessages(_notifyMessages, this);
+      lang.RegisterMessages(_notifyMessages, this);
     }
 
     private void Init()
@@ -249,14 +245,9 @@ namespace Oxide.Plugins
       return ZoneManager?.Call("CheckZoneID", zoneId) is string s && null != s;
     }
 
-    private string[] ZM_GetPlayerZoneIDs(BasePlayer player)
-    {
-      if (ZoneManager?.Call("GetPlayerZoneIDs", player) is string[] s)
-      {
-        return s;
-      }
-      return new string[0];
-    }
+    private string[] ZM_GetPlayerZoneIDs(BasePlayer player) =>
+      ZoneManager?.Call("GetPlayerZoneIDs", player) is string[] s ?
+        s : new string[0];
 
     // if player is in a zone, return its type if possible, else return null
     public PVxType? GetPlayerZoneType(BasePlayer player)
@@ -342,52 +333,28 @@ namespace Oxide.Plugins
       return (smallestId, smallestName);
     }
 
-    private bool ZM_GetZoneFlag(string zoneId, string zoneFlag)
-    {
-      if (ZoneManager?.Call("HasFlag", zoneId, zoneFlag) is bool flagState)
-      {
-        return flagState;
-      }
-      return false;
-    }
+    private bool ZM_GetZoneFlag(string zoneId, string zoneFlag) =>
+      ZoneManager?.Call("HasFlag", zoneId, zoneFlag) is bool flagState &&
+      flagState;
 
-    private string ZM_GetZoneName(string zoneId)
-    {
-      if (ZoneManager?.Call("GetZoneName", zoneId) is string zoneName)
-      {
-        return zoneName;
-      }
-      return "";
-    }
+    private string ZM_GetZoneName(string zoneId) =>
+      ZoneManager?.Call("GetZoneName", zoneId) is string zoneName ?
+        zoneName : "";
 
-    private float ZM_GetZoneRadius(string zoneId)
-    {
-      if (ZoneManager?.Call("GetZoneRadius", zoneId) is float zoneRadius)
-      {
-        return zoneRadius;
-      }
-      return 0.0f;
-    }
+    private float ZM_GetZoneRadius(string zoneId) =>
+      ZoneManager?.Call("GetZoneRadius", zoneId) is float zoneRadius ?
+        zoneRadius : 0.0f;
 
-    private Vector3 ZM_GetZoneSize(string zoneId)
-    {
-      if (ZoneManager?.Call("GetZoneSize", zoneId) is Vector3 zoneSize)
-      {
-        return zoneSize;
-      }
-      return Vector3.zero;
-    }
+    private Vector3 ZM_GetZoneSize(string zoneId) =>
+      ZoneManager?.Call("GetZoneSize", zoneId) is Vector3 zoneSize ?
+        zoneSize : Vector3.zero;
 
-    private bool IsExcludeZone(string zoneId)
-    {
-      if (null == _configData || null == _storedData) return false;
-      if (!_storedData.Mappings.TryGetValue(zoneId, out string ruleset))
-      {
-        return false;
-      }
-      return _configData.PveExclusionNames.Any(
+    private bool IsExcludeZone(string zoneId) =>
+      null != _storedData &&
+      null != _configData &&
+      _storedData.Mappings.TryGetValue(zoneId, out string ruleset) &&
+      _configData.PveExclusionNames.Any(
         x => ruleset.Contains(x, CompareOptions.IgnoreCase));
-    }
 
     // common logic for setting watcher's zone check request flag
     private void CheckZone(BasePlayer player)
@@ -406,16 +373,12 @@ namespace Oxide.Plugins
 
     #region ZoneManager Hook Handlers
 
-    private void OnEnterZone(string zoneId, BasePlayer player)
-    {
+    private void OnEnterZone(string zoneId, BasePlayer player) =>
       CheckZone(player);
-    }
 
-    private void OnExitZone(string zoneId, BasePlayer player)
-    {
+    private void OnExitZone(string zoneId, BasePlayer player) =>
       // check if player is exiting from a smaller zone into a larger one
       CheckZone(player);
-    }
 
     #endregion ZoneManager Hook Handlers
 
@@ -457,20 +420,18 @@ namespace Oxide.Plugins
     // check whether player is in a Dangerous Treasures event
     // note that this is only useful for unexpected exits (e.g. respawning)
     //  because we don't get a PvP-versus-PvE indication from this
-    private bool IsPlayerInEvent(BasePlayer player)
-    {
-      return null != DangerousTreasures &&
-             Convert.ToBoolean(DangerousTreasures.Call(
-              "EventTerritory", player.transform.position));
-    }
+    private bool IsPlayerInEvent(BasePlayer player) =>
+      null != DangerousTreasures &&
+      Convert.ToBoolean(DangerousTreasures.Call(
+        "EventTerritory", player.transform.position));
 
     // check if player has any PVP delays active
     // this should only be called when hook-reported states don't exist yet, or
     //  can't be relied upon for some reason
     private bool IsPlayerInPVPDelay(ulong playerID)
     {
-      if (PlayerBasePvpZones != null && !string.IsNullOrEmpty(Convert.ToString(
-          PlayerBasePvpZones.Call("OnPlayerBasePvpDelayQuery", playerID))))
+      if (AbandonedBases != null && Convert.ToBoolean(
+          AbandonedBases.Call("HasPVPDelay", playerID)))
       {
         return true;
       }
@@ -481,14 +442,14 @@ namespace Oxide.Plugins
         return true;
       }
 
-      if (RaidableBases != null && Convert.ToBoolean(
-          RaidableBases.Call("HasPVPDelay", playerID)))
+      if (PlayerBasePvpZones != null && !string.IsNullOrEmpty(Convert.ToString(
+          PlayerBasePvpZones.Call("OnPlayerBasePvpDelayQuery", playerID))))
       {
         return true;
       }
 
-      if (AbandonedBases != null && Convert.ToBoolean(
-          AbandonedBases.Call("HasPVPDelay", playerID)))
+      if (RaidableBases != null && Convert.ToBoolean(
+          RaidableBases.Call("HasPVPDelay", playerID)))
       {
         return true;
       }
@@ -558,12 +519,12 @@ namespace Oxide.Plugins
       if (null == watcher) return;
       if (state)
       {
-        watcher.InPvxEvent = eventType;
+        watcher.InEventType = eventType;
       }
       else
       {
         watcher.CheckZone = true;
-        watcher.InPvxEvent = null;
+        watcher.InEventType = null;
       }
       watcher.Force();
     }
@@ -1273,10 +1234,7 @@ namespace Oxide.Plugins
       }
     }
 
-    protected override void SaveConfig()
-    {
-      Config.WriteObject(_configData);
-    }
+    protected override void SaveConfig() => Config.WriteObject(_configData);
 
     #endregion Config File Handling
 
@@ -1309,10 +1267,8 @@ namespace Oxide.Plugins
       SaveData();
     }
 
-    private void SaveData()
-    {
+    private void SaveData() =>
       Interface.Oxide.DataFileSystem.WriteObject(Name, _storedData);
-    }
 
     #endregion Data File Handling
 
@@ -1321,6 +1277,8 @@ namespace Oxide.Plugins
     // player watcher class
     public class PlayerWatcher : FacepunchBehaviour
     {
+      // public static members
+
       // true if force updates should be allowed
       public static bool AllowForceUpdate { get; set; }
       // reference back to plugin
@@ -1331,6 +1289,9 @@ namespace Oxide.Plugins
       public static float PvpBelowHeight { get; set; }
       // config-based update interval
       public static float UpdateIntervalSeconds { get; set; }
+
+      // public non-static members
+
       // true if abandoned/raidable base exit check requested
       private bool _checkBase;
       public bool CheckBase {
@@ -1359,8 +1320,6 @@ namespace Oxide.Plugins
       public Vector3 BaseLocation { get; set; }
       // radius of current abandoned/raidable base (if applicable)
       public float BaseRadius { get; set; }
-      // true if check delay should be preempted
-      private bool _forceUpdate;
       // non-null if in abandoned/raidable base or bubble
       private PVxType? _inBaseType;
       public PVxType? InBaseType {
@@ -1369,7 +1328,7 @@ namespace Oxide.Plugins
       }
       // in dangerous treasures PVx event
       private PVxType? _inEventType;
-      public PVxType? InPvxEvent {
+      public PVxType? InEventType {
         get { return _inEventType; }
         set { _forceUpdate |= value != _inEventType; _inEventType = value; }
       }
@@ -1385,62 +1344,67 @@ namespace Oxide.Plugins
         get { return _inPvpDelay; }
         set { _forceUpdate |= value != _inPvpDelay; _inPvpDelay = value; }
       }
+
+      // private members
+
+      // true if check delay should be preempted
+      private bool _forceUpdate;
+      // true if in height was within PvP thresholds on last check
+      private bool? _heightAbovePvp;
+      // true if in height was within PvP thresholds on last check
+      private bool? _heightBelowPvp;
+      // true if in safe zone on last check
+      private bool? _inSafeZone;
       // non-null if in Zone Manager zone
       private PVxType? _inZoneType;
-      // PvX state on last check
-      private PVxType? _lastPvxState;
       // reference back to player
       private BasePlayer? _player;
-      // true if in height was within PvP thresholds on last check
-      private bool? _wasAbovePvpHeight;
-      // true if in height was within PvP thresholds on last check
-      private bool? _wasBelowPvpHeight;
-      // true if in safe zone on last check
-      private bool? _wasInSafeZone;
+      // PvX state on last check
+      private PVxType? _pvxState;
 
       // check for (and optionally notify player regarding) changes in a
       //  condition that requires polling by the watcher
-      private bool? CheckPeriodic(
-        bool current, bool? previous,
+      private void CheckPeriodic(
+        ref bool? storedState, bool currentState,
         string enterMessage, string exitMessage)
       {
-        if (current == previous || null == Instance || null == _player)
+        if (currentState == storedState || null == Instance || null == _player)
         {
-          return previous;
+          // no change or missing stuff
+          return;
         }
-        if (current)
+        if (currentState)
         {
+          // false->true
           Instance.SendCannedMessage(_player, enterMessage);
         }
-        else if (true == previous)
+        else
         {
+          // true->false
           _checkZone = true;
           Instance.SendCannedMessage(_player, exitMessage);
         }
-        return current;
+        storedState = currentState;
       }
 
       // derive new PVx status from current set of states
-      private PVxType GetPVxState(
-        bool isInSafeZone, bool isAbovePvpHeight, bool isBelowPvpHeight)
+      private PVxType GetPVxState()
       {
         // current order of precedence (subject to change):
-        // - in Facepunch safe zone => PvE
-        // - in ZoneManager safe zone => PvE
+        // - in Facepunch/ZoneManager safe zone => PvE
         // - in PvP base/bubble/event/zone => PvP
-        // - above PvP height => PvP
-        // - below PvP depth => PvP
+        // - above/below PvP height => PvP
         // - pvp exit delay active => PvP
         // - in PvE base/event/zone => PvE
         // - configured default
-        if (isInSafeZone)                    return PVxType.SafeZone;
+        if (true == _inSafeZone)             return PVxType.SafeZone;
         if (PVxType.SafeZone == _inZoneType) return PVxType.SafeZone;
         if (PVxType.PVP == _inBaseType)      return PVxType.PVP;
-        if (_inPvpBubble)                    return PVxType.PVP;
         if (PVxType.PVP == _inEventType)     return PVxType.PVP;
+        if (_inPvpBubble)                    return PVxType.PVP;
         if (PVxType.PVP == _inZoneType)      return PVxType.PVP;
-        if (isAbovePvpHeight)                return PVxType.PVP;
-        if (isBelowPvpHeight)                return PVxType.PVP;
+        if (true == _heightAbovePvp)         return PVxType.PVP;
+        if (true == _heightBelowPvp)         return PVxType.PVP;
         if (_inPvpDelay)                     return PVxType.PVPDelay;
         if (PVxType.PVE == _inBaseType)      return PVxType.PVE;
         if (PVxType.PVE == _inEventType)     return PVxType.PVE;
@@ -1454,10 +1418,8 @@ namespace Oxide.Plugins
       // NOTE: this is used instead of Update() because the latter gets called
       //  much too frequently for our needs, wasting a lot of processing power
       //  on time counting overhead
-      public void StartWatching()
-      {
+      public void StartWatching() =>
         InvokeRepeating("Watch", 0.0f, UpdateIntervalSeconds);
-      }
 
       // invoke watcher processing ASAP if warranted
       public void Force()
@@ -1467,9 +1429,9 @@ namespace Oxide.Plugins
         _forceUpdate = false;
       }
 
-      // update states, derive resulting PVx state, and - if the latter changed
-      //  - update the GUI
-      public void Watch()
+      // perform any requested and/or periodic flag update checks that could
+      //  affect PVx state
+      private void UpdateFlags()
       {
         // abort if plugin reference or player invalid
         if (null == _player || null == Instance ||
@@ -1477,8 +1439,6 @@ namespace Oxide.Plugins
         {
           return;
         }
-
-        // gather some up-front data
 
         // check for exit from base on request
         // TODO: this should no longer be needed for RaidableBases, but need to
@@ -1525,38 +1485,48 @@ namespace Oxide.Plugins
         }
 
         // safe zone check
-        bool isInSafeZone = _player.InSafeZone();
-        _wasInSafeZone = CheckPeriodic(
-          isInSafeZone, _wasInSafeZone, "Safe Zone Entry", "Safe Zone Exit");
+        CheckPeriodic(
+          ref _inSafeZone, _player.InSafeZone(),
+          "Safe Zone Entry", "Safe Zone Exit");
 
         // height check
-        bool isAbovePvpHeight =
-          _player.transform.position.y > PvpAboveHeight;
-        _wasAbovePvpHeight = CheckPeriodic(
-          isAbovePvpHeight, _wasAbovePvpHeight,
+        CheckPeriodic(
+          ref _heightAbovePvp, _player.transform.position.y > PvpAboveHeight,
           "PVP Height Entry", "PVP Height Exit"
         );
 
         // depth check
-        bool isBelowPvpHeight =
-          _player.transform.position.y < PvpBelowHeight;
-        _wasBelowPvpHeight = CheckPeriodic(
-          isBelowPvpHeight, _wasBelowPvpHeight,
+        CheckPeriodic(
+          ref _heightBelowPvp, _player.transform.position.y < PvpBelowHeight,
           "PVP Depth Entry", "PVP Depth Exit"
         );
+      }
+
+      // update states, derive resulting PVx state, and - if the latter changed
+      //  - update the GUI
+      public void Watch()
+      {
+        // abort if plugin reference or player invalid
+        if (null == _player || null == Instance ||
+            !Instance.IsValidPlayer(_player, true))
+        {
+          return;
+        }
+
+        UpdateFlags();
 
         // determine new state
-        var newPvxState =
-          GetPVxState(isInSafeZone, isAbovePvpHeight, isBelowPvpHeight);
+        var currentPvxState = GetPVxState();
 
-        // abort if no state change
-        if (newPvxState == _lastPvxState) return;
+        // check for change from old/no state
+        if (currentPvxState != _pvxState)
+        {
+          // (re)create GUI for new state
+          Instance.CreateUI(_player, currentPvxState, _pvxState);
 
-        // (re)create GUI for new state
-        Instance.CreateUI(_player, newPvxState, _lastPvxState);
-
-        // record new state
-        _lastPvxState = newPvxState;
+          // record new state
+          _pvxState = currentPvxState;
+        }
       }
 
       // tear down watcher
@@ -1576,15 +1546,15 @@ namespace Oxide.Plugins
         _checkPvpDelay = false;
         _checkZone = false;
         _forceUpdate = false;
+        _heightAbovePvp = null;
+        _heightBelowPvp = null;
         _inBaseType = inBaseType;
         _inPvpBubble = false;
         _inPvpDelay = inPvpDelay;
+        _inSafeZone = null;
         _inZoneType = inZoneType;
-        _lastPvxState = null;
         _player = player;
-        _wasAbovePvpHeight = null;
-        _wasBelowPvpHeight = null;
-        _wasInSafeZone = null;
+        _pvxState = null;
       }
     }
 
