@@ -174,8 +174,10 @@ namespace Oxide.Plugins
     }
 
     // generate color locked/unlocked status text for twinfo command
-    private string UnlockStatusString(int status) =>
-      status == 0 ? Colorize("unlocked", "green") : Colorize("locked", "red");
+    private string UnlockStatusString(int status, IPlayer player) =>
+      status == 0 ?
+        Colorize(lang.GetMessage("Unlocked", this, player.Id), "green") :
+        Colorize(lang.GetMessage("Locked", this, player.Id), "red");
 
     // return true if player is null, server, or admin, or has permission, else
     //  reply with "no permission" message and return false
@@ -267,6 +269,7 @@ namespace Oxide.Plugins
         ["CannotCraftManual"] = "Cannot craft this item (unlocks manually/never)",
         ["InfoBanner"] = "Now @{0} / T1 {1} (@{2}/{3}) / T2 {4} (@{5}/{6}) / T3 {7} (@{8}/{9})",
         ["InvalidWorkbench"] = "Invalid workbench number specified!",
+        ["Locked"] = "locked",
         ["ModifiedManual"] = "WB {0} is now always locked",
         ["ModifiedTime"] = "WB {0} now unlocks in {1} second(s) after wipe",
         ["ModifiedUnlocked"] = "WB {0} is now always unlocked",
@@ -279,6 +282,7 @@ namespace Oxide.Plugins
         ["StatusTime"] = "- Workbench Level {0}: Unlocks in {1}",
         ["StatusUnlocked"] = "- Workbench Level {0}: Unlocked!",
         ["SyntaxError"] = "Syntax Error!",
+        ["Unlocked"] = "unlocked",
         ["UnlockNotice"] = "Workbench Level {0} has unlocked, and can now be crafted!"
       }, this);
     }
@@ -488,13 +492,13 @@ namespace Oxide.Plugins
 
       SendMessage(player, "InfoBanner",
         GetWipeElapsedSeconds().ToString(CultureInfo.CurrentCulture),
-        UnlockStatusString(status[0]),
+        UnlockStatusString(status[0], player),
         status[0].ToString(CultureInfo.CurrentCulture),
         _configData.WBConfig[0].ToString(CultureInfo.CurrentCulture),
-        UnlockStatusString(status[1]),
+        UnlockStatusString(status[1], player),
         status[1].ToString(CultureInfo.CurrentCulture),
         _configData.WBConfig[1].ToString(CultureInfo.CurrentCulture),
-        UnlockStatusString(status[2]),
+        UnlockStatusString(status[2], player),
         status[2].ToString(CultureInfo.CurrentCulture),
         _configData.WBConfig[2].ToString(CultureInfo.CurrentCulture)
       );
