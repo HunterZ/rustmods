@@ -1,49 +1,50 @@
-﻿using Oxide.Core.Libraries.Covalence;
+﻿using Newtonsoft.Json;
+using Oxide.Core.Libraries.Covalence;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.Linq;
 using System.Text;
 
 namespace Oxide.Plugins
 {
-  [Info("HZ Workbench", "HunterZ", "2.1.0")]
+  [Info("HZ Workbench", "HunterZ", "2.2.0")]
   [Description("Overhaul of original Timed Workbench plugin by DizzasTeR, which delays the ability to craft workbenches until some time has elapsed")]
   class HZWorkbench : RustPlugin
   {
     #region Vars
-    // periodic global status broadcast timer
-    protected Timer broadcastTimer;
-    // workbench unlock announcement broadcast timers
-    protected Timer[] unlockTimers;
-    // set of users that have already received a "can't craft" warning
-    private HashSet<int> craftWarnedSet;
-    private static readonly List<int> DEFAULT_WB_SECONDS = new() {
-      86400, 172800, 259200
-    };
+
     // ordered list of workbench IDs
-    private static readonly int[] ID_WORKBENCH = {
+    private static readonly int[] _WORKBENCH_ID = {
       1524187186, -41896755, -1607980696
     };
 
-    # region Config Strings
-    private const string CFG_KEY_BROADCAST = "BroadcastConfig";
-    private const string CFG_KEY_WIPE = "LastWipeUTC";
-    private static readonly string[] CFG_KEY_WB = {
-      "WB1Config", "WB2Config", "WB3Config"
-    };
-    # endregion Config Strings
+    // periodic global status broadcast timer
+    private Timer? _broadcastTimer = null;
 
-    # region Permission Strings
-    private const string PERMISSION_ADMIN = "hzworkbench.admin";
-    private const string PERMISSION_BROADCAST = "hzworkbench.broadcast";
-    private const string PERMISSION_INFO = "hzworkbench.info";
-    private const string PERMISSION_MODIFY = "hzworkbench.modify";
-    private const string PERMISSION_RELOAD = "hzworkbench.reload";
-    private const string PERMISSION_RESET = "hzworkbench.reset";
-    private const string PERMISSION_SKIPLOCK = "hzworkbench.skiplock";
-    private const string PERMISSION_WIPE = "hzworkbench.wipe";
-    # endregion Permission Strings
+    // data managed via config file
+    private ConfigData? _configData = null;
+
+    // "can't craft" warning suppression timers by userID
+    private readonly Dictionary<ulong, Timer> _craftWarned = new();
+
+    // string builder for producing status messages
+    private readonly StringBuilder _statusBuilder = new();
+
+    // workbench unlock announcement broadcast timers
+    private readonly Timer?[] _unlockTimers = { null, null, null };
+
+    #region Permission Strings
+
+    private const string PERMISSION_ADMIN = "admin";
+    private const string PERMISSION_BROADCAST = "broadcast";
+    private const string PERMISSION_INFO = "info";
+    private const string PERMISSION_MODIFY = "modify";
+    private const string PERMISSION_RELOAD = "reload";
+    private const string PERMISSION_RESET = "reset";
+    private const string PERMISSION_SKIPLOCK = "skiplock";
+    private const string PERMISSION_WIPE = "wipe";
+
+    #endregion Permission Strings
 
     #endregion Vars
 
@@ -53,8 +54,9 @@ namespace Oxide.Plugins
     // if positive optional parameter is specified, it is used as a passthrough
     private double GetWipeElapsedSeconds(double wipeElapsedSeconds = -1.0)
     {
+      if (null == _configData) return 0;
       return wipeElapsedSeconds > 0 ? wipeElapsedSeconds :
-        (DateTime.UtcNow - GetLastWipe()).TotalSeconds;
+        (DateTime.UtcNow - _configData.LastWipeUTC).TotalSeconds;
     }
 
     // returns unlock status for given workbench index (0-2 => level 1-3)
@@ -66,25 +68,22 @@ namespace Oxide.Plugins
     //  lookups when calling from a loop
     private int GetUnlockStatus(int index, double wipeElapsedSeconds = -1.0)
     {
+      if (null == _configData || index < 0 || index > 2) return 0;
       wipeElapsedSeconds = GetWipeElapsedSeconds(wipeElapsedSeconds);
-      double unlockDelaySeconds = GetWbSeconds(index);
+      double unlockDelaySeconds = _configData.WBConfig[index];
 
-      if (unlockDelaySeconds < 0.0)
-      {
-        // no auto unlock (must be manually unlocked)
-        return -1;
-      }
+      // check for permanent lock
+      if (unlockDelaySeconds < 0.0) return -1;
 
+      // determine auto unlock status
       if (unlockDelaySeconds > 0.0)
       {
-        // determine auto unlock status
-        double unlockSecondsRemaining =
-          unlockDelaySeconds - wipeElapsedSeconds;
+        double unlockSecondsRemaining = unlockDelaySeconds - wipeElapsedSeconds;
         return unlockSecondsRemaining > 0 ?
-          (int)unlockSecondsRemaining : 0;
+          (int)Math.Ceiling(unlockSecondsRemaining) : 0;
       }
 
-      // 0.0 => always unlocked
+      // unlockDelaySeconds == 0.0 => always unlocked
       return 0;
     }
 
@@ -104,47 +103,50 @@ namespace Oxide.Plugins
 
     // create a timer that will fire when the given workbench should unlock, or
     //  null if manually locked or already unlocked
-    private Timer GetTimer(int index, double wipeElapsedSeconds = -1.0)
+    private Timer? GetTimer(int index, double wipeElapsedSeconds = -1.0)
     {
       if (index < 0 || index > 2) { return null; }
 
       wipeElapsedSeconds = GetWipeElapsedSeconds(wipeElapsedSeconds);
-      int status = GetUnlockStatus(index, wipeElapsedSeconds);
+      var status = GetUnlockStatus(index, wipeElapsedSeconds);
 
-      if (status > 0)
-      {
-        return timer.Once(status, () => { ReportUnlock(index); });
-      }
+      if (status > 0) return timer.Once(status, () => { ReportUnlock(index); });
 
       return null;
     }
 
+    // destroy existing broadcast timer (if any)
+    private void DestroyBroadcastTimer()
+    {
+      if (null == _broadcastTimer) return;
+      _broadcastTimer.Destroy();
+      _broadcastTimer = null;
+    }
+
+    // (re)set broadcast timer to fire at configured interval
     private void SetBroadcastTimer()
     {
-      // destroy existing timer (if any)
-      if (broadcastTimer != null)
-      {
-        broadcastTimer.Destroy();
-        broadcastTimer = null;
-      }
+      DestroyBroadcastTimer();
       // only set new timer if config value is positive (i.e. broadcast period
       //  in seconds)
-      int broadcastConfig = GetBroadcastConfig();
+      var broadcastConfig = null == _configData ?
+        0 : _configData.BroadcastConfig;
       if (broadcastConfig > 0)
       {
-        broadcastTimer = timer.Every(broadcastConfig, () => { ReportStatus(null); });
+        _broadcastTimer =
+          timer.Every(broadcastConfig, () => { ReportStatus(null); });
       }
     }
 
     // destroy all existing timers managed by unlockTimers
     private void DestroyUnlockTimers()
     {
-      if (unlockTimers == null) { return; }
-      for (int index = 0; index < 3; ++index)
+      for (int i = 0; i < _unlockTimers.Length; ++i)
       {
-        if (unlockTimers[index] == null) { continue; }
-        unlockTimers[index].Destroy();
-        unlockTimers[index] = null;
+        var unlockTimer = _unlockTimers[i];
+        if (null == unlockTimer || unlockTimer.Destroyed) continue;
+        unlockTimer.Destroy();
+        _unlockTimers[i] = null;
       }
     }
 
@@ -154,43 +156,59 @@ namespace Oxide.Plugins
     {
       // timers don't auto-destruct, so wipe them to avoid double-firing
       DestroyUnlockTimers();
-      double wipeElapsedSeconds = GetWipeElapsedSeconds();
-      unlockTimers = new Timer[]{
-        GetTimer(0, wipeElapsedSeconds),
-        GetTimer(1, wipeElapsedSeconds),
-        GetTimer(2, wipeElapsedSeconds)
-      };
+      var wipeElapsedSeconds = GetWipeElapsedSeconds();
+      for (int i = 0; i < _unlockTimers.Length; ++i)
+      {
+        _unlockTimers[i] = GetTimer(i, wipeElapsedSeconds);
+      }
+    }
+
+    private void DestroyWarnTimer(ulong userId)
+    {
+      if (_craftWarned.Remove(userId, out var wTimer) &&
+          null != wTimer &&
+          !wTimer.Destroyed)
+      {
+        wTimer.Destroy();
+      }
     }
 
     // generate color locked/unlocked status text for twinfo command
-    private string UnlockStatusString(int status) => status == 0 ?
-      Colorize("unlocked", "green") : Colorize("locked", "red");
+    private string UnlockStatusString(int status) =>
+      status == 0 ? Colorize("unlocked", "green") : Colorize("locked", "red");
 
     // return true if player is null, server, or admin, or has permission, else
     //  reply with "no permission" message and return false
     private bool HasPermission(IPlayer player, string perm)
     {
-      bool hasPermission = player == null ||
-                           player.IsServer ||
-                           player.HasPermission(PERMISSION_ADMIN) ||
-                           player.HasPermission(perm);
-      if (!hasPermission)
-      {
-        SendMessage(player, "NoPermission");
-      }
+      if (null == player) return false;
+
+      var hasPermission =
+        player.IsServer ||
+        player.HasPermission(PrefixPermission(PERMISSION_ADMIN)) ||
+        player.HasPermission(PrefixPermission(perm));
+
+      if (!hasPermission) SendMessage(player, "NoPermission");
+
       return hasPermission;
     }
 
+    // return a prefixed version of the given permission string
+    // this is done to avoid hard-coding it, which would be a maintenance issue
+    private string PrefixPermission(string perm) => Name.ToLower() + "." + perm;
+
     // report user-friendly detailed status
-    private void ReportStatus(IPlayer player)
+    private void ReportStatus(IPlayer? player)
     {
       // don't report status if nobody is online
-      if (player == null && BasePlayer.activePlayerList.IsNullOrEmpty()) { return; }
+      if (null == player && BasePlayer.activePlayerList.IsNullOrEmpty()) return;
+
       var status = GetUnlockStatus();
       // don't report status if everything is unlocked
-      if (status[0] == 0 && status[1] == 0 && status[2] == 0) { return; }
-      StringBuilder sb = new();
-      sb.AppendLine(FormatMessage(player, "StatusBanner"));
+      if (0 == status[0] && 0 == status[1] && 0 == status[2]) return;
+
+      _statusBuilder.Clear();
+      _statusBuilder.AppendLine(FormatMessage(player, "StatusBanner"));
       for (int index = 0; index < 3; ++index)
       {
         string wbNumStr = (index + 1).ToString(CultureInfo.CurrentCulture);
@@ -198,33 +216,40 @@ namespace Oxide.Plugins
         {
           case < 0:
           {
-            sb.AppendLine(FormatMessage(player, "StatusManual", wbNumStr));
+            _statusBuilder.AppendLine(
+              FormatMessage(player, "StatusManual", wbNumStr));
           }
           break;
 
           case 0:
           {
-            sb.AppendLine(FormatMessage(player, "StatusUnlocked", wbNumStr));
+            _statusBuilder.AppendLine(
+              FormatMessage(player, "StatusUnlocked", wbNumStr));
           }
           break;
 
           case > 0:
           {
-            var timeSpan = TimeSpan.FromSeconds(status[index]);
-            sb.AppendLine(FormatMessage(player, "StatusTime", wbNumStr, timeSpan.ToString("g", CultureInfo.CurrentCulture)));
+            _statusBuilder.AppendLine(FormatMessage(
+              player, "StatusTime", wbNumStr,
+              TimeSpan.FromSeconds(status[index]).ToString(
+                "g", CultureInfo.CurrentCulture)));
           }
           break;
         }
       }
-      SendRawMessage(player, sb.ToString());
+
+      SendRawMessage(player, _statusBuilder.ToString());
     }
 
     // report that a workbench has unlocked
     private void ReportUnlock(int index)
     {
+      if (index < 0 || index > 2) return;
       // don't report unlock if nobody is online
-      if (BasePlayer.activePlayerList.IsNullOrEmpty()) { return; }
-      SendMessage(null, "UnlockNotice", (index + 1).ToString(CultureInfo.CurrentCulture));
+      if (BasePlayer.activePlayerList.IsNullOrEmpty()) return;
+      SendMessage(
+        null, "UnlockNotice", (index + 1).ToString(CultureInfo.CurrentCulture));
     }
 
     #endregion Utilities
@@ -236,7 +261,7 @@ namespace Oxide.Plugins
     {
       lang.RegisterMessages(new Dictionary<string, string>
       {
-        ["BroadcastDisabled"]  = "Status broadcast disabled",
+        ["BroadcastDisabled"] = "Status broadcast disabled",
         ["BroadcastSet"] = "Status broadcast period set to {0} second(s)",
         ["CannotCraft"] = "Cannot craft this item (unlocks in {0})",
         ["CannotCraftManual"] = "Cannot craft this item (unlocks manually/never)",
@@ -245,7 +270,7 @@ namespace Oxide.Plugins
         ["ModifiedManual"] = "WB {0} is now always locked",
         ["ModifiedTime"] = "WB {0} now unlocks in {1} second(s) after wipe",
         ["ModifiedUnlocked"] = "WB {0} is now always unlocked",
-        ["NoPermission"] = "No access",
+        ["NoPermission"] = "You don't have permission to use this command",
         ["PluginWipe"] = "Wipe time reset to {0}",
         ["ReloadConfig"] = "Config has been reloaded",
         ["ResetConfig"] = "Config has been reset",
@@ -258,13 +283,14 @@ namespace Oxide.Plugins
       }, this);
     }
 
-    // format a message based on language dictionary, arguments, and
-    //  destination
-    private string FormatMessage(IPlayer player, string langCode, params string[] args)
+    // format a message based on language dictionary, arguments, and destination
+    private string FormatMessage(
+      IPlayer? player, string langCode, params string[] args)
     {
-      bool isServer = player == null || player.IsServer;
-      string msg = string.Format(lang.GetMessage(langCode, this, isServer ? null : player.Id), args);
-      if (isServer)
+      var playerId = null == player || player.IsServer ? null : player.Id;
+      var msg = string.Format(lang.GetMessage(langCode, this, playerId), args);
+      // strip color markings out of console messages
+      if (null == playerId)
         // note: cannot supply StringComparison enum value here, as it results
         //  in a "not implemented" exception in some cases
         msg = msg
@@ -275,9 +301,9 @@ namespace Oxide.Plugins
     }
 
     // send a message to player or server without additional formatting
-    private void SendRawMessage(IPlayer player, string message)
+    private void SendRawMessage(IPlayer? player, string message)
     {
-      if (player == null)
+      if (null == player)
       {
         Server.Broadcast(message);
       }
@@ -290,7 +316,8 @@ namespace Oxide.Plugins
     // send a message to player or server based on language dictionary and
     //  arguments
     // this is the primary method that should be used to communicate to users
-    private void SendMessage(IPlayer player, string langCode, params string[] args)
+    private void SendMessage(
+      IPlayer? player, string langCode, params string[] args)
     {
       SendRawMessage(player, FormatMessage(player, langCode, args));
     }
@@ -298,7 +325,8 @@ namespace Oxide.Plugins
     // decorate a string with color codes
     // note that only red or green should be used, as FormatMessage() only
     //  strips those
-    private string Colorize(string str, string color) => "<color=" + color + ">" + str + "</color>";
+    private string Colorize(string str, string color) =>
+      "<color=" + color + ">" + str + "</color>";
 
     #endregion Messaging
 
@@ -309,29 +337,24 @@ namespace Oxide.Plugins
     {
       SetBroadcastTimer();
       SetUnlockTimers();
-      craftWarnedSet = new();
 
       // Permissions
-      permission.RegisterPermission(PERMISSION_ADMIN, this);
-      permission.RegisterPermission(PERMISSION_BROADCAST, this);
-      permission.RegisterPermission(PERMISSION_INFO, this);
-      permission.RegisterPermission(PERMISSION_MODIFY, this);
-      permission.RegisterPermission(PERMISSION_RELOAD, this);
-      permission.RegisterPermission(PERMISSION_RESET, this);
-      permission.RegisterPermission(PERMISSION_SKIPLOCK, this);
-      permission.RegisterPermission(PERMISSION_WIPE, this);
-
-      permission.GrantGroupPermission("admin", PERMISSION_ADMIN, this);
-
-      // I think this ensures workbenches are craftable by default
-      // not sure why this is needed, since it should already be true?
-      foreach (var bp in from ItemBlueprint bp in ItemManager.GetBlueprints()
-                         where ID_WORKBENCH.Contains(bp.targetItem.itemid)
-                         select bp)
-      {
-        bp.defaultBlueprint = true;
-        bp.userCraftable = true;
-      }
+      permission.RegisterPermission(
+        PrefixPermission(PERMISSION_ADMIN), this);
+      permission.RegisterPermission(
+        PrefixPermission(PERMISSION_BROADCAST), this);
+      permission.RegisterPermission(
+        PrefixPermission(PERMISSION_INFO), this);
+      permission.RegisterPermission(
+        PrefixPermission(PERMISSION_MODIFY), this);
+      permission.RegisterPermission(
+        PrefixPermission(PERMISSION_RELOAD), this);
+      permission.RegisterPermission(
+        PrefixPermission(PERMISSION_RESET), this);
+      permission.RegisterPermission(
+        PrefixPermission(PERMISSION_SKIPLOCK), this);
+      permission.RegisterPermission(
+        PrefixPermission(PERMISSION_WIPE), this);
 
       AddCovalenceCommand("twbroadcast", nameof(CommandBroadcast));
       AddCovalenceCommand("twinfo", nameof(CommandInfo));
@@ -345,68 +368,79 @@ namespace Oxide.Plugins
     protected void Unload()
     {
       // clean up any timers
-
-      if (broadcastTimer != null)
-      {
-        broadcastTimer.Destroy();
-        broadcastTimer = null;
-      }
-
+      DestroyBroadcastTimer();
       DestroyUnlockTimers();
+      foreach (var (_, warnTimer) in _craftWarned)
+      {
+        if (null == warnTimer || warnTimer.Destroyed) continue;
+        warnTimer.Destroy();
+      }
+      _craftWarned.Clear();
     }
 
-    protected object CanCraft(PlayerBlueprints playerBlueprints, ItemDefinition itemDefinition)
+    private object CanCraft(
+      PlayerBlueprints playerBlueprints, ItemDefinition itemDefinition)
     {
-      // don't override craftable status for non-workbenches
-      if (!ID_WORKBENCH.Contains(itemDefinition.itemid))
+      // suppress IDE null reference return warnings, as the method signature is
+      //  imposed by Oxide
+#pragma warning disable CS8603 // Possible null reference return.
+
+      var player = playerBlueprints.baseEntity;
+      // do nothing if any of the following are true:
+      // - player reference invalid
+      // - player in Tutorial Island
+      // - player crafting something other than a workbench
+      // - player has skiplock permission (note: admins not exempt by default)
+      if (null == player ||
+          player.IsInTutorial ||
+          !_WORKBENCH_ID.Contains(itemDefinition.itemid) ||
+          player.IPlayer.HasPermission(PrefixPermission(PERMISSION_SKIPLOCK)))
       {
         return null;
       }
 
-      // don't override craftable status for players with skiplock
-      IPlayer player = playerBlueprints?._baseEntity?.IPlayer;
-      if (player == null || player.HasPermission(PERMISSION_SKIPLOCK))
+      // get status
+      var wbIndex = Array.IndexOf(_WORKBENCH_ID, itemDefinition.itemid);
+      var status = GetUnlockStatus(wbIndex);
+
+      // do nothing if workbench is unlocked
+      if (0 == status) return null;
+
+      var userId = player.userID.Get();
+
+      // if player recently warned, block crafting silently
+      if (_craftWarned.ContainsKey(userId)) return false;
+
+      // warn player
+      if (status > 0) // => timed lockout
       {
-        return null;
+        var timeSpan = TimeSpan.FromSeconds(status);
+        SendMessage(player.IPlayer, "CannotCraft", timeSpan.ToString(
+          "g", CultureInfo.CurrentCulture));
+      }
+      else // status < 0 => permanent lockout
+      {
+        SendMessage(player.IPlayer, "CannotCraftManual");
       }
 
-      double secondsLeft = GetUnlockStatus(Array.IndexOf(ID_WORKBENCH, itemDefinition.itemid));
-      var playerHashCode = player.GetHashCode();
-      var alreadyWarned = craftWarnedSet.Remove(playerHashCode);
-      if (secondsLeft > 0)
+      // set warning suppression timer
+      _craftWarned.Add(userId, timer.Once(5.0f, () =>
       {
-        // report "can't craft" due to delay in effect
-        // ...but suppress every other call, as the game always checks twice?
-        // TODO: maybe change to a per-user timed suppression to avoid DDoS?
-        if (!alreadyWarned)
-        {
-          craftWarnedSet.Add(playerHashCode);
-          var timeSpan = TimeSpan.FromSeconds(secondsLeft);
-          SendMessage(player, "CannotCraft", timeSpan.ToString("g", CultureInfo.CurrentCulture));
-        }
-        return false;
-      }
+        DestroyWarnTimer(userId);
+      }));
 
-      if (secondsLeft < 0)
-      {
-        // report "can't craft" due to manual/permanent lockout
-        // ...but suppress every other call, as the game always checks twice?
-        // TODO: maybe change to a per-user timed suppression to avoid DDoS?
-        if (!alreadyWarned)
-        {
-          craftWarnedSet.Add(playerHashCode);
-          SendMessage(player, "CannotCraftManual");
-        }
-        return false;
-      }
 
-      // don't override - no lockout in effect
-      return null;
+      // block crafting
+      return false;
+#pragma warning restore CS8603 // Possible null reference return.
     }
 
-    protected void OnPlayerConnected(BasePlayer player)
-    {
+    private void OnPlayerConnected(BasePlayer player) =>
       ReportStatus(player.IPlayer);
+
+    private void OnPlayerDisconnected(BasePlayer player, string reason)
+    {
+      DestroyWarnTimer(player.userID.Get());
     }
 
     #endregion Hooks
@@ -415,21 +449,27 @@ namespace Oxide.Plugins
 
     private void CommandBroadcast(IPlayer player, string command, string[] args)
     {
-      if (!HasPermission(player, PERMISSION_BROADCAST)) { return; }
-
-      if (args.Length < 1)
+      if (null == _configData || !HasPermission(player, PERMISSION_BROADCAST))
       {
-        player.Reply(string.Format(lang.GetMessage("SyntaxError", this, player.Id), command));
         return;
       }
 
-      int broadcastConfig = Convert.ToInt32(args[0]);
-      SetBroadcastConfig(broadcastConfig);
+      if (args.Length < 1)
+      {
+        player.Reply(string.Format(
+          lang.GetMessage("SyntaxError", this, player.Id), command));
+        return;
+      }
+
+      _configData.BroadcastConfig = Convert.ToInt32(args[0]);
+      if (_configData.BroadcastConfig < 0) _configData.BroadcastConfig = 0;
+      SaveConfig();
       SetBroadcastTimer();
 
-      if (broadcastConfig > 0)
+      if (_configData.BroadcastConfig > 0)
       {
-        SendMessage(player, "BroadcastSet", args[0]);
+        SendMessage(
+          player, "BroadcastSet", _configData.BroadcastConfig.ToString());
       }
       else
       {
@@ -439,7 +479,10 @@ namespace Oxide.Plugins
 
     private void CommandInfo(IPlayer player)
     {
-      if (!HasPermission(player, PERMISSION_INFO)) { return; }
+      if (null == _configData || !HasPermission(player, PERMISSION_INFO))
+      {
+        return;
+      }
 
       var status = GetUnlockStatus();
 
@@ -447,50 +490,52 @@ namespace Oxide.Plugins
         GetWipeElapsedSeconds().ToString(CultureInfo.CurrentCulture),
         UnlockStatusString(status[0]),
         status[0].ToString(CultureInfo.CurrentCulture),
-        GetWbSeconds(0).ToString(CultureInfo.CurrentCulture),
+        _configData.WBConfig[0].ToString(CultureInfo.CurrentCulture),
         UnlockStatusString(status[1]),
         status[1].ToString(CultureInfo.CurrentCulture),
-        GetWbSeconds(1).ToString(CultureInfo.CurrentCulture),
+        _configData.WBConfig[1].ToString(CultureInfo.CurrentCulture),
         UnlockStatusString(status[2]),
         status[2].ToString(CultureInfo.CurrentCulture),
-        GetWbSeconds(2).ToString(CultureInfo.CurrentCulture)
+        _configData.WBConfig[2].ToString(CultureInfo.CurrentCulture)
       );
     }
 
     private void CommandModify(IPlayer player, string command, string[] args)
     {
-      if (!HasPermission(player, PERMISSION_MODIFY)) { return; }
-
-      if (args.Length < 2)
+      if (null == _configData || !HasPermission(player, PERMISSION_MODIFY))
       {
-        player.Reply(string.Format(lang.GetMessage("SyntaxError", this, player.Id), command));
         return;
       }
 
-      int wbIndex;
-      switch (args[0])
+      if (args.Length < 2)
       {
-        case "1": wbIndex = 0; break;
-        case "2": wbIndex = 1; break;
-        case "3": wbIndex = 2; break;
-        default:
-        {
-          player.Reply(string.Format(lang.GetMessage("InvalidWorkbench", this, player.Id), command));
-          return;
-        }
+        player.Reply(string.Format(
+          lang.GetMessage("SyntaxError", this, player.Id), command));
+        return;
       }
 
-      int seconds = Convert.ToInt32(args[1]);
-      SetWbSeconds(wbIndex, seconds);
+      var wbIndex = Convert.ToInt32(args[0]) - 1;
+      if (wbIndex < 0 || wbIndex > 2)
+      {
+        player.Reply(string.Format(
+          lang.GetMessage("InvalidWorkbench", this, player.Id), command));
+        return;
+      }
+
+      var wbConfig = Convert.ToInt32(args[1]);
+      if (wbConfig < -1) wbConfig = -1;
+      _configData.WBConfig[wbIndex] = wbConfig;
+      SaveConfig();
       SetUnlockTimers();
 
-      if (seconds < 0)
+      if (wbConfig < 0)
       {
         SendMessage(player, "ModifiedManual", args[0]);
       }
-      else if (seconds > 0)
+      else if (wbConfig > 0)
       {
-        SendMessage(player, "ModifiedTime", args[0], seconds.ToString(CultureInfo.CurrentCulture));
+        SendMessage(player, "ModifiedTime", args[0], wbConfig.ToString(
+          CultureInfo.CurrentCulture));
       }
       else
       {
@@ -500,34 +545,41 @@ namespace Oxide.Plugins
 
     private void CommandReload(IPlayer player)
     {
-      if (!HasPermission(player, PERMISSION_RELOAD)) { return; }
+      if (!HasPermission(player, PERMISSION_RELOAD)) return;
 
       LoadConfig();
+      SetBroadcastTimer();
       SetUnlockTimers();
       SendMessage(player, "ReloadConfig");
+      CommandInfo(player);
     }
 
     private void CommandReset(IPlayer player)
     {
-      if (!HasPermission(player, PERMISSION_RESET)) { return; }
+      if (!HasPermission(player, PERMISSION_RESET)) return;
 
-      SetWbSeconds(DEFAULT_WB_SECONDS);
+      LoadDefaultConfig();
+      SaveConfig();
+      SetBroadcastTimer();
       SetUnlockTimers();
-
       SendMessage(player, "ResetConfig");
       CommandInfo(player);
     }
 
     private void CommandWipe(IPlayer player)
     {
-      if (!HasPermission(player, PERMISSION_WIPE)) { return; }
+      if (null == _configData || !HasPermission(player, PERMISSION_WIPE))
+      {
+        return;
+      }
 
-      DateTime wipeTime = DateTime.UtcNow;
-      SetLastWipe(wipeTime);
+      DateTime currentTime = DateTime.UtcNow;
+      _configData.LastWipeUTC = currentTime;
+      SaveConfig();
       SetUnlockTimers();
 
-      SendMessage(player, "PluginWipe", wipeTime.ToString("R", CultureInfo.CurrentCulture));
-      Puts("CommandWipe(): Reset wipe time to " + wipeTime.ToString("R", CultureInfo.CurrentCulture));
+      SendMessage(player, "PluginWipe", currentTime.ToString(
+        "R", CultureInfo.CurrentCulture));
     }
 
     #endregion Commands
@@ -538,65 +590,63 @@ namespace Oxide.Plugins
     protected override void LoadConfig()
     {
       base.LoadConfig();
-      var serverWipeTime = SaveRestore.SaveCreatedTime;
-      if (GetLastWipe() < serverWipeTime)
+      try
       {
-        SetLastWipe(serverWipeTime);
-        Puts("LoadConfig(): Reset wipe time to " + serverWipeTime.ToString("R", CultureInfo.CurrentCulture));
+        _configData = Config.ReadObject<ConfigData>();
+        if (null == _configData)
+        {
+          throw new JsonException("ReadObject() returned null");
+        }
       }
+      catch (Exception ex)
+      {
+        PrintWarning($"LoadConfig(): Exception while loading configuration file:\n{ex}");
+        LoadDefaultConfig();
+      }
+
+      if (null == _configData) return;
+
+      if (_configData.WBConfig.Length != 3)
+      {
+        PrintWarning($"LoadConfig(): Got {_configData.WBConfig.Length} workbench unlock settings, but expected 3; resetting to default list");
+        _configData.WBConfig = ConfigData._DEFAULT_WB_SECONDS;
+      }
+
+      var serverWipeTime = SaveRestore.SaveCreatedTime;
+      if (_configData.LastWipeUTC < serverWipeTime)
+      {
+        _configData.LastWipeUTC = serverWipeTime;
+        Puts("LoadConfig(): Wipe detected - reset wipe time to " + serverWipeTime.ToString("R", CultureInfo.CurrentCulture));
+      }
+
+      SaveConfig();
     }
 
     protected override void LoadDefaultConfig()
     {
       Puts("LoadDefaultConfig(): Creating a new configuration file");
-      // note: don't use SetXYZ() here because they will cause redundant saves
-      Config[CFG_KEY_BROADCAST] = 300;
-      Config[CFG_KEY_WIPE] = DateTime.UtcNow;
-      Config[CFG_KEY_WB[0]] = DEFAULT_WB_SECONDS[0];
-      Config[CFG_KEY_WB[1]] = DEFAULT_WB_SECONDS[1];
-      Config[CFG_KEY_WB[2]] = DEFAULT_WB_SECONDS[2];
+      _configData = new ConfigData();
     }
 
-    int GetBroadcastConfig()
-    {
-      return (int)Config[CFG_KEY_BROADCAST];
-    }
+    protected override void SaveConfig() => Config.WriteObject(_configData);
 
-    void SetBroadcastConfig(int broadcastConfig)
+    // config file data class
+    private sealed class ConfigData
     {
-      Config[CFG_KEY_BROADCAST] = broadcastConfig;
-      SaveConfig();
-    }
+      // default workbench unlock times
+      [JsonIgnore]
+      public static readonly int[] _DEFAULT_WB_SECONDS = {
+        86400, 172800, 259200
+      };
 
-    DateTime GetLastWipe()
-    {
-      return (DateTime)Config[CFG_KEY_WIPE];
-    }
+      [JsonProperty(PropertyName = "Global status broadcast interval in seconds (0 to disable)")]
+      public int BroadcastConfig { get; set; } = 300;
 
-    void SetLastWipe(DateTime wipeTime)
-    {
-      Config[CFG_KEY_WIPE] = wipeTime;
-      SaveConfig();
-    }
+      [JsonProperty(PropertyName = "Time that current wipe started (UTC)")]
+      public DateTime LastWipeUTC { get; set; } = SaveRestore.SaveCreatedTime;
 
-    int GetWbSeconds(int index)
-    {
-      return (int)Config[CFG_KEY_WB[index]];
-    }
-
-    void SetWbSeconds(List<int> seconds)
-    {
-      Config[CFG_KEY_WB[0]] = seconds[0];
-      Config[CFG_KEY_WB[1]] = seconds[1];
-      Config[CFG_KEY_WB[2]] = seconds[2];
-      SaveConfig();
-    }
-
-    void SetWbSeconds(int index, int seconds)
-    {
-      if (seconds < 0) { seconds = -1; }
-      Config[CFG_KEY_WB[index]] = seconds;
-      SaveConfig();
+      [JsonProperty(PropertyName = "Workbench unlock times (seconds from start of wipe, or 0 for unlocked, or -1 for permanently locked)")]
+      public int[] WBConfig { get; set; } = _DEFAULT_WB_SECONDS;
     }
 
     #endregion Configuration
