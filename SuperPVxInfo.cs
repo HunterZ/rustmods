@@ -1,5 +1,4 @@
 ﻿using Facepunch;
-using Microsoft.CodeAnalysis;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Converters;
 using Oxide.Core;
@@ -14,7 +13,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-  [Info("Super PVx Info", "HunterZ", "1.3.0")]
+  [Info("Super PVx Info", "HunterZ", "1.3.1")]
   [Description("Displays PvE/PvP/etc. status on player's HUD")]
   public class SuperPVxInfo : RustPlugin
   {
@@ -1501,6 +1500,8 @@ namespace Oxide.Plugins
       private bool _inPvpEvent;
       // true if in safe zone on last check
       private bool? _inSafeZone;
+      // true if in tutorial island on last check
+      private bool? _inTutorial;
       // non-null if in Zone Manager zone
       private PVxType? _inZoneType;
       // reference back to player
@@ -1539,6 +1540,7 @@ namespace Oxide.Plugins
         _heightBelowPvp = null;
         _inPvpEvent = false;
         _inSafeZone = null;
+        _inTutorial = null;
         _inZoneType = inZoneType;
         _player = player;
         _pvxState = null;
@@ -1602,13 +1604,13 @@ namespace Oxide.Plugins
         if (currentState)
         {
           // false->true
-          Instance.SendCannedMessage(_player, enterMessage);
+          SendCannedMessage(enterMessage);
         }
         else
         {
           // true->false
           _checkZone = true;
-          Instance.SendCannedMessage(_player, exitMessage);
+          SendCannedMessage(exitMessage);
         }
         storedState = currentState;
       }
@@ -1621,7 +1623,7 @@ namespace Oxide.Plugins
         // - in PvP base/bubble/event/zone => PvP
         // - above/below PvP height => PvP
         // - pvp exit delay active => PvP
-        // - in PvE base/event/zone => PvE
+        // - in PvE base/event/tutorial/zone => PvE
         // - configured default
         if (true == _inSafeZone)             return PVxType.SafeZone;
         if (PVxType.SafeZone == _inZoneType) return PVxType.SafeZone;
@@ -1635,10 +1637,27 @@ namespace Oxide.Plugins
         if (_inPvpDelay)                     return PVxType.PVPDelay;
         if (PVxType.PVE == _inBaseType)      return PVxType.PVE;
         if (PVxType.PVE == _inPVxEventType)  return PVxType.PVE;
+        if (true == _inTutorial)             return PVxType.PVE;
         if (PVxType.PVE == _inZoneType)      return PVxType.PVE;
         // defer to default state (or PVE if somehow not defined)
         return Instance?._configData == null ?
           PVxType.PVE : Instance._configData.defaultType;
+      }
+
+      // send message with the given key to watcher's player if appropriate
+      private void SendCannedMessage(string message)
+      {
+        // note: _pvxState check is to suppress blasting change messages on
+        //  initial check
+        if (null == _player ||
+            null == Instance ||
+            null == _pvxState ||
+            string.IsNullOrEmpty(message))
+        {
+          return;
+        }
+
+        Instance.SendCannedMessage(_player, message);
       }
 
       // perform any requested and/or periodic flag update checks that could
@@ -1664,8 +1683,7 @@ namespace Oxide.Plugins
                 BaseRadius)
           {
             _inBaseType = null;
-            Instance.SendCannedMessage(
-              _player, "Unexpected Exit From Abandoned Or Raidable Base");
+            SendCannedMessage("Unexpected Exit From Abandoned Or Raidable Base");
             // check PVP delay status as well, since that may now also be wrong
             if (_inPvpDelay) _checkPvpDelay = true;
           }
@@ -1678,8 +1696,7 @@ namespace Oxide.Plugins
           if (null != _inPVxEventType && !Instance.IsPlayerInPVxEvent(_player))
           {
             _inPVxEventType = null;
-            Instance.SendCannedMessage(
-              _player, "Unexpected Exit From Dangerous Treasures Event");
+            SendCannedMessage("Unexpected Exit From Dangerous Treasures Event");
           }
           _checkPVxEvent = false;
         }
@@ -1707,6 +1724,12 @@ namespace Oxide.Plugins
         CheckPeriodic(
           ref _inSafeZone, _player.InSafeZone(),
           "Safe Zone Entry", "Safe Zone Exit");
+
+        // tutorial island check
+        // don't bother with enter/exit messages for this
+        CheckPeriodic(
+          ref _inTutorial, _player.IsInTutorial,
+          "", "");
 
         // height check
         CheckPeriodic(
