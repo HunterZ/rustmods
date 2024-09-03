@@ -9,7 +9,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-  [Info("Player Base PvP Zones", "HunterZ", "1.0.4")]
+  [Info("Player Base PvP Zones", "HunterZ", "1.0.5")]
   [Description("Maintains Zone Manager / TruePVE exclusion zones around player bases")]
   public class PlayerBasePvpZones : RustPlugin
   {
@@ -190,8 +190,9 @@ namespace Oxide.Plugins
     }
 
     // OwnerID is zero for shelters for some reason, so check auth list
-    private static bool IsPlayerOwned(EntityPrivilege legacyShelter)
+    private static bool IsPlayerOwned(EntityPrivilege? legacyShelter)
     {
+      if (null == legacyShelter) return false;
       foreach (var playerNameID in legacyShelter.authorizedPlayers)
       {
         if (playerNameID.userid.IsSteamId()) return true;
@@ -199,8 +200,8 @@ namespace Oxide.Plugins
       return false;
     }
 
-    private static bool IsPlayerOwned(DecayEntity decayEntity) =>
-      decayEntity.OwnerID.IsSteamId();
+    private static bool IsPlayerOwned(DecayEntity? decayEntity) =>
+      null != decayEntity && decayEntity.OwnerID.IsSteamId();
 
     private static bool IsValid(BaseNetworkable? baseNetworkable) =>
       null != baseNetworkable &&
@@ -317,7 +318,7 @@ namespace Oxide.Plugins
       if (ZM_CreateOrUpdateZone(buildingData, toolCupboardID))
       {
         // ...and mapping
-        TruePVE_AddOrUpdateMapping(toolCupboardID);
+        TP_AddOrUpdateMapping(toolCupboardID);
       }
 
       // schedule a follow-up in case more changes are occuring
@@ -340,7 +341,7 @@ namespace Oxide.Plugins
       ZM_EraseZone(toolCupboardID);
 
       // destroy mapping
-      TruePVE_RemoveMapping(toolCupboardID);
+      TP_RemoveMapping(toolCupboardID);
     }
 
     // schedule a delayed building update check
@@ -453,7 +454,7 @@ namespace Oxide.Plugins
       if (ZM_CreateOrUpdateZone(shelterData, legacyShelterID))
       {
         // ...and mapping
-        TruePVE_AddOrUpdateMapping(legacyShelterID);
+        TP_AddOrUpdateMapping(legacyShelterID);
       }
     }
 
@@ -473,7 +474,7 @@ namespace Oxide.Plugins
       ZM_EraseZone(legacyShelterID);
 
       // destroy mapping
-      TruePVE_RemoveMapping(legacyShelterID);
+      TP_RemoveMapping(legacyShelterID);
     }
 
     // schedule a delayed shelter creation
@@ -558,7 +559,7 @@ namespace Oxide.Plugins
       if (ZM_CreateOrUpdateZone(tugboatData, tugboatID))
       {
         // ...and mapping
-        TruePVE_AddOrUpdateMapping(tugboatID);
+        TP_AddOrUpdateMapping(tugboatID);
       }
     }
 
@@ -578,7 +579,7 @@ namespace Oxide.Plugins
       ZM_EraseZone(tugboatID);
 
       // destroy mapping
-      TruePVE_RemoveMapping(tugboatID);
+      TP_RemoveMapping(tugboatID);
     }
 
     // schedule a delayed shelter deletion
@@ -656,6 +657,30 @@ namespace Oxide.Plugins
       Interface.CallHook("OnPlayerBasePvpDelayStop", playerID, delayData.Item2);
     }
 
+    // purge any dangling zones + mappings from previous runs
+    // this shouldn't be needed, but DynamicPVP does it, so I figured it
+    //  wouldn't hurt
+    private void PurgeOldZones()
+    {
+      var zoneIds = ZM_GetZoneIDs();
+      if (null == zoneIds) return;
+
+      uint zoneCount = 0;
+      uint mappingCount = 0;
+
+      foreach (var zoneId in zoneIds)
+      {
+        if (!zoneId.Contains(_zoneIdPrefix)) continue;
+        // this is one of ours - delete it
+        if (ZM_EraseZone(zoneId)) ++zoneCount;
+        // ...and any corresponding mapping
+        if (TP_RemoveMapping(zoneId)) ++mappingCount;
+      }
+
+      Puts($"OnServerInitialized():  Deleted {zoneCount} dangling zone(s)...");
+      Puts($"OnServerInitialized():  Deleted {mappingCount} dangling mapping(s)...");
+    }
+
     #endregion Core Methods
 
     #region Oxide/RustPlugin API/Hooks
@@ -687,23 +712,30 @@ namespace Oxide.Plugins
     {
       Puts("OnServerInitialized(): Starting up...");
 
+      // purge any dangling zones
+      PurgeOldZones();
+
       // create zones immediately for all existing player-owned bases
       foreach (var (_, building) in BuildingManager.server.buildingDictionary)
       {
         var toolCupboard = GetToolCupboard(building);
 #pragma warning disable CS8604 // Possible null reference argument.
-        if (IsValid(toolCupboard)) CreateBuildingData(toolCupboard);
+        if (IsValid(toolCupboard) && IsPlayerOwned(toolCupboard))
+        {
+          CreateBuildingData(toolCupboard);
+        }
 #pragma warning restore CS8604 // Possible null reference argument.
       }
       Puts($"OnServerInitialized():  Created {_buildingData.Count} building zones...");
 
       // create zones immediately for all existing player-owned legacy shelters
-      foreach (var (_, shelterList) in LegacyShelter.SheltersPerPlayer)
+      foreach (var (p, shelterList) in LegacyShelter.SheltersPerPlayer)
       {
         foreach (var shelter in shelterList)
         {
           if (IsValid(shelter) &&
-              shelter.entityPrivilege.TryGet(true, out var legacyShelter))
+              shelter.entityPrivilege.TryGet(true, out var legacyShelter) &&
+              IsPlayerOwned(legacyShelter))
           {
             CreateShelterData(legacyShelter);
           }
@@ -989,11 +1021,12 @@ namespace Oxide.Plugins
     //  with player owner set
     private void OnEntitySpawned(EntityPrivilege legacyShelter)
     {
-      // abort if this isn't a player-owned shelter
-      if (!IsPlayerOwned(legacyShelter)) return;
-
       NextTick(() =>
       {
+        // abort if this isn't a player-owned shelter
+        // this needs to be checked inside of NextTick() because Raidable
+        //  Shelters doesn't clear auth until after spawning
+        if (!IsPlayerOwned(legacyShelter)) return;
         // schedule creation of new player base record + zone
         ScheduleCreateShelterData(legacyShelter);
       });
@@ -1157,8 +1190,8 @@ namespace Oxide.Plugins
     private static ZoneManager.Zone? ZM_GetZoneByID(string zoneID) =>
       (ZoneManager.Zone?)Interface.CallHook("GetZoneByID", zoneID);
 
-    private ZoneManager.Zone? GetZoneByID(NetworkableId networkableId) =>
-      ZM_GetZoneByID(GetZoneID(networkableId));
+    private string[]? ZM_GetZoneIDs() =>
+      (string[]?)Interface.CallHook("GetZoneIDs");
 
     #endregion ZoneManager Helpers
 
@@ -1263,22 +1296,21 @@ namespace Oxide.Plugins
     }
 
     // map a ZoneManager zone ID to a TruePVE ruleset (i.e. marks it as PVP)
-    private static bool TruePVE_AddOrUpdateMapping(
+    private static bool TP_AddOrUpdateMapping(
       string zoneID, string ruleset) =>
       Convert.ToBoolean(Interface.CallHook(
         "AddOrUpdateMapping", zoneID, ruleset));
 
     // create mapping for networkable ID to configured ruleset
-    private void TruePVE_AddOrUpdateMapping(NetworkableId networkableID) =>
-      TruePVE_AddOrUpdateMapping(
-        GetZoneID(networkableID), _configData.rulesetName);
+    private void TP_AddOrUpdateMapping(NetworkableId networkableID) =>
+      TP_AddOrUpdateMapping(GetZoneID(networkableID), _configData.rulesetName);
 
     // delete TruePVE mapping for given ZoneManager zone ID
-    private static bool TruePVE_RemoveMapping(string zoneID) =>
+    private static bool TP_RemoveMapping(string zoneID) =>
       Convert.ToBoolean(Interface.CallHook("RemoveMapping", zoneID));
 
-    private void TruePVE_RemoveMapping(NetworkableId networkableID) =>
-      TruePVE_RemoveMapping(GetZoneID(networkableID));
+    private void TP_RemoveMapping(NetworkableId networkableID) =>
+      TP_RemoveMapping(GetZoneID(networkableID));
 
     #endregion TruePVE Integration
 
