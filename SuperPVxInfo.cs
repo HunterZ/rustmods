@@ -142,7 +142,7 @@ namespace Oxide.Plugins
       if (null != _storedData)
       {
         // purge any mappings that Zone Manager doesn't recognize
-        var deadZoneIds = Pool.GetList<string>();
+        var deadZoneIds = Pool.Get<List<string>>();
         foreach (var (zoneId, _) in _storedData.Mappings)
         {
           if (!ZM_CheckZoneID(zoneId)) deadZoneIds.Add(zoneId);
@@ -153,7 +153,7 @@ namespace Oxide.Plugins
           _storedData.Mappings.Remove(deadZoneId);
         }
         if (deadZoneIds.Count > 0) SaveData();
-        Pool.FreeList(ref deadZoneIds);
+        Pool.FreeUnmanaged(ref deadZoneIds);
       }
 
       // setup SimpleStatus integration if appropriate
@@ -1323,7 +1323,7 @@ namespace Oxide.Plugins
             _configData.NotifySettings.Enabled.Add(msgKey, false);
           }
           // remove toggle states for any unrecognized notifications in config
-          var deadMsgKeys = Pool.GetList<string>();
+          var deadMsgKeys = Pool.Get<List<string>>();
           foreach (var (key, _) in _configData.NotifySettings.Enabled)
           {
             if (!_notifyMessages.ContainsKey(key)) deadMsgKeys.Add(key);
@@ -1333,7 +1333,7 @@ namespace Oxide.Plugins
             PrintWarning($"Removing unknown/obsolete player notification toggle: \"{deadMsgKey}\"");
             _configData.NotifySettings.Enabled.Remove(deadMsgKey);
           }
-          Pool.FreeList(ref deadMsgKeys);
+          Pool.FreeUnmanaged(ref deadMsgKeys);
         }
       }
       catch (Exception ex)

@@ -759,7 +759,7 @@ namespace Oxide.Plugins
     private void DestroyBaseDataDictionary<T>(
       ref Dictionary<NetworkableId, T> dict, Action<NetworkableId> deleter)
     {
-      var networkableIds = Pool.GetList<NetworkableId>();
+      var networkableIds = Pool.Get<List<NetworkableId>>();
       foreach (var (networkableId, _) in dict)
       {
         networkableIds.Add(networkableId);
@@ -769,7 +769,7 @@ namespace Oxide.Plugins
         deleter(networkableId);
       }
       dict.Clear();
-      Pool.FreeList(ref networkableIds);
+      Pool.FreeUnmanaged(ref networkableIds);
     }
 
     private void DestroyTimerDictionary<T>(
@@ -798,7 +798,7 @@ namespace Oxide.Plugins
         {
           var zones = playerZoneData.Value;
           if (null == zones) continue;
-          Pool.Free(ref zones);
+          Pool.FreeUnmanaged(ref zones);
         }
         _playerZones.Clear();
       }
@@ -1340,7 +1340,7 @@ namespace Oxide.Plugins
         Radius = radius;
         // sphere darkness is accomplished by creating multiple sphers (seems
         //  silly but appears to perform okay)
-        _sphereList = Pool.GetList<SphereEntity>();
+        _sphereList = Pool.Get<List<SphereEntity>>();
         CreateSpheres();
       }
 
@@ -1378,7 +1378,7 @@ namespace Oxide.Plugins
       {
         ClearEntity(true);
         DestroySpheres();
-        Pool.FreeList(ref _sphereList);
+        Pool.FreeUnmanaged(ref _sphereList);
       }
 
       // set/update base location and/or radius
