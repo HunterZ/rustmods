@@ -9,7 +9,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-  [Info("Player Base PvP Zones", "HunterZ", "1.0.5")]
+  [Info("Player Base PvP Zones", "HunterZ", "1.0.6")]
   [Description("Maintains Zone Manager / TruePVE exclusion zones around player bases")]
   public class PlayerBasePvpZones : RustPlugin
   {
