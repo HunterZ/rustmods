@@ -2,6 +2,7 @@
 #  server install)
 *.cs
 !HZWorkbench.cs
+!MagicTravelingVendorPanel.cs
 !PlayerBasePvpZones.cs
 !SuperPVxInfo.cs
 
