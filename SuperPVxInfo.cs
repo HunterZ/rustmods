@@ -13,11 +13,21 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-  [Info("Super PVx Info", "HunterZ", "1.3.2")]
+  [Info("Super PVx Info", "HunterZ", "1.4.0")]
   [Description("Displays PvE/PvP/etc. status on player's HUD")]
   public class SuperPVxInfo : RustPlugin
   {
     #region Plugin Data
+
+    // list of plugins whose PVP delay statuses are tracked
+    public enum PvpDelayType
+    {
+      AbandonedBases,
+      DynamicPvp,
+      PlayerBasePvpZones,
+      RaidableBases,
+      TruePve
+    }
 
     // primary status types tracked by this plugin
     public enum PVxType { PVE, PVP, PVPDelay, SafeZone }
@@ -41,6 +51,10 @@ namespace Oxide.Plugins
       PopupNotifications, RaidableBases, SimpleStatus, ZoneManager;
 
     private ConfigData? _configData;
+
+    // active TruePVE PVP delay timers by plugin name by player ID
+    private Dictionary<ulong, Dictionary<string, Timer>> _excludedPlayers =
+      new();
 
     // NOTE: this is not to be used directly for sending messages, but rather
     //  for populating the default language dictionary, and for enumerating
@@ -109,6 +123,33 @@ namespace Oxide.Plugins
       }
     }
 
+    private void ExcludePlayerRemove(ulong userid, string pluginName)
+    {
+      // get timers-by-plugin for player
+      if (!_excludedPlayers.TryGetValue(userid, out var excludeTimers) ||
+          null == excludeTimers)
+      {
+        return;
+      }
+
+      // remove timer entry if present, and destroy it if needed
+      if (excludeTimers.Remove(pluginName, out var removedTimer) &&
+          null != removedTimer && !removedTimer.Destroyed)
+      {
+        removedTimer.Destroy();
+      }
+
+      // abort if timers-by-plugin is still not empty for this player
+      if (excludeTimers.Count > 0) return;
+
+      // timers-by-plugin is empty - remove PVP delay status
+      var player = BasePlayer.FindByID(userid);
+      if (null != player)
+      {
+        SetPvpDelay(player, PvpDelayType.TruePve, false);
+      }
+    }
+
     #endregion Utility Methods
 
     #region Oxide Methods
@@ -173,6 +214,20 @@ namespace Oxide.Plugins
 
     private void Unload()
     {
+      // clear out any active TruePVE PVP delay timers
+      foreach (var (_, excludeTimers) in _excludedPlayers)
+      {
+        foreach (var (_, excludeTimer) in excludeTimers)
+        {
+          if (null != excludeTimer && !excludeTimer.Destroyed)
+          {
+            excludeTimer.Destroy();
+          }
+        }
+        excludeTimers.Clear();
+      }
+      _excludedPlayers.Clear();
+      // destroy GUIs for all active players
       foreach (var player in BasePlayer.activePlayerList)
       {
         OnPlayerDisconnected(player, _uiName);
@@ -228,25 +283,84 @@ namespace Oxide.Plugins
 
     #region TruePVE Hook Handlers
 
+    // called when a plugin maps a Zone Manager zone to a TruePVE ruleset
     private void AddOrUpdateMapping(string zoneId, string ruleset)
     {
-      if (null == _storedData) return;
-      if (string.IsNullOrEmpty(zoneId) || string.IsNullOrEmpty(ruleset))
+      if (null == _storedData ||
+          string.IsNullOrEmpty(zoneId) || string.IsNullOrEmpty(ruleset))
       {
         return;
       }
 
-      _storedData.Mappings[zoneId] = ruleset;
-      SaveData();
+      NextTick(() =>
+      {
+        _storedData.Mappings[zoneId] = ruleset;
+        SaveData();
+      });
     }
 
+    // called when a plugin deletes a mapping
     private void RemoveMapping(string zoneId)
     {
-      if (null == _storedData) return;
-      if (string.IsNullOrEmpty(zoneId)) return;
+      if (null == _storedData || string.IsNullOrEmpty(zoneId)) return;
 
-      _storedData.Mappings.Remove(zoneId);
-      SaveData();
+      NextTick(() =>
+      {
+        _storedData.Mappings.Remove(zoneId);
+        SaveData();
+      });
+    }
+
+    // called when a plugin requests a timed rule exclusion (PVP exit delay)
+    private void ExcludePlayer(
+      ulong userid, float maxDelayLength, Plugin plugin)
+    {
+      if (null == plugin || !userid.IsSteamId()) return;
+      var pluginName = plugin.Name;
+
+      NextTick(() =>
+      {
+        // if delay is non-positive, just try to remove any existing record
+        if (maxDelayLength <= 0.0f)
+        {
+          ExcludePlayerRemove(userid, pluginName);
+          return;
+        }
+
+        // handle the case of updating an existing record
+        var hasTimers =
+          _excludedPlayers.TryGetValue(userid, out var excludeTimers);
+        if (hasTimers &&
+            excludeTimers.TryGetValue(pluginName, out var excludeTimer))
+        {
+          if (null != excludeTimer && !excludeTimer.Destroyed)
+          {
+            excludeTimer.Reset(maxDelayLength);
+            return;
+          }
+          // pathological: remove defunct entry and we'll create a new one below
+          excludeTimers.Remove(pluginName);
+        }
+
+        // handle the case that no timers have ever been recorded for player
+        // (just create an empty timers-by-plugin sub-dictionary)
+        if (null == excludeTimers)
+        {
+          excludeTimers = new();
+          _excludedPlayers.Add(userid, excludeTimers);
+        }
+
+        // add a timer to the dictionary that simply removes itself on fire
+        // existence of a dictionary entry then represents an active PVP delay
+        excludeTimers.Add(pluginName, timer.Once(
+          maxDelayLength, () => { ExcludePlayerRemove(userid, pluginName); }));
+
+        var player = BasePlayer.FindByID(userid);
+        if (null != player)
+        {
+          SetPvpDelay(player, PvpDelayType.TruePve, true);
+        }
+      });
     }
 
     #endregion TruePVE Hook Handlers
@@ -488,33 +602,41 @@ namespace Oxide.Plugins
     // check if player has any PVP delays active
     // this should only be called when hook-reported states don't exist yet, or
     //  can't be relied upon for some reason
-    private bool IsPlayerInPVPDelay(ulong playerID)
+    private HashSet<PvpDelayType> IsPlayerInPVPDelay(ulong playerID)
     {
+      var pvpDelays = new HashSet<PvpDelayType>();
+
       if (AbandonedBases != null && Convert.ToBoolean(
           AbandonedBases.Call("HasPVPDelay", playerID)))
       {
-        return true;
+        pvpDelays.Add(PvpDelayType.AbandonedBases);
       }
 
       if (DynamicPVP != null && Convert.ToBoolean(
           DynamicPVP.Call("IsPlayerInPVPDelay", playerID)))
       {
-        return true;
+        pvpDelays.Add(PvpDelayType.DynamicPvp);
       }
 
       if (PlayerBasePvpZones != null && !string.IsNullOrEmpty(Convert.ToString(
           PlayerBasePvpZones.Call("OnPlayerBasePvpDelayQuery", playerID))))
       {
-        return true;
+        pvpDelays.Add(PvpDelayType.PlayerBasePvpZones);
       }
 
       if (RaidableBases != null && Convert.ToBoolean(
           RaidableBases.Call("HasPVPDelay", playerID)))
       {
-        return true;
+        pvpDelays.Add(PvpDelayType.RaidableBases);
       }
 
-      return false;
+      if (_excludedPlayers.TryGetValue(playerID, out var excludeTimers) &&
+          excludeTimers.Count > 0)
+      {
+        pvpDelays.Add(PvpDelayType.TruePve);
+      }
+
+      return pvpDelays;
     }
 
     // common logic for Abandoned/Raidable Base entry hooks
@@ -557,17 +679,20 @@ namespace Oxide.Plugins
     }
 
     // common logic for PVP Delay hooks
-    private void SetPvpDelay(BasePlayer player, bool state)
+    private void SetPvpDelay(BasePlayer player, PvpDelayType type, bool state)
     {
       if (!IsValidPlayer(player, true)) return;
       var watcher = GetPlayerWatcher(player);
       if (null == watcher) return;
-      if (!state)
+      if (state)
+      {
+        watcher.AddPvpDelay(type);
+      }
+      else if (watcher.ClearPvpDelay(type) <= 0)
       {
         watcher.CheckBase = true;
         watcher.CheckZone = true;
       }
-      watcher.InPvpDelay = state;
       watcher.Force();
     }
 
@@ -647,7 +772,7 @@ namespace Oxide.Plugins
     {
       NextTick(() =>
       {
-        SetPvpDelay(player, true);
+        SetPvpDelay(player, PvpDelayType.RaidableBases, true);
       });
     }
 
@@ -658,7 +783,7 @@ namespace Oxide.Plugins
     {
       NextTick(() =>
       {
-        SetPvpDelay(player, true);
+        SetPvpDelay(player, PvpDelayType.RaidableBases, true);
       });
     }
 
@@ -669,7 +794,7 @@ namespace Oxide.Plugins
     {
       NextTick(() =>
       {
-        SetPvpDelay(player, false);
+        SetPvpDelay(player, PvpDelayType.RaidableBases, false);
       });
     }
 
@@ -723,7 +848,7 @@ namespace Oxide.Plugins
     {
       NextTick(() =>
       {
-        SetPvpDelay(player, true);
+        SetPvpDelay(player, PvpDelayType.AbandonedBases, true);
       });
     }
 
@@ -733,7 +858,7 @@ namespace Oxide.Plugins
     {
       NextTick(() =>
       {
-        SetPvpDelay(player, false);
+        SetPvpDelay(player, PvpDelayType.AbandonedBases, false);
       });
     }
 
@@ -795,7 +920,7 @@ namespace Oxide.Plugins
       NextTick(() =>
       {
         var player = BasePlayer.FindByID(playerId);
-        SetPvpDelay(player, true);
+        SetPvpDelay(player, PvpDelayType.PlayerBasePvpZones, true);
       });
     }
 
@@ -804,7 +929,7 @@ namespace Oxide.Plugins
       NextTick(() =>
       {
         var player = BasePlayer.FindByID(playerId);
-        SetPvpDelay(player, false);
+        SetPvpDelay(player, PvpDelayType.PlayerBasePvpZones, false);
       });
     }
 
@@ -818,7 +943,7 @@ namespace Oxide.Plugins
       NextTick(() =>
       {
         var player = BasePlayer.FindByID(playerId);
-        SetPvpDelay(player, true);
+        SetPvpDelay(player, PvpDelayType.DynamicPvp, true);
       });
     }
 
@@ -827,7 +952,7 @@ namespace Oxide.Plugins
       NextTick(() =>
       {
         var player = BasePlayer.FindByID(playerId);
-        SetPvpDelay(player, false);
+        SetPvpDelay(player, PvpDelayType.DynamicPvp, false);
       });
     }
 
@@ -1481,12 +1606,6 @@ namespace Oxide.Plugins
         get { return _inPVxEventType; }
         set { _forceUpdate |= value != _inPVxEventType; _inPVxEventType = value; }
       }
-      // true if PvP removal delay in effect
-      private bool _inPvpDelay;
-      public bool InPvpDelay {
-        get { return _inPvpDelay; }
-        set { _forceUpdate |= value != _inPvpDelay; _inPvpDelay = value; }
-      }
 
       // private members
 
@@ -1506,10 +1625,24 @@ namespace Oxide.Plugins
       private PVxType? _inZoneType;
       // reference back to player
       private BasePlayer? _player;
+      // set of active PVP exit delays
+      private HashSet<PvpDelayType> _pvpDelays = new();
       // PvX state on last check
       private PVxType? _pvxState;
 
       // public methods
+
+      // record an active PVP delay
+      public void AddPvpDelay(PvpDelayType type) =>
+        _forceUpdate |= _pvpDelays.Add(type);
+
+      // clear an active PVP delay
+      // returns number of remaining active PVP delays
+      public int ClearPvpDelay(PvpDelayType type)
+      {
+        _forceUpdate |= _pvpDelays.Remove(type);
+        return _pvpDelays.Count;
+      }
 
       // invoke watcher processing ASAP if warranted
       public void Force()
@@ -1521,7 +1654,7 @@ namespace Oxide.Plugins
 
       // reset watcher state
       public void Init(
-        PVxType? inBaseType = null, bool inPvpDelay = false,
+        PVxType? inBaseType = null, HashSet<PvpDelayType>? pvpDelays = null,
         PVxType? inZoneType = null, BasePlayer? player = null)
       {
         // (re)set public variables
@@ -1531,7 +1664,6 @@ namespace Oxide.Plugins
         _checkZone = false;
         _inBaseType = inBaseType;
         _inPvpBubble = false;
-        _inPvpDelay = inPvpDelay;
         _inPVxEventType = null;
 
         // (re)set private variables
@@ -1543,6 +1675,14 @@ namespace Oxide.Plugins
         _inTutorial = null;
         _inZoneType = inZoneType;
         _player = player;
+        if (null == pvpDelays)
+        {
+          _pvpDelays.Clear();
+        }
+        else
+        {
+          _pvpDelays = pvpDelays;
+        }
         _pvxState = null;
       }
 
@@ -1622,7 +1762,7 @@ namespace Oxide.Plugins
         // - in Facepunch/ZoneManager safe zone => PvE
         // - in PvP base/bubble/event/zone => PvP
         // - above/below PvP height => PvP
-        // - pvp exit delay active => PvP
+        // - pvp exit delay active => PvP Delay
         // - in PvE base/event/tutorial/zone => PvE
         // - configured default
         if (true == _inSafeZone)             return PVxType.SafeZone;
@@ -1634,7 +1774,7 @@ namespace Oxide.Plugins
         if (PVxType.PVP == _inZoneType)      return PVxType.PVP;
         if (true == _heightAbovePvp)         return PVxType.PVP;
         if (true == _heightBelowPvp)         return PVxType.PVP;
-        if (_inPvpDelay)                     return PVxType.PVPDelay;
+        if (_pvpDelays.Count > 0)            return PVxType.PVPDelay;
         if (PVxType.PVE == _inBaseType)      return PVxType.PVE;
         if (PVxType.PVE == _inPVxEventType)  return PVxType.PVE;
         if (true == _inTutorial)             return PVxType.PVE;
@@ -1685,7 +1825,7 @@ namespace Oxide.Plugins
             _inBaseType = null;
             SendCannedMessage("Unexpected Exit From Abandoned Or Raidable Base");
             // check PVP delay status as well, since that may now also be wrong
-            if (_inPvpDelay) _checkPvpDelay = true;
+            if (_pvpDelays.Count > 0) _checkPvpDelay = true;
           }
           _checkBase = false;
         }
@@ -1697,6 +1837,8 @@ namespace Oxide.Plugins
           {
             _inPVxEventType = null;
             SendCannedMessage("Unexpected Exit From Dangerous Treasures Event");
+            // check PVP delay status as well, since that may now also be wrong
+            if (_pvpDelays.Count > 0) _checkPvpDelay = true;
           }
           _checkPVxEvent = false;
         }
@@ -1711,7 +1853,7 @@ namespace Oxide.Plugins
         // PVP delay check
         if (_checkPvpDelay)
         {
-          _inPvpDelay = Instance.IsPlayerInPVPDelay(_player.userID.Get());
+          _pvpDelays = Instance.IsPlayerInPVPDelay(_player.userID.Get());
           _checkPvpDelay = false;
         }
 

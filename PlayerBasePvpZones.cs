@@ -3,17 +3,20 @@
 using Facepunch;
 using Newtonsoft.Json;
 using Oxide.Core;
+using Oxide.Core.Plugins;
 using System;
 using System.Collections.Generic;
 using UnityEngine;
 
 namespace Oxide.Plugins
 {
-  [Info("Player Base PvP Zones", "HunterZ", "1.0.6")]
+  [Info("Player Base PvP Zones", "HunterZ", "1.1.0")]
   [Description("Maintains Zone Manager / TruePVE exclusion zones around player bases")]
   public class PlayerBasePvpZones : RustPlugin
   {
     #region Fields
+
+    [PluginReference] private readonly Plugin? TruePVE;
 
     // user-defined plugin config data
     private ConfigData _configData = new();
@@ -54,6 +57,10 @@ namespace Oxide.Plugins
 
     // tugboat zone deletion delay timers by tugboat ID
     private Dictionary<NetworkableId, Timer> _tugboatDeleteTimers = new();
+
+    // true if TruePVE 2.2.3+ ExcludePlayer() should be used for PVP delays,
+    //  false if CanEntityTakeDamage() hook handler should be used
+    private bool _useExcludePlayer = false;
 
     // ZoneManager zone ID prefix
     private const string _zoneIdPrefix = "PlayerBasePVP:";
@@ -627,21 +634,25 @@ namespace Oxide.Plugins
 
           // record new zone
           delayData.Item2 = zoneID;
-
-          // fire notification hook for new zone
-          Interface.CallHook("OnPlayerBasePvpDelayStart", playerID, zoneID);
         }
-
-        return;
       }
-
-      // no delay active - start+record one
-      _pvpDelayTimers.Add(playerID, (timer.Once(
-        _configData.pvpDelaySeconds, () => PlayerBasePvpDelayStop(
-          playerID)), zoneID));
+      else
+      {
+        // no delay active - start+record one
+        _pvpDelayTimers.Add(playerID, (timer.Once(
+          _configData.pvpDelaySeconds, () => PlayerBasePvpDelayStop(
+            playerID)), zoneID));
+      }
 
       // fire notification hook
       Interface.CallHook("OnPlayerBasePvpDelayStart", playerID, zoneID);
+
+      // also notify TruePVE if we're doing that
+      if (_useExcludePlayer)
+      {
+        Interface.CallHook(
+          "ExcludePlayer", playerID, _configData.pvpDelaySeconds, this);
+      }
     }
 
     // stop/end PvP delay for given player and send notification
@@ -655,6 +666,12 @@ namespace Oxide.Plugins
 
       // fire notification hook
       Interface.CallHook("OnPlayerBasePvpDelayStop", playerID, delayData.Item2);
+
+      // also notify TruePVE if we're doing that
+      if (_useExcludePlayer)
+      {
+        Interface.CallHook("ExcludePlayer", playerID, 0.0f, this);
+      }
     }
 
     // purge any dangling zones + mappings from previous runs
@@ -711,6 +728,14 @@ namespace Oxide.Plugins
     private void OnServerInitialized()
     {
       Puts("OnServerInitialized(): Starting up...");
+
+      _useExcludePlayer =
+        null != TruePVE && TruePVE.Version >= new VersionNumber(2, 2, 3);
+      if (_useExcludePlayer)
+      {
+        Puts("OnServerInitialized(): TruePVE 2.2.3+ detected; disabling internal CanEntityTakeDamage handler");
+        Unsubscribe(nameof(CanEntityTakeDamage));
+      }
 
       // purge any dangling zones
       PurgeOldZones();
@@ -1271,29 +1296,32 @@ namespace Oxide.Plugins
       _pvpDelayTimers.ContainsKey(playerID) ||
       (_playerZones.TryGetValue(playerID, out var zones) && zones?.Count > 0);
 
+#pragma warning disable CS8603 // Possible null reference return.
     // called when TruePVE wants to know if a player can take damage
     // returns true if both attacker and target are players with PvP status,
     //  else returns null
     private object CanEntityTakeDamage(BasePlayer entity, HitInfo hitInfo)
     {
+      // pathological: abort if we're using TruePVE's PVP delay API
+      if (_useExcludePlayer)
+      {
+        Unsubscribe(nameof(CanEntityTakeDamage));
+        return null;
+      }
+
       // return unknown if either attacker or target is null / not a player
-#pragma warning disable CS8603 // Possible null reference return.
       if (null == entity || null == hitInfo.InitiatorPlayer) return null;
-#pragma warning restore CS8603 // Possible null reference return.
 
       var attackerID = hitInfo.InitiatorPlayer.userID.Get();
       var targetID = entity.userID.Get();
 
       // return unknown if either player is not a real player
-#pragma warning disable CS8603 // Possible null reference return.
       if (!attackerID.IsSteamId() || !targetID.IsSteamId()) return null;
-#pragma warning restore CS8603 // Possible null reference return.
 
       // return true if both players are in some kind of PvP state, else null
-#pragma warning disable CS8603 // Possible null reference return.
       return IsPvpPlayer(attackerID) && IsPvpPlayer(targetID) ? true : null;
-#pragma warning restore CS8603 // Possible null reference return.
     }
+#pragma warning restore CS8603 // Possible null reference return.
 
     // map a ZoneManager zone ID to a TruePVE ruleset (i.e. marks it as PVP)
     private static bool TP_AddOrUpdateMapping(
