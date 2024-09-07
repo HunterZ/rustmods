@@ -317,8 +317,13 @@ namespace Oxide.Plugins
       var radius = CalculateBuildingRadius(buildingBounds);
 
       // create + record new building data record
-      var buildingData =
-        new BuildingData(toolCupboard, buildingBounds.center, radius);
+      var buildingData = Pool.Get<BuildingData>();
+      if (null == buildingData)
+      {
+        PrintError("CreateBuildingData(): Failed to allocate BuildingData from pool");
+        return;
+      }
+      buildingData.Init(toolCupboard, buildingBounds.center, radius);
       _buildingData.Add(toolCupboardID, buildingData);
 
       // create zone
@@ -341,8 +346,8 @@ namespace Oxide.Plugins
       // remove building record to local variable, aborting if not found
       if (!_buildingData.Remove(toolCupboardID, out var buildingData)) return;
 
-      // destroy building record
-      buildingData.Destroy();
+      // drop building record
+      Pool.Free(ref buildingData);
 
       // destroy building zone
       ZM_EraseZone(toolCupboardID);
@@ -453,8 +458,13 @@ namespace Oxide.Plugins
       if (_shelterData.ContainsKey(legacyShelterID)) return;
 
       // create + record new shelter data record
-      var shelterData =
-        new ShelterData(legacyShelter, _configData.shelter.radius);
+      var shelterData = Pool.Get<ShelterData>();
+      if (null == shelterData)
+      {
+        PrintError("CreateShelterData(): Failed to allocate ShelterData from pool");
+        return;
+      }
+      shelterData.Init(legacyShelter, _configData.shelter.radius);
       _shelterData.Add(legacyShelterID, shelterData);
 
       // create zone
@@ -474,8 +484,8 @@ namespace Oxide.Plugins
       // remove shelter record to local variable, aborting if not found
       if (!_shelterData.Remove(legacyShelterID, out var shelterData)) return;
 
-      // destroy shelter record
-      shelterData.Destroy();
+      // drop shelter record
+      Pool.Free(ref shelterData);
 
       // destroy shelter zone
       ZM_EraseZone(legacyShelterID);
@@ -557,7 +567,13 @@ namespace Oxide.Plugins
       if (_tugboatData.ContainsKey(tugboatID)) return;
 
       // create + record new tugboat data record
-      var tugboatData = new TugboatData(
+      var tugboatData = Pool.Get<TugboatData>();
+      if (null == tugboatData)
+      {
+        PrintError("CreateTugboatData(): Failed to allocate TugboatData from pool");
+        return;
+      }
+      tugboatData.Init(
         tugboat, _configData.tugboat.radius,
         _configData.tugboat.forceNetworking, _configData.tugboat.forceBuoyancy);
       _tugboatData.Add(tugboatID, tugboatData);
@@ -579,8 +595,8 @@ namespace Oxide.Plugins
       // remove tugboat record to local variable, aborting if not found
       if (!_tugboatData.Remove(tugboatID, out var tugboatData)) return;
 
-      // destroy tugboat record
-      tugboatData.Destroy();
+      // drop tugboat record
+      Pool.Free(ref tugboatData);
 
       // destroy tugboat zone
       ZM_EraseZone(tugboatID);
@@ -1347,28 +1363,25 @@ namespace Oxide.Plugins
     // internal classes
 
     // base class for tracking player base data
-    private abstract class BaseData
+    private abstract class BaseData : Pool.IPooled
     {
       public static uint SphereDarkness { get; set; } = 0;
 
       // center point of base
-      public Vector3 Location { get; protected set; }
+      public Vector3 Location { get; protected set; } = Vector3.zero;
 
       // radius of base
-      public float Radius { get; private set; }
+      public float Radius { get; private set; } = 0.0f;
 
       // spheres/domes associated with base
-      protected List<SphereEntity> _sphereList;
+      protected List<SphereEntity>? _sphereList = null;
 
-      // constructor - requires a base center point, and then Update() can be
-      //  used to move it and/or set a radius
-      protected BaseData(Vector3 location, float radius = 1.0f)
+      protected virtual void Init(Vector3 location, float radius = 1.0f)
       {
         Location = location;
         Radius = radius;
-        // sphere darkness is accomplished by creating multiple sphers (seems
+        // sphere darkness is accomplished by creating multiple spheres (seems
         //  silly but appears to perform okay)
-        _sphereList = Pool.Get<List<SphereEntity>>();
         CreateSpheres();
       }
 
@@ -1401,12 +1414,29 @@ namespace Oxide.Plugins
         _sphereList.Clear();
       }
 
-      // this must be called whenever an instance of this class gets tossed out
-      virtual public void Destroy()
+      // called automatically when Pool.Free() is called
+      // needs to clean up instances for reuse
+      public void EnterPool()
       {
         ClearEntity(true);
         DestroySpheres();
-        Pool.FreeUnmanaged(ref _sphereList);
+        if (null != _sphereList)
+        {
+          Pool.FreeUnmanaged(ref _sphereList);
+          _sphereList = null;
+        }
+        Location = Vector3.zero;
+        Radius = 0.0f;
+      }
+
+      // called automatically when Pool.Get() is called
+      // needs to initialize instances for use
+      public void LeavePool()
+      {
+        if (null == _sphereList && SphereDarkness > 0)
+        {
+           _sphereList = Pool.Get<List<SphereEntity>>();
+        }
       }
 
       // set/update base location and/or radius
@@ -1419,6 +1449,7 @@ namespace Oxide.Plugins
         if (null != location) Location = (Vector3)location;
         if (null != radius) Radius = (float)radius;
 
+        if (null == _sphereList) return;
         foreach (var sphere in _sphereList)
         {
           if (!IsValid(sphere)) continue;
@@ -1433,13 +1464,12 @@ namespace Oxide.Plugins
     {
       // reference to TC entity
       // if null, the base is pending deletion
-      public BuildingPrivlidge? ToolCupboard { get; private set; }
+      public BuildingPrivlidge? ToolCupboard { get; private set; } = null;
 
-      // constructor
-      public BuildingData(
+      public void Init(
         BuildingPrivlidge toolCupboard, Vector3 location, float radius = 1.0f)
-        : base(location, radius)
       {
+        Init(location, radius);
         ToolCupboard = toolCupboard;
       }
 
@@ -1454,13 +1484,12 @@ namespace Oxide.Plugins
     {
       // reference to legacy shelter entity
       // if null, the base is pending deletion
-      public EntityPrivilege? LegacyShelter { get; private set; }
+      public EntityPrivilege? LegacyShelter { get; private set; } = null;
 
-      // constructor
-      public ShelterData(
+      public void Init(
         EntityPrivilege legacyShelter, float radius = 1.0f)
-        : base(legacyShelter.CenterPoint(), radius)
       {
+        Init(legacyShelter.CenterPoint(), radius);
         LegacyShelter = legacyShelter;
       }
 
@@ -1475,15 +1504,13 @@ namespace Oxide.Plugins
     {
       // reference to tugboat entity
       // if null, the base is pending deletion
-      public VehiclePrivilege? Tugboat { get; private set; }
+      public VehiclePrivilege? Tugboat { get; private set; } = null;
 
-      // constructor - requires a base center point, and then Update() can be
-      //  used to move it and/or set a radius
-      public TugboatData(
+      public void Init(
         VehiclePrivilege tugboat, float radius = 1.0f,
         bool? forceNetworking = null, bool forceBuoyancy = false)
-        : base(tugboat.GetParentEntity().CenterPoint(), radius)
       {
+        Init(tugboat.GetParentEntity().CenterPoint(), radius);
         Tugboat = tugboat;
         var tugboatParent = tugboat.GetParentEntity();
         if (null == tugboatParent) return;
@@ -1506,6 +1533,7 @@ namespace Oxide.Plugins
           }
         }
         // parent spheres to the tugboat
+        if (null == _sphereList) return;
         foreach (var sphere in _sphereList)
         {
           sphere.ServerPosition = Vector3.zero;
@@ -1527,15 +1555,10 @@ namespace Oxide.Plugins
           var location = Tugboat?.GetParentEntity()?.CenterPoint();
           if (null != location) Location = (Vector3)location;
         }
-        UntetherSpheres();
 
         Tugboat = null;
-      }
 
-      private void UntetherSpheres()
-      {
         if (null == _sphereList) return;
-
         // un-tether any spheres from the tugboat
         foreach (var sphere in _sphereList)
         {
