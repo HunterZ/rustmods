@@ -1,10 +1,10 @@
 # ignore all code files except for my own (allows working directly in a test
 #  server install)
 *.cs
-!HZWorkbench.cs
 !MagicTravelingVendorPanel.cs
 !PlayerBasePvpZones.cs
 !SuperPVxInfo.cs
+!TimedWorkbenchUnlock.cs
 
 /backups/
 /bin/
