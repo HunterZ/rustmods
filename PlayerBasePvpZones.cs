@@ -749,7 +749,7 @@ namespace Oxide.Plugins
         null != TruePVE && TruePVE.Version >= new VersionNumber(2, 2, 3);
       if (_useExcludePlayer)
       {
-        Puts("OnServerInitialized(): TruePVE 2.2.3+ detected; disabling internal CanEntityTakeDamage handler");
+        Puts("OnServerInitialized(): TruePVE 2.2.3+ detected! TruePVE PVP delays will be used");
         Unsubscribe(nameof(CanEntityTakeDamage));
       }
 

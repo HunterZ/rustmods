@@ -48,7 +48,7 @@ namespace Oxide.Plugins
 
     [PluginReference] private readonly Plugin?
       AbandonedBases, DynamicPVP, DangerousTreasures, PlayerBasePvpZones,
-      PopupNotifications, RaidableBases, SimpleStatus, ZoneManager;
+      PopupNotifications, RaidableBases, SimpleStatus, TruePVE, ZoneManager;
 
     private ConfigData? _configData;
 
@@ -182,6 +182,15 @@ namespace Oxide.Plugins
 
     private void OnServerInitialized()
     {
+      if(null != TruePVE && null != PlayerBasePvpZones &&
+         TruePVE.Version >= new VersionNumber(2, 2, 3) &&
+         PlayerBasePvpZones.Version >= new VersionNumber(1, 1, 0))
+      {
+        Puts("OnServerInitialized(): TruePVE 2.2.3+ & PlayerBasePvpZones 1.1.0+ detected! TruePVE PVP delays will be used");
+        Unsubscribe(nameof(OnPlayerBasePvpDelayStart));
+        Unsubscribe(nameof(OnPlayerBasePvpDelayStop));
+      }
+
       if (null != _storedData)
       {
         // purge any mappings that Zone Manager doesn't recognize
