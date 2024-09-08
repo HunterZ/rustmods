@@ -79,6 +79,8 @@ namespace Oxide.Plugins
         "{0}Leaving Train Tunnels PVP Zone"
     };
 
+    private Timer? _saveDataTimer;
+
     private StoredData? _storedData;
 
     private const string _uiName = "SuperPVxInfoUI";
@@ -233,6 +235,8 @@ namespace Oxide.Plugins
         OnPlayerDisconnected(player, _uiName);
       }
       PlayerWatcher.Instance = null;
+      // if save timer active, destroy and force write
+      if (null != _saveDataTimer) WriteData();
     }
 
     private void OnPlayerConnected(BasePlayer player)
@@ -1312,6 +1316,9 @@ namespace Oxide.Plugins
       [JsonProperty(PropertyName = "Force Updates On State Change")]
       public bool forceUpdates = true;
 
+      [JsonProperty(PropertyName = "Minimum Seconds Data File Saves")]
+      public float saveIntervalSeconds = 5.0f;
+
       [JsonProperty(PropertyName = "PVE Exclusion Mapping Names (case insensitive substrings / none to disable)")]
       public HashSet<string> PveExclusionNames { get; set; } = new()
       {
@@ -1523,10 +1530,7 @@ namespace Oxide.Plugins
       {
         _storedData = null;
       }
-      if (_storedData == null)
-      {
-        ClearData();
-      }
+      if (_storedData == null) ClearData();
     }
 
     private void ClearData()
@@ -1535,8 +1539,27 @@ namespace Oxide.Plugins
       SaveData();
     }
 
-    private void SaveData() =>
+    // this is a frontend to WriteData() that enforces a minimum delay between
+    //  data file writes
+    private void SaveData()
+    {
+      // abort if save already pending
+      if (null != _saveDataTimer) return;
+      // start a save timer
+      _saveDataTimer = timer.Once(
+        null == _configData ? 5.0f : _configData.saveIntervalSeconds,
+        () => WriteData());
+    }
+
+    private void WriteData()
+    {
+      if (null != _saveDataTimer)
+      {
+        if (!_saveDataTimer.Destroyed) _saveDataTimer.Destroy();
+        _saveDataTimer = null;
+      }
       Interface.Oxide.DataFileSystem.WriteObject(Name, _storedData);
+    }
 
     #endregion Data File Handling
 
