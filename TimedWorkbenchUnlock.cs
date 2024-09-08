@@ -7,9 +7,9 @@ using System.Text;
 
 namespace Oxide.Plugins
 {
-  [Info("HZ Workbench", "HunterZ", "2.2.0")]
-  [Description("Overhaul of original Timed Workbench plugin by DizzasTeR, which delays the ability to craft workbenches until some time has elapsed")]
-  class HZWorkbench : RustPlugin
+  [Info("Timed Workbench Unlock", "HunterZ", "2.2.1")]
+  [Description("Provides timed/manual/disabled unlocking of workbenches")]
+  class TimedWorkbenchUnlock : RustPlugin
   {
     #region Vars
 
