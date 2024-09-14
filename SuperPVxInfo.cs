@@ -13,7 +13,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-  [Info("Super PVx Info", "HunterZ", "1.4.0")]
+  [Info("Super PVx Info", "HunterZ", "1.5.0")]
   [Description("Displays PvE/PvP/etc. status on player's HUD")]
   public class SuperPVxInfo : RustPlugin
   {
@@ -35,15 +35,16 @@ namespace Oxide.Plugins
     // (plugin) events that are managed via listening to start/stop hooks
     private enum PvpEventType
     {
-      Air,          // KpucTaJl Air Event
-      ArcticBase,   // KpucTaJl Arctic Base Event
-      GasStation,   // KpucTaJl Gas Station Event
-      Harbor,       // KpucTaJl Harbor Event
-      Junkyard,     // KpucTaJl Junkyard Event
-      PowerPlant,   // KpucTaJl Power Plant Event
-      SatDish,      // KpucTaJl Satellite Dish Event
-      Supermarket,  // KpucTaJl Supermarket Event
-      Water         // KpucTaJl Water Event
+      Air,           // KpucTaJl Air Event
+      ArcticBase,    // KpucTaJl Arctic Base Event
+      FerryTerminal, // KpucTaJl Ferry Terminal Event
+      GasStation,    // KpucTaJl Gas Station Event
+      Harbor,        // KpucTaJl Harbor Event
+      Junkyard,      // KpucTaJl Junkyard Event
+      PowerPlant,    // KpucTaJl Power Plant Event
+      SatDish,       // KpucTaJl Satellite Dish Event
+      Supermarket,   // KpucTaJl Supermarket Event
+      Water          // KpucTaJl Water Event
     }
 
 #pragma warning disable CS0649
@@ -987,6 +988,13 @@ namespace Oxide.Plugins
 
     private void OnArcticBaseEventEnd() =>
       NextTick(() => DeletePvpEvent(PvpEventType.ArcticBase));
+
+    private void OnFerryTerminalEventStart(Vector3 pos, float radius) =>
+      NextTick(() =>
+        CreateOrUpdatePvpEvent(PvpEventType.FerryTerminal, pos, radius));
+
+    private void OnFerryTerminalEventEnd() =>
+      NextTick(() => DeletePvpEvent(PvpEventType.FerryTerminal));
 
     private void OnGasStationEventStart(Vector3 pos, float radius) =>
       NextTick(() =>
