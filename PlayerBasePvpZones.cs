@@ -16,7 +16,9 @@ namespace Oxide.Plugins
   {
     #region Fields
 
-    [PluginReference] private readonly Plugin? TruePVE;
+#pragma warning disable CS0649
+    [PluginReference] private readonly Plugin TruePVE;
+#pragma warning restore CS0649
 
     // user-defined plugin config data
     private ConfigData _configData = new();
@@ -130,14 +132,14 @@ namespace Oxide.Plugins
     }
 
     // BuildingBlock wrapper for GetToolCupboard()
-    private BuildingPrivlidge? GetToolCupboard(BuildingBlock buildingBlock) =>
+    private BuildingPrivlidge GetToolCupboard(BuildingBlock buildingBlock) =>
       GetToolCupboard(buildingBlock.GetBuilding());
 
     // try to find and return a physically-attached TC for the given building,
     //  or null if no suitable result found
     // only supports player-owned TCs (NOT to be confused with player-authed!)
     // this is our differentiator of whether a building should have a zone
-    private BuildingPrivlidge? GetToolCupboard(
+    private BuildingPrivlidge GetToolCupboard(
       BuildingManager.Building building)
     {
       // check the easy stuff first
@@ -186,7 +188,7 @@ namespace Oxide.Plugins
       return null;
     }
 
-    private static VehiclePrivilege? GetVehiclePrivilege(BaseVehicle vehicle)
+    private static VehiclePrivilege GetVehiclePrivilege(BaseVehicle vehicle)
     {
       foreach (BaseEntity child in vehicle.children)
       {
@@ -197,7 +199,7 @@ namespace Oxide.Plugins
     }
 
     // OwnerID is zero for shelters for some reason, so check auth list
-    private static bool IsPlayerOwned(EntityPrivilege? legacyShelter)
+    private static bool IsPlayerOwned(EntityPrivilege legacyShelter)
     {
       if (null == legacyShelter) return false;
       foreach (var playerNameID in legacyShelter.authorizedPlayers)
@@ -207,10 +209,10 @@ namespace Oxide.Plugins
       return false;
     }
 
-    private static bool IsPlayerOwned(DecayEntity? decayEntity) =>
+    private static bool IsPlayerOwned(DecayEntity decayEntity) =>
       null != decayEntity && decayEntity.OwnerID.IsSteamId();
 
-    private static bool IsValid(BaseNetworkable? baseNetworkable) =>
+    private static bool IsValid(BaseNetworkable baseNetworkable) =>
       null != baseNetworkable &&
       !baseNetworkable.IsDestroyed &&
       null != baseNetworkable.net &&
@@ -1223,16 +1225,16 @@ namespace Oxide.Plugins
       ZM_EraseZone(GetZoneID(networkableId));
 
     // get list of players in the given ZoneManager zone, if any
-    private static List<BasePlayer>? ZM_GetPlayersInZone(string zoneID) =>
-      (List<BasePlayer>?)Interface.CallHook("GetPlayersInZone", zoneID);
+    private static List<BasePlayer> ZM_GetPlayersInZone(string zoneID) =>
+      (List<BasePlayer>)Interface.CallHook("GetPlayersInZone", zoneID);
 
     // get ZoneManager's actual data object for a given zoneID
     // credit: CatMeat & Arainrr for examples via DynamicPVP
-    private static ZoneManager.Zone? ZM_GetZoneByID(string zoneID) =>
-      (ZoneManager.Zone?)Interface.CallHook("GetZoneByID", zoneID);
+    private static ZoneManager.Zone ZM_GetZoneByID(string zoneID) =>
+      (ZoneManager.Zone)Interface.CallHook("GetZoneByID", zoneID);
 
-    private string[]? ZM_GetZoneIDs() =>
-      (string[]?)Interface.CallHook("GetZoneIDs");
+    private string[] ZM_GetZoneIDs() =>
+      (string[])Interface.CallHook("GetZoneIDs");
 
     #endregion ZoneManager Helpers
 
@@ -1374,7 +1376,7 @@ namespace Oxide.Plugins
       public float Radius { get; private set; } = 0.0f;
 
       // spheres/domes associated with base
-      protected List<SphereEntity>? _sphereList = null;
+      protected List<SphereEntity> _sphereList = null;
 
       protected virtual void Init(Vector3 location, float radius = 1.0f)
       {
@@ -1464,7 +1466,7 @@ namespace Oxide.Plugins
     {
       // reference to TC entity
       // if null, the base is pending deletion
-      public BuildingPrivlidge? ToolCupboard { get; private set; } = null;
+      public BuildingPrivlidge ToolCupboard { get; private set; } = null;
 
       public void Init(
         BuildingPrivlidge toolCupboard, Vector3 location, float radius = 1.0f)
@@ -1484,7 +1486,7 @@ namespace Oxide.Plugins
     {
       // reference to legacy shelter entity
       // if null, the base is pending deletion
-      public EntityPrivilege? LegacyShelter { get; private set; } = null;
+      public EntityPrivilege LegacyShelter { get; private set; } = null;
 
       public void Init(
         EntityPrivilege legacyShelter, float radius = 1.0f)
@@ -1504,7 +1506,7 @@ namespace Oxide.Plugins
     {
       // reference to tugboat entity
       // if null, the base is pending deletion
-      public VehiclePrivilege? Tugboat { get; private set; } = null;
+      public VehiclePrivilege Tugboat { get; private set; } = null;
 
       public void Init(
         VehiclePrivilege tugboat, float radius = 1.0f,

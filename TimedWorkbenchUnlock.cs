@@ -19,10 +19,10 @@ namespace Oxide.Plugins
     };
 
     // periodic global status broadcast timer
-    private Timer? _broadcastTimer = null;
+    private Timer _broadcastTimer = null;
 
     // data managed via config file
-    private ConfigData? _configData = null;
+    private ConfigData _configData = null;
 
     // "can't craft" warning suppression timers by userID
     private readonly Dictionary<ulong, Timer> _craftWarned = new();
@@ -31,7 +31,7 @@ namespace Oxide.Plugins
     private readonly StringBuilder _statusBuilder = new();
 
     // workbench unlock announcement broadcast timers
-    private readonly Timer?[] _unlockTimers = { null, null, null };
+    private readonly Timer[] _unlockTimers = { null, null, null };
 
     #region Permission Strings
 
@@ -103,7 +103,7 @@ namespace Oxide.Plugins
 
     // create a timer that will fire when the given workbench should unlock, or
     //  null if manually locked or already unlocked
-    private Timer? GetTimer(int index, double wipeElapsedSeconds = -1.0)
+    private Timer GetTimer(int index, double wipeElapsedSeconds = -1.0)
     {
       if (index < 0 || index > 2) { return null; }
 
@@ -200,7 +200,7 @@ namespace Oxide.Plugins
     private string PrefixPermission(string perm) => Name.ToLower() + "." + perm;
 
     // report user-friendly detailed status
-    private void ReportStatus(IPlayer? player)
+    private void ReportStatus(IPlayer player)
     {
       // don't report status if nobody is online
       if (null == player && BasePlayer.activePlayerList.IsNullOrEmpty()) return;
@@ -289,7 +289,7 @@ namespace Oxide.Plugins
 
     // format a message based on language dictionary, arguments, and destination
     private string FormatMessage(
-      IPlayer? player, string langCode, params string[] args)
+      IPlayer player, string langCode, params string[] args)
     {
       var playerId = null == player || player.IsServer ? null : player.Id;
       var msg = string.Format(lang.GetMessage(langCode, this, playerId), args);
@@ -305,7 +305,7 @@ namespace Oxide.Plugins
     }
 
     // send a message to player or server without additional formatting
-    private void SendRawMessage(IPlayer? player, string message)
+    private void SendRawMessage(IPlayer player, string message)
     {
       if (null == player)
       {
@@ -321,7 +321,7 @@ namespace Oxide.Plugins
     //  arguments
     // this is the primary method that should be used to communicate to users
     private void SendMessage(
-      IPlayer? player, string langCode, params string[] args)
+      IPlayer player, string langCode, params string[] args)
     {
       SendRawMessage(player, FormatMessage(player, langCode, args));
     }

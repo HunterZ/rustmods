@@ -46,11 +46,13 @@ namespace Oxide.Plugins
       Water         // KpucTaJl Water Event
     }
 
-    [PluginReference] private readonly Plugin?
+#pragma warning disable CS0649
+    [PluginReference] private readonly Plugin
       AbandonedBases, DynamicPVP, DangerousTreasures, PlayerBasePvpZones,
       PopupNotifications, RaidableBases, SimpleStatus, TruePVE, ZoneManager;
+#pragma warning restore CS0649
 
-    private ConfigData? _configData;
+    private ConfigData _configData;
 
     // active TruePVE PVP delay timers by plugin name by player ID
     private Dictionary<ulong, Dictionary<string, Timer>> _excludedPlayers =
@@ -79,9 +81,9 @@ namespace Oxide.Plugins
         "{0}Leaving Train Tunnels PVP Zone"
     };
 
-    private Timer? _saveDataTimer;
+    private Timer _saveDataTimer;
 
-    private StoredData? _storedData;
+    private StoredData _storedData;
 
     private const string _uiName = "SuperPVxInfoUI";
 
@@ -95,7 +97,7 @@ namespace Oxide.Plugins
       player.userID.IsSteamId() &&
       (!checkConnected || player.IsConnected);
 
-    private PlayerWatcher? GetPlayerWatcher(BasePlayer player) =>
+    private PlayerWatcher GetPlayerWatcher(BasePlayer player) =>
       IsValidPlayer(player, true) ? player.GetComponent<PlayerWatcher>() : null;
 
     private void SendCannedMessage(BasePlayer player, string key)
@@ -446,12 +448,12 @@ namespace Oxide.Plugins
       return null;
     }
 
-    private (string?, string?) GetSmallestZoneIdAndName(BasePlayer player)
+    private (string, string) GetSmallestZoneIdAndName(BasePlayer player)
     {
       if (ZoneManager == null) return (null, null);
       float smallestRadius = float.MaxValue;
-      string? smallestId = null;
-      string? smallestName = null;
+      string smallestId = null;
+      string smallestName = null;
       var zoneIDs = ZM_GetPlayerZoneIDs(player);
       foreach (var zoneId in zoneIDs)
       {
@@ -1281,7 +1283,7 @@ namespace Oxide.Plugins
 
       // dictionary containing SimpleStatus values
       [JsonIgnore]
-      private Dictionary<string, object>? _dict = null;
+      private Dictionary<string, object> _dict = null;
       // accessor for SimpleStatus values dictionary
       // Populates and returns the dictionary on first call, and returns the
       //  cached dictionary on subsequent calls
@@ -1582,7 +1584,7 @@ namespace Oxide.Plugins
       // true if force updates should be allowed
       public static bool AllowForceUpdate { get; set; }
       // reference back to plugin
-      public static SuperPVxInfo? Instance { get; set; }
+      public static SuperPVxInfo Instance { get; set; }
       // consider at/above this height to be PvP
       public static float PvpAboveHeight { get; set; }
       // consider at/below this height to be PvP
@@ -1656,7 +1658,7 @@ namespace Oxide.Plugins
       // non-null if in Zone Manager zone
       private PVxType? _inZoneType;
       // reference back to player
-      private BasePlayer? _player;
+      private BasePlayer _player;
       // set of active PVP exit delays
       private HashSet<PvpDelayType> _pvpDelays = new();
       // PvX state on last check
@@ -1686,8 +1688,8 @@ namespace Oxide.Plugins
 
       // reset watcher state
       public void Init(
-        PVxType? inBaseType = null, HashSet<PvpDelayType>? pvpDelays = null,
-        PVxType? inZoneType = null, BasePlayer? player = null)
+        PVxType? inBaseType = null, HashSet<PvpDelayType> pvpDelays = null,
+        PVxType? inZoneType = null, BasePlayer player = null)
       {
         // (re)set public variables
         _checkBase = false;
