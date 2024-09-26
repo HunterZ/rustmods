@@ -1075,7 +1075,9 @@ namespace Oxide.Plugins
       // CUI
 
       // destroy old UI (if there was one)
-      if (null != oldType) CuiHelper.DestroyUi(player, _uiName);
+      // update: this should no longer be needed because we're setting the
+      //  destroyUi parameter on the CuiPanel
+      // if (null != oldType) CuiHelper.DestroyUi(player, _uiName);
 
       // create UI for new type if configured and enabled
       if (_configData.UISettings.TryGetValue(type, out var cuiSettings) &&
@@ -1233,7 +1235,7 @@ namespace Oxide.Plugins
                   CursorEnabled = false,
                   FadeOut = FadeOut,
                 },
-                Layer, _uiName
+                Layer, _uiName, _uiName
               },
               {
                 new CuiLabel
@@ -1357,7 +1359,7 @@ namespace Oxide.Plugins
       };
 
       [JsonProperty(PropertyName = "Notification Settings")]
-      public NotificationSettings NotifySettings {get; set; } = new();
+      public NotificationSettings NotifySettings { get; set; } = new();
 
       [JsonProperty(PropertyName = "Default UI Settings")]
       public Dictionary<PVxType, UiSettings> UISettings { get; set; } = new()
