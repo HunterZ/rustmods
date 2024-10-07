@@ -212,7 +212,7 @@ namespace Oxide.Plugins
                         sphereEntity.KillMessage();
                     }
                 }
-                Pool.FreeList(ref sphereEntities);
+                Pool.FreeUnmanaged(ref sphereEntities);
             }
 
             SaveData();
@@ -873,10 +873,17 @@ namespace Oxide.Plugins
                 {
                     continue;
                 }
-                var monumentName = landmarkInfo.displayPhrase.english.Replace("\n", "");
+                var monumentName = landmarkInfo.displayPhrase.english.Trim();
                 if (string.IsNullOrEmpty(monumentName))
                 {
-                    continue;
+                    if (landmarkInfo.name.Contains("monument_marker.prefab"))
+                    {
+                        monumentName = landmarkInfo.transform.root.name;
+                    }
+                    if (string.IsNullOrEmpty(monumentName))
+                    {
+                        continue;
+                    }
                 }
                 switch (landmarkInfo.name)
                 {
@@ -1203,7 +1210,7 @@ namespace Oxide.Plugins
                 HandleDeleteDynamicZone(zoneId, duration, eventName);
 
                 stringBuilder.Clear();
-                Pool.FreeUnmanaged (ref stringBuilder);
+                Pool.FreeUnmanaged(ref stringBuilder);
                 return true;
             }
 
@@ -1334,7 +1341,7 @@ namespace Oxide.Plugins
             }
 
             stringBuilder.Clear();
-            Pool.FreeUnmanaged (ref stringBuilder);
+            Pool.FreeUnmanaged(ref stringBuilder);
             return zoneRemoved;
         }
 
@@ -1378,8 +1385,8 @@ namespace Oxide.Plugins
         {
             // Method for spherical dome creation
             if (radius <= 0) return false;
-            
-            var sphereEntities = Pool.GetList<SphereEntity>();
+
+            var sphereEntities = Pool.Get<List<SphereEntity>>();
             for (var i = 0; i < darkness; i++)
             {
                 var sphereEntity = GameManager.server.CreateEntity(PrefabSphere, position) as SphereEntity;
@@ -1396,9 +1403,6 @@ namespace Oxide.Plugins
             _zoneSpheres.Add(zoneId, sphereEntities);
             return true;
         }
-
-
-
 
         private bool RemoveDome(string zoneId)
         {
@@ -1421,7 +1425,7 @@ namespace Oxide.Plugins
                     }
                 }
                 _zoneSpheres.Remove(zoneId);
-                Pool.FreeList(ref sphereEntities);
+                Pool.FreeUnmanaged(ref sphereEntities);
             });
             return true;
         }
@@ -1930,7 +1934,7 @@ namespace Oxide.Plugins
                 }
                 var result = stringBuilder.ToString();
                 stringBuilder.Clear();
-                Pool.FreeUnmanaged (ref stringBuilder);
+                Pool.FreeUnmanaged(ref stringBuilder);
                 Print(iPlayer, result);
                 return;
             }
@@ -2034,7 +2038,7 @@ namespace Oxide.Plugins
                     stringBuilder.AppendLine(Lang("Syntax6", iPlayer.Id, configData.Chat.Command));
                     var result = stringBuilder.ToString();
                     stringBuilder.Clear();
-                    Pool.FreeUnmanaged (ref stringBuilder);
+                    Pool.FreeUnmanaged(ref stringBuilder);
                     Print(iPlayer, result);
                     return;
 
