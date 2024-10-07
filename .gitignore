@@ -1,6 +1,7 @@
 # ignore all code files except for my own (allows working directly in a test
 #  server install)
 *.cs
+!DynamicPVP.cs
 !MagicTravelingVendorPanel.cs
 !PlayerBasePvpZones.cs
 !SuperPVxInfo.cs
