@@ -13,7 +13,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-  [Info("Super PVx Info", "HunterZ", "1.5.0")]
+  [Info("Super PVx Info", "HunterZ", "1.6.0")]
   [Description("Displays PvE/PvP/etc. status on player's HUD")]
   public class SuperPVxInfo : RustPlugin
   {
@@ -32,19 +32,33 @@ namespace Oxide.Plugins
     // primary status types tracked by this plugin
     public enum PVxType { PVE, PVP, PVPDelay, SafeZone }
 
-    // (plugin) events that are managed via listening to start/stop hooks
-    private enum PvpEventType
+    // PVP statuses that are managed via listening to player enter/exit hooks
+    [Flags]
+    public enum PvpBubbleTypes
     {
-      Air,           // KpucTaJl Air Event
-      ArcticBase,    // KpucTaJl Arctic Base Event
-      FerryTerminal, // KpucTaJl Ferry Terminal Event
-      GasStation,    // KpucTaJl Gas Station Event
-      Harbor,        // KpucTaJl Harbor Event
-      Junkyard,      // KpucTaJl Junkyard Event
-      PowerPlant,    // KpucTaJl Power Plant Event
-      SatDish,       // KpucTaJl Satellite Dish Event
-      Supermarket,   // KpucTaJl Supermarket Event
-      Water          // KpucTaJl Water Event
+      None            = 0,
+      // Nikedemos plugins
+      CargoTrainEvent = 1 << 0,
+      // Adem plugins
+      Caravan         = 1 << 1,
+      Convoy          = 1 << 2
+    }
+
+    // PVP events that are managed via listening to start/stop hooks that
+    //  provide a PVP area definition
+    private enum PvpLocationEventType
+    {
+      // KpucTaJl plugins
+      AirEvent,
+      ArcticBaseEvent,
+      FerryTerminalEvent,
+      GasStationEvent,
+      HarborEvent,
+      JunkyardEvent,
+      PowerPlantEvent,
+      SatelliteDishEvent,
+      SupermarketEvent,
+      WaterEvent
     }
 
 #pragma warning disable CS0649
@@ -56,8 +70,8 @@ namespace Oxide.Plugins
     private ConfigData _configData;
 
     // active TruePVE PVP delay timers by plugin name by player ID
-    private Dictionary<ulong, Dictionary<string, Timer>> _excludedPlayers =
-      new();
+    private readonly Dictionary<ulong, Dictionary<string, Timer>>
+      _excludedPlayers = new();
 
     // NOTE: this is not to be used directly for sending messages, but rather
     //  for populating the default language dictionary, and for enumerating
@@ -92,13 +106,13 @@ namespace Oxide.Plugins
 
     #region Utility Methods
 
-    private bool IsValidPlayer(BasePlayer player, bool checkConnected) =>
+    private static bool IsValidPlayer(BasePlayer player, bool checkConnected) =>
       null != player &&
       !player.IsNpc &&
       player.userID.IsSteamId() &&
       (!checkConnected || player.IsConnected);
 
-    private PlayerWatcher GetPlayerWatcher(BasePlayer player) =>
+    private static PlayerWatcher GetPlayerWatcher(BasePlayer player) =>
       IsValidPlayer(player, true) ? player.GetComponent<PlayerWatcher>() : null;
 
     private void SendCannedMessage(BasePlayer player, string key)
@@ -159,10 +173,8 @@ namespace Oxide.Plugins
 
     #region Oxide Methods
 
-    protected override void LoadDefaultMessages()
-    {
+    protected override void LoadDefaultMessages() =>
       lang.RegisterMessages(_notifyMessages, this);
-    }
 
     private void Init()
     {
@@ -269,8 +281,10 @@ namespace Oxide.Plugins
       watcher.StartWatching();
     }
 
-    private void OnPlayerDisconnected(BasePlayer player, string reason)
-    {
+#pragma warning disable IDE0060 // Remove unused parameter
+        private void OnPlayerDisconnected(BasePlayer player, string reason)
+#pragma warning restore IDE0060 // Remove unused parameter
+        {
       if (IsValidPlayer(player, false))
       {
         player.gameObject.GetComponent<PlayerWatcher>()?.OnDestroy();
@@ -278,8 +292,7 @@ namespace Oxide.Plugins
       DestroyUI(player);
     }
 
-    private void OnPlayerRespawned(BasePlayer player)
-    {
+    private void OnPlayerRespawned(BasePlayer player) =>
       NextTick(() =>
       {
         if (!IsValidPlayer(player, true)) return;
@@ -293,7 +306,6 @@ namespace Oxide.Plugins
         watcher.CheckPvpDelay = true;
         watcher.Force();
       });
-    }
 
     #endregion Oxide Methods
 
@@ -385,10 +397,8 @@ namespace Oxide.Plugins
 
     #region ZoneManager Utilities
 
-    bool ZM_CheckZoneID(string zoneId)
-    {
-      return ZoneManager?.Call("CheckZoneID", zoneId) is string s && null != s;
-    }
+    bool ZM_CheckZoneID(string zoneId) =>
+      ZoneManager?.Call("CheckZoneID", zoneId) is string s && null != s;
 
     private string[] ZM_GetPlayerZoneIDs(BasePlayer player) =>
       ZoneManager?.Call("GetPlayerZoneIDs", player) is string[] s ?
@@ -424,9 +434,7 @@ namespace Oxide.Plugins
         // return PVP if this is a TruePVE/NextGenPVE exclusion zone
         // (needed for e.g. ZoneManagerAutoZones which doesn't put "PVP" in
         //  its zone names)
-#pragma warning disable CS8604 // Possible null reference argument.
         if (IsExcludeZone(zoneId))
-#pragma warning restore CS8604 // Possible null reference argument.
         {
           return PVxType.PVP;
         }
@@ -502,8 +510,7 @@ namespace Oxide.Plugins
         x => ruleset.Contains(x, CompareOptions.IgnoreCase));
 
     // common logic for setting watcher's zone check request flag
-    private void CheckZone(BasePlayer player)
-    {
+    private void CheckZone(BasePlayer player) =>
       NextTick(() =>
       {
         if (!IsValidPlayer(player, true)) return;
@@ -512,7 +519,6 @@ namespace Oxide.Plugins
         watcher.CheckZone = true;
         watcher.Force();
       });
-    }
 
     #endregion ZoneManager Utilities
 
@@ -534,8 +540,8 @@ namespace Oxide.Plugins
     #region PVP Plugin Utilities
 
     // create or update an event record with the given data
-    private void CreateOrUpdatePvpEvent(
-      PvpEventType type, Vector3 location, float radius)
+    private void CreateOrUpdatePvpLocationEvent(
+      PvpLocationEventType type, Vector3 location, float radius)
     {
       if (null == _storedData) return;
       if (_storedData.PvpEvents.TryGetValue(type, out var eventData))
@@ -551,7 +557,7 @@ namespace Oxide.Plugins
     }
 
     // delete an event record with the given data, if any
-    private void DeletePvpEvent(PvpEventType type)
+    private void DeleteLocationPvpEvent(PvpLocationEventType type)
     {
       if (null == _storedData) return;
       if (_storedData.PvpEvents.Remove(type)) SaveData();
@@ -611,8 +617,7 @@ namespace Oxide.Plugins
     // note that this is only useful for unexpected exits (e.g. respawning)
     //  because we don't get a PvP-versus-PvE indication from this
     private bool IsPlayerInPVxEvent(BasePlayer player) =>
-      null != DangerousTreasures &&
-      Convert.ToBoolean(DangerousTreasures.Call(
+      null != DangerousTreasures && Convert.ToBoolean(DangerousTreasures.Call(
         "EventTerritory", player.transform.position));
 
     // check if player has any PVP delays active
@@ -656,7 +661,7 @@ namespace Oxide.Plugins
     }
 
     // common logic for Abandoned/Raidable Base entry hooks
-    private void EnteredBase(
+    private static void EnteredBase(
       BasePlayer player, PVxType baseType,
       Vector3 baseLocation, float baseRadius)
     {
@@ -670,7 +675,8 @@ namespace Oxide.Plugins
     }
 
     // common logic for Abandoned/Raidable Base exit hooks
-    private void ExitedBase(BasePlayer player, bool checkPlayerValid = true)
+    private static void ExitedBase(
+      BasePlayer player, bool checkPlayerValid = true)
     {
       if (checkPlayerValid && !IsValidPlayer(player, true)) return;
       var watcher = GetPlayerWatcher(player);
@@ -680,22 +686,44 @@ namespace Oxide.Plugins
       watcher.Force();
     }
 
-    // common logic for PVP Bubble hooks
-    private void SetPvpBubble(BasePlayer player, bool state)
+    // common logic for "in PVP bubble" hooks to set/clear a player's state
+    private static void SetPvpBubble(
+      BasePlayer player, PvpBubbleTypes type, bool state)
     {
       if (!IsValidPlayer(player, true)) return;
       var watcher = GetPlayerWatcher(player);
       if (null == watcher) return;
-      if (!state)
+      var oldState = watcher.InPvpBubbleTypes;
+      if (state)
       {
-        watcher.CheckZone = true;
+        watcher.InPvpBubbleTypes |= type;
       }
-      watcher.InPvpBubble = state;
-      watcher.Force();
+      else
+      {
+        watcher.InPvpBubbleTypes &= ~type;
+        if (PvpBubbleTypes.None == watcher.InPvpBubbleTypes)
+        {
+          watcher.CheckZone = true;
+        }
+      }
+      if (watcher.InPvpBubbleTypes != oldState)
+      {
+        watcher.Force();
+      }
+    }
+
+    // common logic for "in PVP bubble" hooks to clear all players' states
+    private static void EndPvpBubble(PvpBubbleTypes type)
+    {
+      foreach (var player in BasePlayer.activePlayerList)
+      {
+        SetPvpBubble(player, type, false);
+      }
     }
 
     // common logic for PVP Delay hooks
-    private void SetPvpDelay(BasePlayer player, PvpDelayType type, bool state)
+    private static void SetPvpDelay(
+      BasePlayer player, PvpDelayType type, bool state)
     {
       if (!IsValidPlayer(player, true)) return;
       var watcher = GetPlayerWatcher(player);
@@ -713,7 +741,8 @@ namespace Oxide.Plugins
     }
 
     // common logic for PVx event hooks
-    private void SetPvxEvent(BasePlayer player, PVxType eventType, bool state)
+    private static void SetPvxEvent(
+      BasePlayer player, PVxType eventType, bool state)
     {
       if (!IsValidPlayer(player, true)) return;
       var watcher = GetPlayerWatcher(player);
@@ -734,36 +763,31 @@ namespace Oxide.Plugins
 
     #region RaidableBases Hook Handlers
 
+#pragma warning disable IDE0060 // Remove unused parameter
     private void OnPlayerEnteredRaidableBase(
       BasePlayer player, Vector3 location, bool allowPVP, int mode, string id,
       float _, float __, float loadTime, ulong ownerId, string baseName,
-      DateTime spawnTime, DateTime despawnTime, float radius, int lootRemaining)
-    {
-      NextTick(() =>
-      {
-        EnteredBase(
-          player, allowPVP ? PVxType.PVP : PVxType.PVE, location, radius);
-      });
-    }
+      DateTime spawnTime, DateTime despawnTime, float radius,
+      int lootRemaining) =>
+#pragma warning restore IDE0060 // Remove unused parameter
+      NextTick(() => EnteredBase(
+        player, allowPVP ? PVxType.PVP : PVxType.PVE, location, radius));
 
+#pragma warning disable IDE0060 // Remove unused parameter
     private void OnPlayerExitedRaidableBase(
       BasePlayer player, Vector3 location, bool allowPVP, int mode, string id,
       float _, float __, float loadTime, ulong ownerId, string baseName,
-      DateTime spawnTime, DateTime despawnTime, float radius)
-    {
-      NextTick(() =>
-      {
-        ExitedBase(player);
-      });
-    }
+      DateTime spawnTime, DateTime despawnTime, float radius) =>
+#pragma warning restore IDE0060 // Remove unused parameter
+      NextTick(() => ExitedBase(player));
 
     private void OnRaidableBaseEnded(
       Vector3 location, int mode, bool allowPvP, string id, float _,
       float __, float loadTime, ulong ownerId, BasePlayer owner,
       List<BasePlayer> raiders, List<BasePlayer> intruders,
       List<BaseEntity> entities, string baseName, DateTime spawnDateTime,
-      DateTime despawnDateTime, float protectionRadius, int lootAmountRemaining)
-    {
+      DateTime despawnDateTime, float protectionRadius,
+      int lootAmountRemaining) =>
       NextTick(() =>
       {
         // set zone check flag for any players in base radius
@@ -779,40 +803,27 @@ namespace Oxide.Plugins
           ExitedBase(player, false);
         }
       });
-    }
 
     private void OnPlayerPvpDelayStart(
       BasePlayer player, int mode, Vector3 location, bool allowPvP, string id,
       float _, float __, float loadTime, ulong ownerId, string baseName,
-      DateTime spawnDateTime, DateTime despawnDateTime, int lootAmountRemaining)
-    {
-      NextTick(() =>
-      {
-        SetPvpDelay(player, PvpDelayType.RaidableBases, true);
-      });
-    }
+      DateTime spawnDateTime, DateTime despawnDateTime,
+      int lootAmountRemaining) =>
+      NextTick(() => SetPvpDelay(player, PvpDelayType.RaidableBases, true));
 
     private void OnPlayerPvpDelayReset(
       BasePlayer player, int mode, Vector3 location, bool allowPvP, string id,
       float _, float __, float loadTime, ulong ownerId, string baseName,
-      DateTime spawnDateTime, DateTime despawnDateTime, int lootAmountRemaining)
-    {
-      NextTick(() =>
-      {
-        SetPvpDelay(player, PvpDelayType.RaidableBases, true);
-      });
-    }
+      DateTime spawnDateTime, DateTime despawnDateTime,
+      int lootAmountRemaining) =>
+      NextTick(() => SetPvpDelay(player, PvpDelayType.RaidableBases, true));
 
     private void OnPlayerPvpDelayExpired(
       BasePlayer player, int mode, Vector3 location, bool allowPvP, string id,
       float _, float __, float loadTime, ulong ownerId, string baseName,
-      DateTime spawnDateTime, DateTime despawnDateTime, int lootAmountRemaining)
-    {
-      NextTick(() =>
-      {
-        SetPvpDelay(player, PvpDelayType.RaidableBases, false);
-      });
-    }
+      DateTime spawnDateTime, DateTime despawnDateTime,
+      int lootAmountRemaining) =>
+      NextTick(() => SetPvpDelay(player, PvpDelayType.RaidableBases, false));
 
     #endregion RaidableBases Hook Handlers
 
@@ -821,29 +832,18 @@ namespace Oxide.Plugins
     private void OnPlayerEnteredAbandonedBase(
       BasePlayer player, Vector3 eventPos, float radius, bool allowPVP,
       List<BasePlayer> intruders, List<ulong> intruderIds,
-      List<BaseEntity> entities)
-    {
-      NextTick(() =>
-      {
-        EnteredBase(
-          player, allowPVP ? PVxType.PVP : PVxType.PVE, eventPos, radius);
-      });
-    }
+      List<BaseEntity> entities) =>
+      NextTick(() => EnteredBase(
+        player, allowPVP ? PVxType.PVP : PVxType.PVE, eventPos, radius));
 
     private void OnPlayerExitAbandonedBase(
-      BasePlayer player, Vector3 location, bool allowPVP)
-    {
-      NextTick(() =>
-      {
-        ExitedBase(player);
-      });
-    }
+      BasePlayer player, Vector3 location, bool allowPVP) =>
+      NextTick(() => ExitedBase(player));
 
     private void OnAbandonedBaseEnded(
       Vector3 eventPos, float radius, bool allowPVP,
       List<BasePlayer> participants, List<ulong> participantIds,
-      List<BaseEntity> entities)
-    {
+      List<BaseEntity> entities) =>
       NextTick(() =>
       {
         foreach (var player in participants)
@@ -856,78 +856,73 @@ namespace Oxide.Plugins
           ExitedBase(player, false);
         }
       });
-    }
 
     private void OnPlayerPvpDelayStart(
       BasePlayer player, ulong userid, Vector3 eventPos,
-      List<BasePlayer> intruders, List<BaseEntity> entities)
-    {
-      NextTick(() =>
-      {
-        SetPvpDelay(player, PvpDelayType.AbandonedBases, true);
-      });
-    }
+      List<BasePlayer> intruders, List<BaseEntity> entities) =>
+      NextTick(() => SetPvpDelay(player, PvpDelayType.AbandonedBases, true));
 
     private void OnPlayerPvpDelayExpiredII(
       BasePlayer player, ulong userid, Vector3 eventPos,
-      List<BasePlayer> intruders, List<BaseEntity> entities)
-    {
-      NextTick(() =>
-      {
-        SetPvpDelay(player, PvpDelayType.AbandonedBases, false);
-      });
-    }
+      List<BasePlayer> intruders, List<BaseEntity> entities) =>
+      NextTick(() => SetPvpDelay(player, PvpDelayType.AbandonedBases, false));
 
     #endregion AbandonedBases Hook Handlers
 
     #region DangerousTreasures Hook Handlers
 
-    private void OnPlayerEnteredDangerousEvent(
-      BasePlayer player, Vector3 eventPos, bool allowPVP)
-    {
+    private static void OnPlayerEnteredDangerousEvent(
+      BasePlayer player, Vector3 eventPos, bool allowPVP) =>
       SetPvxEvent(player, allowPVP ? PVxType.PVP : PVxType.PVE, true);
-    }
 
-    private void OnPlayerExitedDangerousEvent(
-      BasePlayer player, Vector3 eventPos, bool allowPVP)
-    {
+    private static void OnPlayerExitedDangerousEvent(
+      BasePlayer player, Vector3 eventPos, bool allowPVP) =>
       SetPvxEvent(player, allowPVP ? PVxType.PVP : PVxType.PVE, false);
-    }
 
     #endregion DangerousTreasures Hook Handlers
 
-    #region CargoTrainTunnel Hook Handlers
+    #region PVP Bubble Hook Handlers
+
+    #region Cargo Train Event Hook Handlers
 
     private void OnPlayerEnterPVPBubble(
-      TrainEngine trainEngine, BasePlayer player)
-    {
-      NextTick(() =>
-      {
-        SetPvpBubble(player, true);
-      });
-    }
+      TrainEngine trainEngine, BasePlayer player) =>
+      NextTick(() => SetPvpBubble(
+        player, PvpBubbleTypes.CargoTrainEvent, true));
 
     private void OnPlayerExitPVPBubble(
-      TrainEngine trainEngine, BasePlayer player)
-    {
-      NextTick(() =>
-      {
-        SetPvpBubble(player, false);
-      });
-    }
+      TrainEngine trainEngine, BasePlayer player) =>
+      NextTick(() => SetPvpBubble(
+        player, PvpBubbleTypes.CargoTrainEvent, false));
 
-    private void OnTrainEventEnded(TrainEngine trainEngine)
-    {
-      NextTick(() =>
-      {
-        foreach (var player in BasePlayer.activePlayerList)
-        {
-          SetPvpBubble(player, false);
-        }
-      });
-    }
+    private void OnTrainEventEnded(TrainEngine trainEngine) =>
+      NextTick(() => EndPvpBubble(PvpBubbleTypes.CargoTrainEvent));
 
-    #endregion CargoTrainTunnel Hook Handlers
+    #endregion Cargo Train Event Hook Handlers
+
+    #region Adem Hook Handlers
+
+    private void OnPlayerEnterCaravan(BasePlayer player) =>
+      NextTick(() => SetPvpBubble(player, PvpBubbleTypes.Caravan, true));
+
+    private void OnPlayerExitCaravan(BasePlayer player) =>
+      NextTick(() => SetPvpBubble(player, PvpBubbleTypes.Caravan, false));
+
+    private void OnCaravanStop() =>
+      NextTick(() => EndPvpBubble(PvpBubbleTypes.Caravan));
+
+    private void OnPlayerEnterConvoy(BasePlayer player) =>
+      NextTick(() => SetPvpBubble(player, PvpBubbleTypes.Convoy, true));
+
+    private void OnPlayerExitConvoy(BasePlayer player) =>
+      NextTick(() => SetPvpBubble(player, PvpBubbleTypes.Convoy, false));
+
+    private void OnConvoyStop() =>
+      NextTick(() => EndPvpBubble(PvpBubbleTypes.Convoy));
+
+    #endregion Adem Hook Handlers
+
+    #endregion PVP Bubble Hook Handlers
 
     #region PlayerBasePvpZones Hook Handlers
 
@@ -978,70 +973,85 @@ namespace Oxide.Plugins
 
     private void OnAirEventStart(
       HashSet<BaseEntity> entities, Vector3 pos, float radius) =>
-      NextTick(() => CreateOrUpdatePvpEvent(PvpEventType.Air, pos, radius));
+      NextTick(() => CreateOrUpdatePvpLocationEvent(
+        PvpLocationEventType.AirEvent, pos, radius));
 
-    void OnAirEventEnd() => NextTick(() => DeletePvpEvent(PvpEventType.Air));
+    private void OnAirEventEnd() =>
+      NextTick(() => DeleteLocationPvpEvent(
+        PvpLocationEventType.AirEvent));
 
     private void OnArcticBaseEventStart(Vector3 pos, float radius) =>
-      NextTick(() =>
-        CreateOrUpdatePvpEvent(PvpEventType.ArcticBase, pos, radius));
+      NextTick(() => CreateOrUpdatePvpLocationEvent(
+        PvpLocationEventType.ArcticBaseEvent, pos, radius));
 
     private void OnArcticBaseEventEnd() =>
-      NextTick(() => DeletePvpEvent(PvpEventType.ArcticBase));
+      NextTick(() => DeleteLocationPvpEvent(
+        PvpLocationEventType.ArcticBaseEvent));
 
     private void OnFerryTerminalEventStart(Vector3 pos, float radius) =>
-      NextTick(() =>
-        CreateOrUpdatePvpEvent(PvpEventType.FerryTerminal, pos, radius));
+      NextTick(() => CreateOrUpdatePvpLocationEvent(
+        PvpLocationEventType.FerryTerminalEvent, pos, radius));
 
     private void OnFerryTerminalEventEnd() =>
-      NextTick(() => DeletePvpEvent(PvpEventType.FerryTerminal));
+      NextTick(() => DeleteLocationPvpEvent(
+        PvpLocationEventType.FerryTerminalEvent));
 
     private void OnGasStationEventStart(Vector3 pos, float radius) =>
-      NextTick(() =>
-        CreateOrUpdatePvpEvent(PvpEventType.GasStation, pos, radius));
+      NextTick(() => CreateOrUpdatePvpLocationEvent(
+        PvpLocationEventType.GasStationEvent, pos, radius));
 
     private void OnGasStationEventEnd() =>
-      NextTick(() => DeletePvpEvent(PvpEventType.GasStation));
+      NextTick(() => DeleteLocationPvpEvent(
+        PvpLocationEventType.GasStationEvent));
 
     private void OnHarborEventStart(Vector3 pos, float radius) =>
-      NextTick(() => CreateOrUpdatePvpEvent(PvpEventType.Harbor, pos, radius));
+      NextTick(() => CreateOrUpdatePvpLocationEvent(
+        PvpLocationEventType.HarborEvent, pos, radius));
 
     private void OnHarborEventEnd() =>
-      NextTick(() => DeletePvpEvent(PvpEventType.Harbor));
+      NextTick(() => DeleteLocationPvpEvent(
+        PvpLocationEventType.HarborEvent));
 
     private void OnJunkyardEventStart(Vector3 pos, float radius) =>
-      NextTick(() =>
-        CreateOrUpdatePvpEvent(PvpEventType.Junkyard, pos, radius));
+      NextTick(() => CreateOrUpdatePvpLocationEvent(
+        PvpLocationEventType.JunkyardEvent, pos, radius));
 
     private void OnJunkyardEventEnd() =>
-      NextTick(() => DeletePvpEvent(PvpEventType.Junkyard));
+      NextTick(() => DeleteLocationPvpEvent(
+        PvpLocationEventType.JunkyardEvent));
 
     private void OnPowerPlantEventStart(Vector3 pos, float radius) =>
-      NextTick(() =>
-        CreateOrUpdatePvpEvent(PvpEventType.PowerPlant, pos, radius));
+      NextTick(() => CreateOrUpdatePvpLocationEvent(
+        PvpLocationEventType.PowerPlantEvent, pos, radius));
 
     private void OnPowerPlantEventEnd() =>
-      NextTick(() => DeletePvpEvent(PvpEventType.PowerPlant));
+      NextTick(() => DeleteLocationPvpEvent(
+        PvpLocationEventType.PowerPlantEvent));
 
     private void OnSatDishEventStart(Vector3 pos, float radius) =>
-      NextTick(() => CreateOrUpdatePvpEvent(PvpEventType.SatDish, pos, radius));
+      NextTick(() => CreateOrUpdatePvpLocationEvent(
+        PvpLocationEventType.SatelliteDishEvent, pos, radius));
 
     private void OnSatDishEventEnd() =>
-      NextTick(() => DeletePvpEvent(PvpEventType.SatDish));
+      NextTick(() => DeleteLocationPvpEvent(
+        PvpLocationEventType.SatelliteDishEvent));
 
     private void OnSupermarketEventStart(Vector3 pos, float radius) =>
-      NextTick(() =>
-        CreateOrUpdatePvpEvent(PvpEventType.Supermarket, pos, radius));
+      NextTick(() => CreateOrUpdatePvpLocationEvent(
+        PvpLocationEventType.SupermarketEvent, pos, radius));
 
     private void OnSupermarketEventEnd() =>
-      NextTick(() => DeletePvpEvent(PvpEventType.Supermarket));
+      NextTick(() => DeleteLocationPvpEvent(
+        PvpLocationEventType.SupermarketEvent));
 
     private void OnWaterEventStart(
       HashSet<BaseEntity> entities, Vector3 pos, float radius) =>
-      NextTick(() => CreateOrUpdatePvpEvent(PvpEventType.Water, pos, radius));
+      NextTick(() => CreateOrUpdatePvpLocationEvent(
+        PvpLocationEventType.WaterEvent, pos, radius));
 
-    void OnWaterEventEnd() =>
-      NextTick(() => DeletePvpEvent(PvpEventType.Water));
+    private void OnWaterEventEnd() =>
+      NextTick(() => DeleteLocationPvpEvent(
+        PvpLocationEventType.WaterEvent));
 
     #endregion KpucTaJl Hook Handlers
 
@@ -1072,14 +1082,7 @@ namespace Oxide.Plugins
     {
       if (null == _configData || oldType == type) return;
 
-      // CUI
-
-      // destroy old UI (if there was one)
-      // update: this should no longer be needed because we're setting the
-      //  destroyUi parameter on the CuiPanel
-      // if (null != oldType) CuiHelper.DestroyUi(player, _uiName);
-
-      // create UI for new type if configured and enabled
+      // create CUI for new type if configured and enabled
       if (_configData.UISettings.TryGetValue(type, out var cuiSettings) &&
           cuiSettings.Enabled)
       {
@@ -1536,8 +1539,8 @@ namespace Oxide.Plugins
     {
       public Dictionary<string, string> Mappings { get; set; } = new();
 
-      public Dictionary<PvpEventType, PvpEventData> PvpEvents { get; set; } =
-        new();
+      public Dictionary<PvpLocationEventType, PvpEventData>
+        PvpEvents { get; set; } = new();
     }
 
     private void LoadData()
@@ -1569,7 +1572,7 @@ namespace Oxide.Plugins
       // start a save timer
       _saveDataTimer = timer.Once(
         null == _configData ? 5.0f : _configData.saveIntervalSeconds,
-        () => WriteData());
+        WriteData);
     }
 
     private void WriteData()
@@ -1639,16 +1642,22 @@ namespace Oxide.Plugins
         set { _forceUpdate |= value != _inBaseType; _inBaseType = value; }
       }
       // in cargo train event PvP bubble
-      private bool _inPvpBubble;
-      public bool InPvpBubble {
-        get { return _inPvpBubble; }
-        set { _forceUpdate |= value != _inPvpBubble; _inPvpBubble = value; }
+      private PvpBubbleTypes _inPvpBubbleTypes;
+      public PvpBubbleTypes InPvpBubbleTypes {
+        get { return _inPvpBubbleTypes; }
+        set {
+          _forceUpdate |= value != _inPvpBubbleTypes;
+          _inPvpBubbleTypes = value;
+        }
       }
       // in dangerous treasures PVx event
       private PVxType? _inPVxEventType;
       public PVxType? InPVxEventType {
         get { return _inPVxEventType; }
-        set { _forceUpdate |= value != _inPVxEventType; _inPVxEventType = value; }
+        set {
+          _forceUpdate |= value != _inPVxEventType;
+          _inPVxEventType = value;
+        }
       }
 
       // private members
@@ -1707,7 +1716,7 @@ namespace Oxide.Plugins
         _checkPVxEvent = false;
         _checkZone = false;
         _inBaseType = inBaseType;
-        _inPvpBubble = false;
+        _inPvpBubbleTypes = PvpBubbleTypes.None;
         _inPVxEventType = null;
 
         // (re)set private variables
@@ -1750,8 +1759,8 @@ namespace Oxide.Plugins
       public void Watch()
       {
         // abort if plugin reference or player invalid
-        if (null == _player || null == Instance ||
-            !Instance.IsValidPlayer(_player, true))
+        if (
+          null == _player || null == Instance || !IsValidPlayer(_player, true))
         {
           return;
         }
@@ -1809,20 +1818,20 @@ namespace Oxide.Plugins
         // - pvp exit delay active => PvP Delay
         // - in PvE base/event/tutorial/zone => PvE
         // - configured default
-        if (true == _inSafeZone)             return PVxType.SafeZone;
-        if (PVxType.SafeZone == _inZoneType) return PVxType.SafeZone;
-        if (PVxType.PVP == _inBaseType)      return PVxType.PVP;
-        if (_inPvpBubble)                    return PVxType.PVP;
-        if (_inPvpEvent)                     return PVxType.PVP;
-        if (PVxType.PVP == _inPVxEventType)  return PVxType.PVP;
-        if (PVxType.PVP == _inZoneType)      return PVxType.PVP;
-        if (true == _heightAbovePvp)         return PVxType.PVP;
-        if (true == _heightBelowPvp)         return PVxType.PVP;
-        if (_pvpDelays.Count > 0)            return PVxType.PVPDelay;
-        if (PVxType.PVE == _inBaseType)      return PVxType.PVE;
-        if (PVxType.PVE == _inPVxEventType)  return PVxType.PVE;
-        if (true == _inTutorial)             return PVxType.PVE;
-        if (PVxType.PVE == _inZoneType)      return PVxType.PVE;
+        if (true == _inSafeZone)                      return PVxType.SafeZone;
+        if (PVxType.SafeZone == _inZoneType)          return PVxType.SafeZone;
+        if (PVxType.PVP == _inBaseType)               return PVxType.PVP;
+        if (PvpBubbleTypes.None != _inPvpBubbleTypes) return PVxType.PVP;
+        if (_inPvpEvent)                              return PVxType.PVP;
+        if (PVxType.PVP == _inPVxEventType)           return PVxType.PVP;
+        if (PVxType.PVP == _inZoneType)               return PVxType.PVP;
+        if (true == _heightAbovePvp)                  return PVxType.PVP;
+        if (true == _heightBelowPvp)                  return PVxType.PVP;
+        if (_pvpDelays.Count > 0)                     return PVxType.PVPDelay;
+        if (PVxType.PVE == _inBaseType)               return PVxType.PVE;
+        if (PVxType.PVE == _inPVxEventType)           return PVxType.PVE;
+        if (true == _inTutorial)                      return PVxType.PVE;
+        if (PVxType.PVE == _inZoneType)               return PVxType.PVE;
         // defer to default state (or PVE if somehow not defined)
         return Instance?._configData == null ?
           PVxType.PVE : Instance._configData.defaultType;
@@ -1849,8 +1858,8 @@ namespace Oxide.Plugins
       private void UpdateFlags()
       {
         // abort if plugin reference or player invalid
-        if (null == _player || null == Instance ||
-            !Instance.IsValidPlayer(_player, true))
+        if (
+          null == _player || null == Instance || !IsValidPlayer(_player, true))
         {
           return;
         }
