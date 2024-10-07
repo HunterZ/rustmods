@@ -17,7 +17,7 @@ using Random = UnityEngine.Random;
 
 namespace Oxide.Plugins
 {
-    [Info("Dynamic PVP", "CatMeat/Arainrr", "4.2.17", ResourceId = 2728)]
+    [Info("Dynamic PVP", "CatMeat/Arainrr", "4.2.20", ResourceId = 2728)]
     [Description("Creates temporary PvP zones on certain actions/events")]
     public class DynamicPVP : RustPlugin
     {
@@ -880,9 +880,11 @@ namespace Oxide.Plugins
                 }
                 switch (landmarkInfo.name)
                 {
+                    case "oilrig_2":
                     case "OilrigAI":
                         _oilRigPosition = landmarkInfo.transform.position;
                         break;
+                    case "oilrig_1":
                     case "OilrigAI2":
                         _largeOilRigPosition = landmarkInfo.transform.position;
                         break;
@@ -1201,7 +1203,7 @@ namespace Oxide.Plugins
                 HandleDeleteDynamicZone(zoneId, duration, eventName);
 
                 stringBuilder.Clear();
-                Pool.Free(ref stringBuilder);
+                Pool.FreeUnmanaged (ref stringBuilder);
                 return true;
             }
 
@@ -1332,7 +1334,7 @@ namespace Oxide.Plugins
             }
 
             stringBuilder.Clear();
-            Pool.Free(ref stringBuilder);
+            Pool.FreeUnmanaged (ref stringBuilder);
             return zoneRemoved;
         }
 
@@ -1363,7 +1365,7 @@ namespace Oxide.Plugins
 
         #endregion DynamicZone Handler
 
-        #region ZoneDome Integration
+        #region Domes
 
         private readonly Dictionary<string, List<SphereEntity>> _zoneSpheres = new Dictionary<string, List<SphereEntity>>();
 
@@ -1374,10 +1376,9 @@ namespace Oxide.Plugins
 
         private bool CreateDome(string zoneId, Vector3 position, float radius, int darkness)
         {
-            if (radius <= 0)
-            {
-                return false;
-            }
+            // Method for spherical dome creation
+            if (radius <= 0) return false;
+            
             var sphereEntities = Pool.GetList<SphereEntity>();
             for (var i = 0; i < darkness; i++)
             {
@@ -1395,6 +1396,9 @@ namespace Oxide.Plugins
             _zoneSpheres.Add(zoneId, sphereEntities);
             return true;
         }
+
+
+
 
         private bool RemoveDome(string zoneId)
         {
@@ -1624,7 +1628,8 @@ namespace Oxide.Plugins
             {
                 TryRemovePVPDelay(playerId, playerName);
             });
-            Interface.CallHook("OnPlayerAddedToPVPDelay", player.userID, zoneId, baseEvent.PvpDelayTime);
+            //Interface.CallHook("OnPlayerAddedToPVPDelay", player.userID, zoneId, baseEvent.PvpDelayTime);
+            Interface.CallHook("OnPlayerAddedToPVPDelay", player.userID.Get(), zoneId, baseEvent.PvpDelayTime);
         }
 
         private bool CreateZone(string zoneId, string[] zoneArgs, Vector3 location)
@@ -1925,7 +1930,7 @@ namespace Oxide.Plugins
                 }
                 var result = stringBuilder.ToString();
                 stringBuilder.Clear();
-                Pool.Free(ref stringBuilder);
+                Pool.FreeUnmanaged (ref stringBuilder);
                 Print(iPlayer, result);
                 return;
             }
@@ -2029,7 +2034,7 @@ namespace Oxide.Plugins
                     stringBuilder.AppendLine(Lang("Syntax6", iPlayer.Id, configData.Chat.Command));
                     var result = stringBuilder.ToString();
                     stringBuilder.Clear();
-                    Pool.Free(ref stringBuilder);
+                    Pool.FreeUnmanaged (ref stringBuilder);
                     Print(iPlayer, result);
                     return;
 
