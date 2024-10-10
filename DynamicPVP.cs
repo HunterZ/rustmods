@@ -17,7 +17,7 @@ using Random = UnityEngine.Random;
 
 namespace Oxide.Plugins
 {
-    [Info("Dynamic PVP", "CatMeat/Arainrr", "4.2.20", ResourceId = 2728)]
+    [Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "4.3.0", ResourceId = 2728)]
     [Description("Creates temporary PvP zones on certain actions/events")]
     public class DynamicPVP : RustPlugin
     {
@@ -234,7 +234,7 @@ namespace Oxide.Plugins
             {
                 return;
             }
-            TryRemovePVPDelay(player.userID, player.displayName);
+            TryRemovePVPDelay(player);
         }
 
         #endregion Oxide Hooks
@@ -273,13 +273,14 @@ namespace Oxide.Plugins
             return leftZone;
         }
 
-        private void TryRemovePVPDelay(ulong playerId, string playerName)
+        private void TryRemovePVPDelay(BasePlayer player)
         {
-            PrintDebug($"Removing {playerName} from pvp delay.");
+            PrintDebug($"Removing {player.displayName} from pvp delay.");
+            var playerId = player.userID.Get();
             if (_pvpDelays.TryGetValue(playerId, out LeftZone leftZone))
             {
                 _pvpDelays.Remove(playerId);
-                Interface.CallHook("OnPlayerRemovedFromPVPDelay", playerId, leftZone.zoneId);
+                Interface.CallHook("OnPlayerRemovedFromPVPDelay", playerId, leftZone.zoneId, player);
                 Pool.Free(ref leftZone);
                 CheckHooks(true);
             }
@@ -1128,13 +1129,11 @@ namespace Oxide.Plugins
             }
 
             float duration = -1;
-            if (baseEvent is ITimedEvent timedEvent)
+            if (baseEvent is ITimedEvent timedEvent &&
+                (baseEvent is not ITimedDisable timedDisable ||
+                !timedDisable.IsTimedDisabled()))
             {
-                if (baseEvent is not ITimedDisable timedDisable ||
-                    !timedDisable.IsTimedDisabled())
-                {
-                    duration = timedEvent.Duration;
-                }
+                duration = timedEvent.Duration;
             }
 
             if (string.IsNullOrEmpty(zoneId))
@@ -1201,6 +1200,7 @@ namespace Oxide.Plugins
 
                 stringBuilder.Clear();
                 Pool.FreeUnmanaged(ref stringBuilder);
+                Interface.CallHook("OnCreatedDynamicPVP", zoneId, eventName, position, duration);
                 return true;
             }
 
@@ -1210,12 +1210,10 @@ namespace Oxide.Plugins
 
         private void HandleDeleteDynamicZone(string zoneId, float duration, string eventName)
         {
-            if (duration > 0f)
-            {
-                TryRemoveEventTimer(zoneId);
-                PrintDebug($"The zone({zoneId} | {eventName}) will be deleted after {duration} seconds.", true);
-                _eventTimers.Add(zoneId, timer.Once(duration, () => HandleDeleteDynamicZone(zoneId)));
-            }
+            if (duration <= 0f) return;
+            TryRemoveEventTimer(zoneId);
+            PrintDebug($"The zone({zoneId} | {eventName}) will be deleted after {duration} seconds.", true);
+            _eventTimers.Add(zoneId, timer.Once(duration, () => HandleDeleteDynamicZone(zoneId)));
         }
 
         private void HandleDeleteDynamicZone(string zoneId)
@@ -1321,6 +1319,7 @@ namespace Oxide.Plugins
                     CheckHooks();
                 }
                 PrintDebug($"Deleted zone({zoneId} | {eventName}) ({stringBuilder.ToString().TrimEnd(',')}).", true);
+                Interface.CallHook("OnDeletedDynamicPVP", zoneId, eventName);
             }
             else
             {
@@ -1565,7 +1564,7 @@ namespace Oxide.Plugins
             }
             PrintDebug($"{player.displayName} has entered a pvp zone({zoneId} | {eventName}).", true);
 
-            TryRemovePVPDelay(player.userID, player.displayName);
+            TryRemovePVPDelay(player);
         }
 
         private void OnExitZone(string zoneId, BasePlayer player)
@@ -1586,12 +1585,10 @@ namespace Oxide.Plugins
                 return;
             }
 
-            var playerId = player.userID;
-            var playerName = player.displayName;
             var leftZone = GetOrAddPVPDelay(player, zoneId, eventName);
             leftZone.zoneTimer = timer.Once(baseEvent.PvpDelayTime, () =>
             {
-                TryRemovePVPDelay(playerId, playerName);
+                TryRemovePVPDelay(player);
             });
             Interface.CallHook("OnPlayerAddedToPVPDelay", player.userID.Get(), zoneId, baseEvent.PvpDelayTime);
         }
