@@ -1817,6 +1817,87 @@ namespace Oxide.Plugins
 
     #region Commands
 
+    private static void DrawCube(
+      BasePlayer player, float duration, Color color,
+      Vector3 pos, Vector3 size, float rotation)
+    {
+      // this is complicated because ddraw doesn't have a rectangular prism
+      //  rendering option, so we need to figure out where all the rotated
+      //  vertices are and then draw all the edges
+      var halfSize = size / 2;
+      Vector3[] vertices =
+      {
+        // corners
+        new(pos.x + halfSize.x, pos.y + halfSize.y, pos.z + halfSize.z),
+        new(pos.x + halfSize.x, pos.y + halfSize.y, pos.z - halfSize.z),
+        new(pos.x + halfSize.x, pos.y - halfSize.y, pos.z + halfSize.z),
+        new(pos.x + halfSize.x, pos.y - halfSize.y, pos.z - halfSize.z),
+        new(pos.x - halfSize.x, pos.y + halfSize.y, pos.z + halfSize.z),
+        new(pos.x - halfSize.x, pos.y + halfSize.y, pos.z - halfSize.z),
+        new(pos.x - halfSize.x, pos.y - halfSize.y, pos.z + halfSize.z),
+        new(pos.x - halfSize.x, pos.y - halfSize.y, pos.z - halfSize.z),
+        // axes
+        new(pos.x - halfSize.x, pos.y, pos.z),
+        new(pos.x + halfSize.x, pos.y, pos.z),
+        new(pos.x, pos.y - halfSize.y, pos.z),
+        new(pos.x, pos.y + halfSize.y, pos.z),
+        new(pos.x, pos.y, pos.z - halfSize.z),
+        new(pos.x, pos.y, pos.z + halfSize.z)
+      };
+
+      // rotate all the points
+      var rotQ = Quaternion.Euler(0, rotation, 0);
+      for (int i = 0; i < vertices.Length; ++i)
+      {
+        vertices[i] = (rotQ * (vertices[i] - pos)) + pos;
+      }
+
+      // corners
+      player.SendConsoleCommand(
+        "ddraw.line", duration, color, vertices[0], vertices[1]);
+      player.SendConsoleCommand(
+        "ddraw.line", duration, color, vertices[0], vertices[2]);
+      player.SendConsoleCommand(
+        "ddraw.line", duration, color, vertices[0], vertices[4]);
+      player.SendConsoleCommand(
+        "ddraw.line", duration, color, vertices[1], vertices[3]);
+      player.SendConsoleCommand(
+        "ddraw.line", duration, color, vertices[1], vertices[5]);
+      player.SendConsoleCommand(
+        "ddraw.line", duration, color, vertices[2], vertices[3]);
+      player.SendConsoleCommand(
+        "ddraw.line", duration, color, vertices[2], vertices[6]);
+      player.SendConsoleCommand(
+        "ddraw.line", duration, color, vertices[3], vertices[7]);
+      player.SendConsoleCommand(
+        "ddraw.line", duration, color, vertices[4], vertices[5]);
+      player.SendConsoleCommand(
+        "ddraw.line", duration, color, vertices[4], vertices[6]);
+      player.SendConsoleCommand(
+        "ddraw.line", duration, color, vertices[5], vertices[7]);
+      player.SendConsoleCommand(
+        "ddraw.line", duration, color, vertices[6], vertices[7]);
+      // axes
+      player.SendConsoleCommand(
+        "ddraw.arrow", duration, Color.red,   vertices[8],  vertices[9],  5);
+      player.SendConsoleCommand(
+        "ddraw.arrow", duration, Color.green, vertices[10], vertices[11], 5);
+      player.SendConsoleCommand(
+        "ddraw.arrow", duration, Color.blue,  vertices[12], vertices[13], 5);
+      player.SendConsoleCommand(
+        "ddraw.text", duration, Color.red,   vertices[9] , "+x");
+      player.SendConsoleCommand(
+        "ddraw.text", duration, Color.green, vertices[11], "+y");
+      player.SendConsoleCommand(
+        "ddraw.text", duration, Color.blue,  vertices[13], "+z");
+    }
+
+    private static void DrawSphere(
+      BasePlayer player, float duration, Color color,
+      Vector3 position, float radius) =>
+      player.SendConsoleCommand(
+        "ddraw.sphere", duration, color, position, radius);
+
     private void CmdDynamicPVP(IPlayer iPlayer, string command, string[] args)
     {
       if (!iPlayer.IsAdmin && !iPlayer.HasPermission(PermissionAdmin))
@@ -1850,6 +1931,7 @@ namespace Oxide.Plugins
               .AppendLine(Lang("Syntax5", iPlayer.Id, configData.Chat.Command))
               .AppendLine(Lang("Syntax6", iPlayer.Id, configData.Chat.Command))
               .AppendLine(Lang("Syntax7", iPlayer.Id, configData.Chat.Command))
+              .AppendLine(Lang("Syntax8", iPlayer.Id, configData.Chat.Command))
               .ToString()
             ;
             stringBuilder.Clear();
@@ -1888,6 +1970,73 @@ namespace Oxide.Plugins
             stringBuilder.Clear();
             Pool.FreeUnmanaged(ref stringBuilder);
             Print(iPlayer, result);
+            return;
+          }
+
+          case "show":
+          {
+            if (iPlayer.Object is not BasePlayer player) return;
+            foreach (var activeEvent in _activeDynamicZones)
+            {
+              var zoneData = GetZoneById(activeEvent.Key);
+              if (null == zoneData) continue;
+              var zonePosition = zoneData.transform.position;
+              var baseZone = GetBaseEvent(activeEvent.Value)?.GetDynamicZone();
+              if (baseZone is SphereCubeDynamicZone scdZone)
+              {
+                player.SendConsoleCommand(
+                  "ddraw.text", configData.Chat.ShowDuration, Color.yellow,
+                  zonePosition, $"{activeEvent.Key}\n{activeEvent.Value}");
+                if (scdZone.Radius > 0)
+                {
+                  DrawSphere(
+                    player, configData.Chat.ShowDuration, Color.yellow,
+                    zonePosition, scdZone.Radius);
+                }
+                else if (scdZone.Size.sqrMagnitude > 0)
+                {
+                  var rotation = scdZone.Rotation;
+                  if (!scdZone.FixedRotation)
+                  {
+                    rotation += zoneData.transform.eulerAngles.y;
+                  }
+                  DrawCube(
+                    player, configData.Chat.ShowDuration, Color.yellow,
+                    zonePosition, scdZone.Size, rotation);
+                }
+                continue;
+              }
+              if (baseZone is CubeDynamicZone cdZone)
+              {
+                player.SendConsoleCommand(
+                  "ddraw.text", configData.Chat.ShowDuration, Color.cyan,
+                  zonePosition, $"{activeEvent.Key}\n{activeEvent.Value}");
+                if (cdZone.Size.sqrMagnitude > 0)
+                {
+                  var rotation = cdZone.Rotation;
+                  if (!cdZone.FixedRotation)
+                  {
+                    rotation += zoneData.transform.eulerAngles.y;
+                  }
+                  DrawCube(player, configData.Chat.ShowDuration, Color.cyan,
+                  zonePosition, cdZone.Size, rotation);
+                }
+                continue;
+              }
+              if (baseZone is SphereDynamicZone sdZone)
+              {
+                player.SendConsoleCommand(
+                  "ddraw.text", configData.Chat.ShowDuration, Color.magenta,
+                  zonePosition, $"{activeEvent.Key}\n{activeEvent.Value}");
+                if (sdZone.Radius > 0)
+                {
+                  DrawSphere(
+                    player, configData.Chat.ShowDuration, Color.magenta,
+                    zonePosition, sdZone.Radius);
+                }
+                continue;
+              }
+            }
             return;
           }
         }
@@ -1929,7 +2078,7 @@ namespace Oxide.Plugins
         {
           Print(iPlayer, StopEvent(eventName) ?
             Lang("EventStopped", iPlayer.Id, eventName) :
-            Lang("EventNameExist", iPlayer.Id, eventName));
+            Lang("EventNameNotExist", iPlayer.Id, eventName));
           return;
         }
 
@@ -2048,6 +2197,9 @@ namespace Oxide.Plugins
 
       [JsonProperty(PropertyName = "Chat SteamID Icon")]
       public ulong SteamIdIcon { get; set; } = 0;
+
+      [JsonProperty(PropertyName = "Zone Show Duration (in seconds)")]
+      public float ShowDuration { get; set; } = 15f;
     }
 
     private sealed class GeneralEventSettings
@@ -2373,21 +2525,20 @@ namespace Oxide.Plugins
 
       protected override string[] GetZoneSettings(Transform transform = null)
       {
-        var zoneSettings = new List<string>
-        {
-          "size", $"{Size.x} {Size.y} {Size.z}"
-        };
-
         var transformedRotation = Rotation;
         if (transform != null && !FixedRotation)
         {
           transformedRotation += transform.rotation.eulerAngles.y;
         }
-        zoneSettings.Add(
-          transformedRotation.ToString(CultureInfo.InvariantCulture));
+
+        var zoneSettings = new List<string>
+        {
+          "size", $"{Size.x} {Size.y} {Size.z}",
+          "rotation", transformedRotation.ToString(CultureInfo.InvariantCulture)
+        };
+
         GetBaseZoneSettings(zoneSettings);
-        var array = zoneSettings.ToArray();
-        return array;
+        return zoneSettings.ToArray();
       }
     }
 
@@ -2424,8 +2575,7 @@ namespace Oxide.Plugins
           zoneSettings.Add(transformedRotation.ToString(CultureInfo.InvariantCulture));
         }
         GetBaseZoneSettings(zoneSettings);
-        var array = zoneSettings.ToArray();
-        return array;
+        return zoneSettings.ToArray();
       }
     }
 
@@ -2702,7 +2852,8 @@ namespace Oxide.Plugins
         ["Syntax4"] = "<color=#ce422b>/{0} edit <eventName> <true/false></color> - Changes auto start state of auto event",
         ["Syntax5"] = "<color=#ce422b>/{0} edit <eventName> <move></color> - Move auto event to your current location",
         ["Syntax6"] = "<color=#ce422b>/{0} edit <eventName> <time(seconds)></color> - Changes the duration of a timed event",
-        ["Syntax7"] = "<color=#ce422b>/{0} list</color> - Display all custom events"
+        ["Syntax7"] = "<color=#ce422b>/{0} list</color> - Display all custom events",
+        ["Syntax8"] = "<color=#ce422b>/{0} show</color> - Show geometries for all active zones"
       }, this);
 
       lang.RegisterMessages(new Dictionary<string, string>
@@ -2732,7 +2883,8 @@ namespace Oxide.Plugins
         ["Syntax4"] = "<color=#ce422b>/{0} edit <eventName> <true/false></color> - 改变自动事件的自动启动状态",
         ["Syntax5"] = "<color=#ce422b>/{0} edit <eventName> <move></color> - 移动自动事件的位置到您的当前位置",
         ["Syntax6"] = "<color=#ce422b>/{0} edit <eventName> <time(seconds)></color> - 修改定时事件的持续时间",
-        ["Syntax7"] = "<color=#ce422b>/{0} list</color> - 显示所有自定义事件"
+        ["Syntax7"] = "<color=#ce422b>/{0} list</color> - 显示所有自定义事件",
+        ["Syntax8"] = "<color=#ce422b>/{0} show</color> - Show geometries for all active zones"
       }, this, "zh-CN");
     }
 
