@@ -16,9 +16,7 @@ namespace Oxide.Plugins
   {
     #region Fields
 
-#pragma warning disable CS0649
     [PluginReference] private readonly Plugin TruePVE;
-#pragma warning restore CS0649
 
     // user-defined plugin config data
     private ConfigData _configData = new();
@@ -120,7 +118,7 @@ namespace Oxide.Plugins
       buildingBounds.extents.magnitude;
 
     // remove+destroy timer stored in the given dictionary under the given key
-    private bool CancelDictionaryTimer<T>(
+    private static bool CancelDictionaryTimer<T>(
       ref Dictionary<T, Timer> dictionary, T key)
     {
       if (dictionary.Remove(key, out var cTimer))
@@ -132,14 +130,15 @@ namespace Oxide.Plugins
     }
 
     // BuildingBlock wrapper for GetToolCupboard()
-    private BuildingPrivlidge GetToolCupboard(BuildingBlock buildingBlock) =>
+    private static BuildingPrivlidge GetToolCupboard(
+      BuildingBlock buildingBlock) =>
       GetToolCupboard(buildingBlock.GetBuilding());
 
     // try to find and return a physically-attached TC for the given building,
     //  or null if no suitable result found
     // only supports player-owned TCs (NOT to be confused with player-authed!)
     // this is our differentiator of whether a building should have a zone
-    private BuildingPrivlidge GetToolCupboard(
+    private static BuildingPrivlidge GetToolCupboard(
       BuildingManager.Building building)
     {
       // check the easy stuff first
@@ -762,12 +761,10 @@ namespace Oxide.Plugins
       foreach (var (_, building) in BuildingManager.server.buildingDictionary)
       {
         var toolCupboard = GetToolCupboard(building);
-#pragma warning disable CS8604 // Possible null reference argument.
         if (IsValid(toolCupboard) && IsPlayerOwned(toolCupboard))
         {
           CreateBuildingData(toolCupboard);
         }
-#pragma warning restore CS8604 // Possible null reference argument.
       }
       Puts($"OnServerInitialized():  Created {_buildingData.Count} building zones...");
 
@@ -799,7 +796,7 @@ namespace Oxide.Plugins
       Puts("OnServerInitialized(): ...Startup complete.");
     }
 
-    private void DestroyBaseDataDictionary<T>(
+    private static void DestroyBaseDataDictionary<T>(
       ref Dictionary<NetworkableId, T> dict, Action<NetworkableId> deleter)
     {
       var networkableIds = Pool.Get<List<NetworkableId>>();
@@ -1104,13 +1101,13 @@ namespace Oxide.Plugins
 
     // return NetworkableId from a given ZoneManager zoneID string, or null if
     //  not found
-    private NetworkableId? GetNetworkableID(string zoneID) =>
+    private static NetworkableId? GetNetworkableID(string zoneID) =>
       zoneID.StartsWith(_zoneIdPrefix) && ulong.TryParse(
         zoneID.Substring(_zoneIdPrefix.Length), out var value) ?
           new NetworkableId(value) : null;
 
     // synthesize ZoneManager zoneID string from networkableID
-    private string GetZoneID(NetworkableId networkableID) =>
+    private static string GetZoneID(NetworkableId networkableID) =>
       _zoneIdPrefix + networkableID.ToString();
 
     // get options array for ZoneManager zone creation
@@ -1127,7 +1124,7 @@ namespace Oxide.Plugins
 
     // tether a ZoneManager zone to a transform
     // credit: CatMeat & Arainrr for examples via DynamicPVP
-    void TetherZone(string zoneID, Transform parentTransform)
+    private static void TetherZone(string zoneID, Transform parentTransform)
     {
       var zoneTransform = ZM_GetZoneByID(zoneID)?.transform;
       if (null == zoneTransform) return;
@@ -1137,7 +1134,7 @@ namespace Oxide.Plugins
     }
 
     // untether a ZoneManager zone from its parent transform (if any)
-    void UntetherZone(string zoneID, BaseEntity parentEntity)
+    private static void UntetherZone(string zoneID, BaseEntity parentEntity)
     {
       var zone = ZM_GetZoneByID(zoneID);
       var zoneTransform = zone?.transform;
@@ -1221,20 +1218,20 @@ namespace Oxide.Plugins
       Convert.ToBoolean(Interface.CallHook("EraseZone", zoneID));
 
     // delete a ZoneManager zone by networkable ID
-    private void ZM_EraseZone(NetworkableId networkableId) =>
+    private static void ZM_EraseZone(NetworkableId networkableId) =>
       ZM_EraseZone(GetZoneID(networkableId));
 
     // get list of players in the given ZoneManager zone, if any
     private static List<BasePlayer> ZM_GetPlayersInZone(string zoneID) =>
-      (List<BasePlayer>)Interface.CallHook("GetPlayersInZone", zoneID);
+      Interface.CallHook("GetPlayersInZone", zoneID) as List<BasePlayer>;
 
     // get ZoneManager's actual data object for a given zoneID
     // credit: CatMeat & Arainrr for examples via DynamicPVP
     private static ZoneManager.Zone ZM_GetZoneByID(string zoneID) =>
-      (ZoneManager.Zone)Interface.CallHook("GetZoneByID", zoneID);
+      Interface.CallHook("GetZoneByID", zoneID) as ZoneManager.Zone;
 
-    private string[] ZM_GetZoneIDs() =>
-      (string[])Interface.CallHook("GetZoneIDs");
+    private static string[] ZM_GetZoneIDs() =>
+      Interface.CallHook("GetZoneIDs") as string[];
 
     #endregion ZoneManager Helpers
 
@@ -1314,7 +1311,6 @@ namespace Oxide.Plugins
       _pvpDelayTimers.ContainsKey(playerID) ||
       (_playerZones.TryGetValue(playerID, out var zones) && zones?.Count > 0);
 
-#pragma warning disable CS8603 // Possible null reference return.
     // called when TruePVE wants to know if a player can take damage
     // returns true if both attacker and target are players with PvP status,
     //  else returns null
@@ -1339,7 +1335,6 @@ namespace Oxide.Plugins
       // return true if both players are in some kind of PvP state, else null
       return IsPvpPlayer(attackerID) && IsPvpPlayer(targetID) ? true : null;
     }
-#pragma warning restore CS8603 // Possible null reference return.
 
     // map a ZoneManager zone ID to a TruePVE ruleset (i.e. marks it as PVP)
     private static bool TP_AddOrUpdateMapping(
@@ -1355,7 +1350,7 @@ namespace Oxide.Plugins
     private static bool TP_RemoveMapping(string zoneID) =>
       Convert.ToBoolean(Interface.CallHook("RemoveMapping", zoneID));
 
-    private void TP_RemoveMapping(NetworkableId networkableID) =>
+    private static void TP_RemoveMapping(NetworkableId networkableID) =>
       TP_RemoveMapping(GetZoneID(networkableID));
 
     #endregion TruePVE Integration

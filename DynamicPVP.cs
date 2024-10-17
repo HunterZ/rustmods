@@ -24,7 +24,7 @@ namespace Oxide.Plugins
     #region Fields
 
     [PluginReference]
-    private readonly Plugin ZoneManager, BotReSpawn;
+    private readonly Plugin BotReSpawn, TruePVE, ZoneManager;
 
     private const string PermissionAdmin = "dynamicpvp.admin";
     private const string PrefabSphere = "assets/prefabs/visualization/sphere.prefab";
@@ -39,6 +39,10 @@ namespace Oxide.Plugins
     private Vector3 _oilRigPosition;
     private Vector3 _largeOilRigPosition;
     private Coroutine _createEventsCoroutine;
+    private bool _useExcludePlayer;
+    private bool _subscribedCommands;
+    private bool _subscribedDamage;
+    private bool _subscribedZones;
 
     public static DynamicPVP Instance { get; private set; }
 
@@ -82,6 +86,16 @@ namespace Oxide.Plugins
       ExcavatorIgnition
     }
 
+    [Flags]
+    private enum HookCheckReasons
+    {
+      None         = 0,
+      DelayAdded   = 1 << 0,
+      DelayRemoved = 1 << 1,
+      ZoneAdded    = 1 << 2,
+      ZoneRemoved  = 1 << 3
+    }
+
     #endregion Fields
 
     #region Oxide Hooks
@@ -92,24 +106,47 @@ namespace Oxide.Plugins
       LoadData();
       permission.RegisterPermission(PermissionAdmin, this);
       AddCovalenceCommand(configData.Chat.Command, nameof(CmdDynamicPVP));
-      Unsubscribe(nameof(OnEntitySpawned));
+      Unsubscribe(nameof(CanEntityTakeDamage));
       Unsubscribe(nameof(OnCargoPlaneSignaled));
       Unsubscribe(nameof(OnCrateHack));
-      Unsubscribe(nameof(OnDieselEngineToggled));
-      Unsubscribe(nameof(OnEntityDeath));
-      Unsubscribe(nameof(OnLootEntity));
       Unsubscribe(nameof(OnCrateHackEnd));
-      Unsubscribe(nameof(OnSupplyDropLanded));
+      Unsubscribe(nameof(OnDieselEngineToggled));
+      Unsubscribe(nameof(OnEnterZone));
+      Unsubscribe(nameof(OnEntityDeath));
       Unsubscribe(nameof(OnEntityKill));
+      Unsubscribe(nameof(OnEntitySpawned));
+      Unsubscribe(nameof(OnExitZone));
+      Unsubscribe(nameof(OnLootEntity));
       Unsubscribe(nameof(OnPlayerCommand));
       Unsubscribe(nameof(OnServerCommand));
-      Unsubscribe(nameof(CanEntityTakeDamage));
-      Unsubscribe(nameof(OnEnterZone));
-      Unsubscribe(nameof(OnExitZone));
+      Unsubscribe(nameof(OnSupplyDropLanded));
       if (configData.Global.LogToFile)
       {
         _debugStringBuilder = new StringBuilder();
       }
+      // setup new TruePVE "ExcludePlayer" support
+      _useExcludePlayer = configData.Global.UseExcludePlayer;
+      // if ExcludePlayer is disabled in config but is supported...
+      if (!_useExcludePlayer &&
+          null != TruePVE &&
+          TruePVE.Version >= new VersionNumber(2, 2, 3))
+      {
+        // ...and all PVP delays are enabled, auto-enable internally and warn
+        if ((PvpDelayTypes.ZonePlayersCanDamageDelayedPlayers |
+             PvpDelayTypes.DelayedPlayersCanDamageZonePlayers |
+             PvpDelayTypes.DelayedPlayersCanDamageDelayedPlayers) ==
+            configData.Global.PvpDelayFlags)
+        {
+          _useExcludePlayer = true;
+          Puts("All PVP delay flags active and TruePVE 2.2.3+ detected, so TruePVE PVP delays will be used for performance and cross-plugin support; please consider enabling TruePVE PVP Delay API in the config file to skip this check");
+        }
+        // else just nag, since settings are not compatible
+        else
+        {
+          Puts("Some/all PVP delay flags NOT active, but TruePVE 2.2.3+ detected; please consider switching to TruePVE PVP Delay API in the config file for performance and cross-plugin support");
+        }
+      } // else ExcludePlayer is already enabled, or TruePVE 2.2.3+ not running
+      _subscribedCommands = _subscribedDamage = _subscribedZones = false;
     }
 
     private void OnServerInitialized()
@@ -281,7 +318,7 @@ namespace Oxide.Plugins
       leftZone.eventName = eventName;
       if (added)
       {
-        CheckHooks(true);
+        CheckHooks(HookCheckReasons.DelayAdded);
       }
       return leftZone;
     }
@@ -295,7 +332,7 @@ namespace Oxide.Plugins
         Interface.CallHook(
           "OnPlayerRemovedFromPVPDelay", playerId, leftZone.zoneId, player);
         Pool.Free(ref leftZone);
-        CheckHooks(true);
+        CheckHooks(HookCheckReasons.DelayRemoved);
       }
     }
 
@@ -322,66 +359,167 @@ namespace Oxide.Plugins
       return true;
     }
 
-    private void CheckHooks(bool pvpDelay = false)
+    private bool HasCommands()
     {
-      if (pvpDelay)
+      // track which events we've checked, to avoid redundant calls to
+      //  GetBaseEvent(); note that use of pool API means we need to free this
+      //  on every return
+      var checkedEvents = Pool.Get<HashSet<string>>();
+      // check for command-containing zones referenced by PVP delays, which
+      //  either work when PVP delayed, or are an active zone
+      // HZ: I guess this is really trying to catch the corner case of players
+      //  in PVP delay because a zone expired?
+      foreach (var leftZone in _pvpDelays.Values)
       {
-        if (_pvpDelays.Count > 0)
+        var baseEvent = GetBaseEvent(leftZone.eventName);
+        if (baseEvent == null || baseEvent.CommandList.Count <= 0)
         {
-          Subscribe(nameof(CanEntityTakeDamage));
+          continue;
         }
-        else
+        if (baseEvent.CommandWorksForPVPDelay ||
+            _activeDynamicZones.ContainsValue(leftZone.eventName))
         {
-          Unsubscribe(nameof(CanEntityTakeDamage));
+          Pool.FreeUnmanaged(ref checkedEvents);
+          return true;
         }
+        checkedEvents.Add(leftZone.eventName);
       }
-      else
-      {
-        if (_activeDynamicZones.Count > 0)
-        {
-          Subscribe(nameof(OnEnterZone));
-          Subscribe(nameof(OnExitZone));
-        }
-        else
-        {
-          Unsubscribe(nameof(OnEnterZone));
-          Unsubscribe(nameof(OnExitZone));
-        }
-      }
-
-      var hasCommands = false;
       foreach (var eventName in _activeDynamicZones.Values)
       {
+        // optimization: skip if we've already checked this in the other loop
+        if (checkedEvents.Contains(eventName))
+        {
+          continue;
+        }
         var baseEvent = GetBaseEvent(eventName);
         if (baseEvent != null && baseEvent.CommandList.Count > 0)
         {
-          hasCommands = true;
-          break;
+          Pool.FreeUnmanaged(ref checkedEvents);
+          return true;
         }
       }
-      if (!hasCommands)
+      Pool.FreeUnmanaged(ref checkedEvents);
+      return false;
+    }
+
+    private void CheckCommandHooks(bool added)
+    {
+      // optimization: abort if adding a delayzone and already subscribed, or if
+      //  removing a delay/zone and already unsubscribed
+      if (added == _subscribedCommands)
       {
-        foreach (var leftZone in _pvpDelays.Values)
-        {
-          var baseEvent = GetBaseEvent(leftZone.eventName);
-          if (baseEvent != null &&
-              baseEvent.CommandList.Count > 0 &&
-              baseEvent.CommandWorksForPVPDelay)
-          {
-            hasCommands = true;
-            break;
-          }
-        }
+        return;
       }
+      bool hasCommands = HasCommands();
       if (hasCommands)
       {
-        Subscribe(nameof(OnPlayerCommand));
-        Subscribe(nameof(OnServerCommand));
+        if (!_subscribedCommands)
+        {
+          Subscribe(nameof(OnPlayerCommand));
+          Subscribe(nameof(OnServerCommand));
+          _subscribedCommands = true;
+        }
+        return;
       }
-      else
+      if (_subscribedCommands)
       {
         Unsubscribe(nameof(OnPlayerCommand));
         Unsubscribe(nameof(OnServerCommand));
+        _subscribedCommands = false;
+      }
+    }
+
+    private void CheckPvpDelayHooks(bool added)
+    {
+      // if using TruePVE's ExcludePlayer API, just ensure we're unsubscribed
+      if (_useExcludePlayer)
+      {
+        if (_subscribedDamage)
+        {
+          Unsubscribe(nameof(CanEntityTakeDamage));
+          _subscribedDamage = false;
+        }
+        return;
+      }
+      // optimization: abort if adding a delay and already subscribed, or if
+      //  removing a delay and already unsubscribed
+      if (added == _subscribedDamage)
+      {
+        return;
+      }
+      bool haveDelays = _pvpDelays.Count > 0;
+      if (haveDelays)
+      {
+        if (!_subscribedDamage)
+        {
+          Subscribe(nameof(CanEntityTakeDamage));
+          _subscribedDamage = true;
+        }
+        return;
+      }
+      if (_subscribedDamage)
+      {
+        Unsubscribe(nameof(CanEntityTakeDamage));
+        _subscribedDamage = false;
+      }
+    }
+
+    private void CheckZoneHooks(bool added)
+    {
+      // optimization: abort if adding a zone and already subscribed, or if
+      //  removing a zone and already unsubscribed
+      if (added == _subscribedZones)
+      {
+        return;
+      }
+      bool haveZones = _activeDynamicZones.Count > 0;
+      if (haveZones)
+      {
+        if (!_subscribedZones)
+        {
+          Subscribe(nameof(OnEnterZone));
+          Subscribe(nameof(OnExitZone));
+          _subscribedZones = true;
+        }
+        return;
+      }
+      if (_subscribedZones)
+      {
+        Unsubscribe(nameof(OnEnterZone));
+        Unsubscribe(nameof(OnExitZone));
+        _subscribedZones = false;
+      }
+    }
+
+    private void CheckHooks(HookCheckReasons reasons)
+    {
+      if (reasons.HasFlag(HookCheckReasons.DelayAdded))
+      {
+        CheckPvpDelayHooks(true);
+      }
+      else if (reasons.HasFlag(HookCheckReasons.DelayRemoved))
+      {
+        CheckPvpDelayHooks(false);
+      }
+
+      if (reasons.HasFlag(HookCheckReasons.ZoneAdded))
+      {
+        CheckZoneHooks(true);
+      }
+      else if (reasons.HasFlag(HookCheckReasons.ZoneRemoved))
+      {
+        CheckZoneHooks(false);
+      }
+
+      if (reasons.HasFlag(HookCheckReasons.DelayAdded) ||
+          reasons.HasFlag(HookCheckReasons.ZoneAdded))
+      {
+        CheckCommandHooks(true);
+      }
+      else if (reasons.HasFlag(HookCheckReasons.DelayRemoved) ||
+               reasons.HasFlag(HookCheckReasons.ZoneRemoved))
+      {
+        CheckCommandHooks(false);
       }
     }
 
@@ -1168,7 +1306,7 @@ namespace Oxide.Plugins
       if (!_activeDynamicZones.ContainsKey(zoneId))
       {
         _activeDynamicZones.Add(zoneId, eventName);
-        CheckHooks();
+        CheckHooks(HookCheckReasons.ZoneAdded);
       }
 
       var stringBuilder = Pool.Get<StringBuilder>();
@@ -1327,7 +1465,7 @@ namespace Oxide.Plugins
         }
         if (_activeDynamicZones.Remove(zoneId))
         {
-          CheckHooks();
+          CheckHooks(HookCheckReasons.ZoneRemoved);
         }
         PrintDebug($"Deleted zoneId={zoneId} with eventName={eventName} and properties: {stringBuilder.ToString().TrimEnd(',')}.");
         Interface.CallHook("OnDeletedDynamicPVP", zoneId, eventName);
@@ -1595,9 +1733,15 @@ namespace Oxide.Plugins
       {
         TryRemovePVPDelay(player);
       });
+      var playerID = player.userID.Get();
       Interface.CallHook(
-        "OnPlayerAddedToPVPDelay", player.userID.Get(), zoneId,
-        baseEvent.PvpDelayTime);
+        "OnPlayerAddedToPVPDelay", playerID, zoneId, baseEvent.PvpDelayTime);
+      // also notify TruePVE if we're using its API to implement the delay
+      if (_useExcludePlayer)
+      {
+        Interface.CallHook(
+          "ExcludePlayer", playerID, baseEvent.PvpDelayTime, this);
+      }
     }
 
     private bool CreateZone(
@@ -1813,6 +1957,8 @@ namespace Oxide.Plugins
       return closed;
     }
 
+    private bool IsUsingExcludePlayer() => _useExcludePlayer;
+
     #endregion API
 
     #region Commands
@@ -1898,6 +2044,182 @@ namespace Oxide.Plugins
       player.SendConsoleCommand(
         "ddraw.sphere", duration, color, position, radius);
 
+    private void CommandHelp(IPlayer iPlayer)
+    {
+      var stringBuilder = Pool.Get<StringBuilder>();
+      var result = stringBuilder
+        .Clear()
+        .AppendLine()
+        .AppendLine(Lang("Syntax",  iPlayer.Id, configData.Chat.Command))
+        .AppendLine(Lang("Syntax1", iPlayer.Id, configData.Chat.Command))
+        .AppendLine(Lang("Syntax2", iPlayer.Id, configData.Chat.Command))
+        .AppendLine(Lang("Syntax3", iPlayer.Id, configData.Chat.Command))
+        .AppendLine(Lang("Syntax4", iPlayer.Id, configData.Chat.Command))
+        .AppendLine(Lang("Syntax5", iPlayer.Id, configData.Chat.Command))
+        .AppendLine(Lang("Syntax6", iPlayer.Id, configData.Chat.Command))
+        .AppendLine(Lang("Syntax7", iPlayer.Id, configData.Chat.Command))
+        .AppendLine(Lang("Syntax8", iPlayer.Id, configData.Chat.Command))
+        .ToString()
+      ;
+      stringBuilder.Clear();
+      Pool.FreeUnmanaged(ref stringBuilder);
+      Print(iPlayer, result);
+    }
+
+    private void CommandList(IPlayer iPlayer)
+    {
+      var customEventCount = storedData.CustomEventsCount;
+      if (customEventCount <= 0)
+      {
+        Print(iPlayer, Lang("NoCustomEvent", iPlayer.Id));
+        return;
+      }
+      var i = 0;
+      var stringBuilder = Pool.Get<StringBuilder>();
+      stringBuilder.Clear();
+      stringBuilder.AppendLine(Lang("CustomEvents",
+        iPlayer.Id, customEventCount));
+      foreach (var entry in storedData.autoEvents)
+      {
+        i++;
+        stringBuilder.AppendLine(Lang("AutoEvent",
+          iPlayer.Id, i,
+          entry.Key, entry.Value.AutoStart, entry.Value.Position));
+      }
+      foreach (var entry in storedData.timedEvents)
+      {
+        i++;
+        stringBuilder.AppendLine(Lang("TimedEvent",
+          iPlayer.Id, i, entry.Key, entry.Value.Duration));
+      }
+      Print(iPlayer, stringBuilder.ToString());
+      stringBuilder.Clear();
+      Pool.FreeUnmanaged(ref stringBuilder);
+    }
+
+    private void CommandShow(BasePlayer player)
+    {
+      if (null == player)
+      {
+        PrintDebug("CommandShow(): Got null player; aborting", DebugLevel.ERROR);
+        return;
+      }
+
+      foreach (var activeEvent in _activeDynamicZones)
+      {
+        var zoneData = GetZoneById(activeEvent.Key);
+        if (null == zoneData) continue;
+        var zonePosition = zoneData.transform.position;
+        var baseZone = GetBaseEvent(activeEvent.Value)?.GetDynamicZone();
+        Color zoneColor = Color.red;
+        switch (baseZone)
+        {
+          case SphereCubeDynamicZone scdZone:
+          {
+            zoneColor = Color.yellow;
+            if (scdZone.Radius > 0)
+            {
+              DrawSphere(
+                player, configData.Chat.ShowDuration,zoneColor,
+                zonePosition, scdZone.Radius);
+            }
+            else if (scdZone.Size.sqrMagnitude > 0)
+            {
+              var rotation = scdZone.Rotation;
+              if (!scdZone.FixedRotation)
+              {
+                rotation += zoneData.transform.eulerAngles.y;
+              }
+              DrawCube(
+                player, configData.Chat.ShowDuration, zoneColor,
+                zonePosition, scdZone.Size, rotation);
+            }
+            break;
+          }
+
+          case CubeDynamicZone cdZone:
+          {
+            zoneColor = Color.cyan;
+            if (cdZone.Size.sqrMagnitude > 0)
+            {
+              var rotation = cdZone.Rotation;
+              if (!cdZone.FixedRotation)
+              {
+                rotation += zoneData.transform.eulerAngles.y;
+              }
+              DrawCube(
+                player, configData.Chat.ShowDuration, zoneColor,
+                zonePosition, cdZone.Size, rotation);
+            }
+            break;
+          }
+
+          case SphereDynamicZone sdZone:
+          {
+            zoneColor = Color.magenta;
+            if (sdZone.Radius > 0)
+            {
+              DrawSphere(
+                player, configData.Chat.ShowDuration, zoneColor,
+                zonePosition, sdZone.Radius);
+            }
+            break;
+          }
+        }
+        player.SendConsoleCommand(
+          "ddraw.text", configData.Chat.ShowDuration, zoneColor,
+          zonePosition, $"{activeEvent.Key}\n{activeEvent.Value}");
+      }
+    }
+
+    private void CommandEdit(
+      IPlayer iPlayer, string eventName, Vector3 position, string arg)
+    {
+      if (storedData.autoEvents.TryGetValue(eventName, out var autoEvent))
+      {
+        switch (arg.ToLower())
+        {
+          case "0":
+          case "false":
+          {
+            autoEvent.AutoStart = false;
+            Print(iPlayer, Lang("AutoEventAutoStart",
+              iPlayer.Id, eventName, false));
+            _dataChanged = true;
+            return;
+          }
+
+          case "1":
+          case "true":
+          {
+            autoEvent.AutoStart = true;
+            Print(iPlayer, Lang("AutoEventAutoStart",
+              iPlayer.Id, eventName, true));
+            _dataChanged = true;
+            return;
+          }
+
+          case "move":
+          {
+            autoEvent.Position = position;
+            Print(iPlayer, Lang("AutoEventMove", iPlayer.Id, eventName));
+            _dataChanged = true;
+            return;
+          }
+        }
+      }
+      else if (storedData.timedEvents.TryGetValue(eventName, out var timedEvent)
+                && float.TryParse(arg, out var duration))
+      {
+        timedEvent.Duration = duration;
+        Print(iPlayer, Lang("TimedEventDuration",
+          iPlayer.Id, eventName, duration));
+        _dataChanged = true;
+        return;
+      }
+      Print(iPlayer, Lang("SyntaxError", iPlayer.Id, configData.Chat.Command));
+    }
+
     private void CmdDynamicPVP(IPlayer iPlayer, string command, string[] args)
     {
       if (!iPlayer.IsAdmin && !iPlayer.HasPermission(PermissionAdmin))
@@ -1911,137 +2233,28 @@ namespace Oxide.Plugins
         return;
       }
       var commandName = args[0].ToLower();
-      // handle commands that don't take additional parameters
-      if (args.Length == 1)
+      // check command and dispatch to appropriate handler
+      switch (commandName)
       {
-        switch (commandName)
+        case "?":
+        case "h":
+        case "help":
         {
-          case "h":
-          case "help":
-          {
-            var stringBuilder = Pool.Get<StringBuilder>();
-            var result = stringBuilder
-              .Clear()
-              .AppendLine()
-              .AppendLine(Lang("Syntax",  iPlayer.Id, configData.Chat.Command))
-              .AppendLine(Lang("Syntax1", iPlayer.Id, configData.Chat.Command))
-              .AppendLine(Lang("Syntax2", iPlayer.Id, configData.Chat.Command))
-              .AppendLine(Lang("Syntax3", iPlayer.Id, configData.Chat.Command))
-              .AppendLine(Lang("Syntax4", iPlayer.Id, configData.Chat.Command))
-              .AppendLine(Lang("Syntax5", iPlayer.Id, configData.Chat.Command))
-              .AppendLine(Lang("Syntax6", iPlayer.Id, configData.Chat.Command))
-              .AppendLine(Lang("Syntax7", iPlayer.Id, configData.Chat.Command))
-              .AppendLine(Lang("Syntax8", iPlayer.Id, configData.Chat.Command))
-              .ToString()
-            ;
-            stringBuilder.Clear();
-            Pool.FreeUnmanaged(ref stringBuilder);
-            Print(iPlayer, result);
-            return;
-          }
-
-          case "list":
-          {
-            var customEventCount = storedData.CustomEventsCount;
-            if (customEventCount <= 0)
-            {
-              Print(iPlayer, Lang("NoCustomEvent", iPlayer.Id));
-              return;
-            }
-            var i = 0;
-            var stringBuilder = Pool.Get<StringBuilder>();
-            stringBuilder.Clear();
-            stringBuilder.AppendLine(Lang("CustomEvents",
-              iPlayer.Id, customEventCount));
-            foreach (var entry in storedData.autoEvents)
-            {
-              i++;
-              stringBuilder.AppendLine(Lang("AutoEvent",
-                iPlayer.Id, i,
-                entry.Key, entry.Value.AutoStart, entry.Value.Position));
-            }
-            foreach (var entry in storedData.timedEvents)
-            {
-              i++;
-              stringBuilder.AppendLine(Lang("TimedEvent",
-                iPlayer.Id, i, entry.Key, entry.Value.Duration));
-            }
-            var result = stringBuilder.ToString();
-            stringBuilder.Clear();
-            Pool.FreeUnmanaged(ref stringBuilder);
-            Print(iPlayer, result);
-            return;
-          }
-
-          case "show":
-          {
-            if (iPlayer.Object is not BasePlayer player) return;
-            foreach (var activeEvent in _activeDynamicZones)
-            {
-              var zoneData = GetZoneById(activeEvent.Key);
-              if (null == zoneData) continue;
-              var zonePosition = zoneData.transform.position;
-              var baseZone = GetBaseEvent(activeEvent.Value)?.GetDynamicZone();
-              if (baseZone is SphereCubeDynamicZone scdZone)
-              {
-                player.SendConsoleCommand(
-                  "ddraw.text", configData.Chat.ShowDuration, Color.yellow,
-                  zonePosition, $"{activeEvent.Key}\n{activeEvent.Value}");
-                if (scdZone.Radius > 0)
-                {
-                  DrawSphere(
-                    player, configData.Chat.ShowDuration, Color.yellow,
-                    zonePosition, scdZone.Radius);
-                }
-                else if (scdZone.Size.sqrMagnitude > 0)
-                {
-                  var rotation = scdZone.Rotation;
-                  if (!scdZone.FixedRotation)
-                  {
-                    rotation += zoneData.transform.eulerAngles.y;
-                  }
-                  DrawCube(
-                    player, configData.Chat.ShowDuration, Color.yellow,
-                    zonePosition, scdZone.Size, rotation);
-                }
-                continue;
-              }
-              if (baseZone is CubeDynamicZone cdZone)
-              {
-                player.SendConsoleCommand(
-                  "ddraw.text", configData.Chat.ShowDuration, Color.cyan,
-                  zonePosition, $"{activeEvent.Key}\n{activeEvent.Value}");
-                if (cdZone.Size.sqrMagnitude > 0)
-                {
-                  var rotation = cdZone.Rotation;
-                  if (!cdZone.FixedRotation)
-                  {
-                    rotation += zoneData.transform.eulerAngles.y;
-                  }
-                  DrawCube(player, configData.Chat.ShowDuration, Color.cyan,
-                  zonePosition, cdZone.Size, rotation);
-                }
-                continue;
-              }
-              if (baseZone is SphereDynamicZone sdZone)
-              {
-                player.SendConsoleCommand(
-                  "ddraw.text", configData.Chat.ShowDuration, Color.magenta,
-                  zonePosition, $"{activeEvent.Key}\n{activeEvent.Value}");
-                if (sdZone.Radius > 0)
-                {
-                  DrawSphere(
-                    player, configData.Chat.ShowDuration, Color.magenta,
-                    zonePosition, sdZone.Radius);
-                }
-                continue;
-              }
-            }
-            return;
-          }
+          CommandHelp(iPlayer);
+          return;
         }
-        Print(iPlayer, Lang("NoEventName", iPlayer.Id));
-        return;
+
+        case "list":
+        {
+          CommandList(iPlayer);
+          return;
+        }
+
+        case "show":
+        {
+          CommandShow(iPlayer.Object as BasePlayer);
+          return;
+        }
       }
       // handle commands that take additional parameters
       var eventName = args[1];
@@ -2086,53 +2299,10 @@ namespace Oxide.Plugins
         {
           if (args.Length >= 3)
           {
-            if (storedData.autoEvents.TryGetValue(eventName, out var autoEvent))
-            {
-              switch (args[2].ToLower())
-              {
-                case "1":
-                case "true":
-                {
-                  autoEvent.AutoStart = true;
-                  Print(iPlayer, Lang("AutoEventAutoStart",
-                    iPlayer.Id, eventName, true));
-                  _dataChanged = true;
-                  return;
-                }
-
-                case "0":
-                case "false":
-                {
-                  autoEvent.AutoStart = false;
-                  Print(iPlayer, Lang("AutoEventAutoStart",
-                    iPlayer.Id, eventName, false));
-                  _dataChanged = true;
-                  return;
-                }
-
-                case "move":
-                {
-                  autoEvent.Position = position;
-                  Print(iPlayer, Lang("AutoEventMove", iPlayer.Id, eventName));
-                  _dataChanged = true;
-                  return;
-                }
-              }
-            }
-            else if (storedData.timedEvents.TryGetValue(
-                      eventName, out var timedEvent) &&
-                     float.TryParse(args[2], out var duration))
-            {
-              timedEvent.Duration = duration;
-              Print(iPlayer, Lang("TimedEventDuration",
-                iPlayer.Id, eventName, duration));
-              _dataChanged = true;
-              return;
-            }
+            CommandEdit(iPlayer, eventName, position, args[2]);
+            return;
           }
-          Print(iPlayer, Lang("SyntaxError",
-            iPlayer.Id, configData.Chat.Command));
-          return;
+          break;
         }
       }
       Print(iPlayer, Lang("SyntaxError", iPlayer.Id, configData.Chat.Command));
@@ -2176,6 +2346,9 @@ namespace Oxide.Plugins
 
       [JsonProperty(PropertyName = "If the entity has an owner, don't create a PVP zone")]
       public bool CheckEntityOwner { get; set; } = true;
+
+      [JsonProperty(PropertyName = "Use TruePVE PVP Delay API (more efficient and cross-plugin, but supersedes PVP Delay Flags)")]
+      public bool UseExcludePlayer { get; set; } = false;
 
       [JsonProperty(PropertyName = "PVP Delay Flags")]
       public PvpDelayTypes PvpDelayFlags { get; set; } =

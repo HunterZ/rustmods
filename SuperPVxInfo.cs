@@ -61,11 +61,9 @@ namespace Oxide.Plugins
       WaterEvent
     }
 
-#pragma warning disable CS0649
     [PluginReference] private readonly Plugin
       AbandonedBases, DynamicPVP, DangerousTreasures, PlayerBasePvpZones,
       PopupNotifications, RaidableBases, SimpleStatus, TruePVE, ZoneManager;
-#pragma warning restore CS0649
 
     private ConfigData _configData;
 
@@ -281,10 +279,8 @@ namespace Oxide.Plugins
       watcher.StartWatching();
     }
 
-#pragma warning disable IDE0060 // Remove unused parameter
-        private void OnPlayerDisconnected(BasePlayer player, string reason)
-#pragma warning restore IDE0060 // Remove unused parameter
-        {
+    private void OnPlayerDisconnected(BasePlayer player, string reason)
+    {
       if (IsValidPlayer(player, false))
       {
         player.gameObject.GetComponent<PlayerWatcher>()?.OnDestroy();
@@ -763,22 +759,18 @@ namespace Oxide.Plugins
 
     #region RaidableBases Hook Handlers
 
-#pragma warning disable IDE0060 // Remove unused parameter
     private void OnPlayerEnteredRaidableBase(
       BasePlayer player, Vector3 location, bool allowPVP, int mode, string id,
       float _, float __, float loadTime, ulong ownerId, string baseName,
       DateTime spawnTime, DateTime despawnTime, float radius,
       int lootRemaining) =>
-#pragma warning restore IDE0060 // Remove unused parameter
       NextTick(() => EnteredBase(
         player, allowPVP ? PVxType.PVP : PVxType.PVE, location, radius));
 
-#pragma warning disable IDE0060 // Remove unused parameter
     private void OnPlayerExitedRaidableBase(
       BasePlayer player, Vector3 location, bool allowPVP, int mode, string id,
       float _, float __, float loadTime, ulong ownerId, string baseName,
       DateTime spawnTime, DateTime despawnTime, float radius) =>
-#pragma warning restore IDE0060 // Remove unused parameter
       NextTick(() => ExitedBase(player));
 
     private void OnRaidableBaseEnded(
