@@ -1297,6 +1297,13 @@ namespace Oxide.Plugins
       zoneSettings ??= dynamicZone.ZoneSettings();
 
       PrintDebug($"Trying to create zoneId={zoneId} for eventName={eventName} at position={position}{(dynamicZone is ISphereZone ? $", radius={(dynamicZone as ISphereZone).Radius}m" : null)}{(dynamicZone is ICubeZone ? $", size={(dynamicZone as ICubeZone)?.Size}" : null)}{(dynamicZone is IParentZone ? $", center={(dynamicZone as IParentZone).Center}" : null)}, duration={duration}s.");
+      var zoneRadius = dynamicZone is ISphereZone sz ? sz.Radius : 0;
+      var zoneSize = dynamicZone is ICubeZone cz ? cz.Size.magnitude : 0;
+      if (zoneRadius <= 0 && zoneSize <= 0)
+      {
+        PrintError($"ERROR: Cannot create zone for eventName={eventName} because both radius and size are less than or equal to zero");
+        return false;
+      }
       if (!CreateZone(zoneId, zoneSettings, position))
       {
         PrintDebug($"ERROR: Zone NOT created for eventName={eventName}.", DebugLevel.ERROR);
