@@ -1953,18 +1953,19 @@ namespace Oxide.Plugins
       {
         return false;
       }
-      if (GetBaseEvent(eventName) is AutoEvent autoEvent)
+      var baseEvent = GetBaseEvent(eventName);
+      if (baseEvent is AutoEvent autoEvent)
       {
-        CreateDynamicZone(
+        return CreateDynamicZone(
           eventName,
           position == default ? autoEvent.Position : position,
           autoEvent.ZoneId);
       }
-      else
+      if (baseEvent is TimedEvent)
       {
-        CreateDynamicZone(eventName, position);
+        return CreateDynamicZone(eventName, position);
       }
-      return true;
+      return false;
     }
 
     private bool StopEvent(string eventName) =>
@@ -2130,6 +2131,8 @@ namespace Oxide.Plugins
         PrintDebug("CommandShow(): Got null player; aborting", DebugLevel.ERROR);
         return;
       }
+
+      Print(player, Lang("Showing", player.UserIDString, configData.Chat.ShowDuration));
 
       foreach (var activeEvent in _activeDynamicZones)
       {
@@ -3050,6 +3053,7 @@ namespace Oxide.Plugins
         ["EventStarted"] = "'{0}' event started successfully",
         ["EventStopped"] = "'{0}' event stopped successfully",
         ["Holster"] = "Ready your weapons!",
+        ["Showing"] = "Showing active zones for {0} second(s)",
 
         ["AutoEventAutoStart"] = "'{0}' event auto start is {1}",
         ["AutoEventMove"] = "'{0}' event moves to your current location",
@@ -3082,6 +3086,7 @@ namespace Oxide.Plugins
         ["EventStarted"] = "'{0}' 事件成功开启",
         ["EventStopped"] = "'{0}' 事件成功停止",
         ["Holster"] = "准备好武器!",
+        ["Showing"] = "显示活动区域 {0} 秒",
 
         ["AutoEventAutoStart"] = "'{0}' 事件自动开启状态为 {1}",
         ["AutoEventMove"] = "'{0}' 事件移到了您的当前位置",
@@ -3096,7 +3101,7 @@ namespace Oxide.Plugins
         ["Syntax5"] = "<color=#ce422b>/{0} edit <eventName> <move></color> - 移动自动事件的位置到您的当前位置",
         ["Syntax6"] = "<color=#ce422b>/{0} edit <eventName> <time(seconds)></color> - 修改定时事件的持续时间",
         ["Syntax7"] = "<color=#ce422b>/{0} list</color> - 显示所有自定义事件",
-        ["Syntax8"] = "<color=#ce422b>/{0} show</color> - Show geometries for all active zones"
+        ["Syntax8"] = "<color=#ce422b>/{0} show</color> - 显示所有活动区域的几何形"
       }, this, "zh-CN");
     }
 
