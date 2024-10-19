@@ -323,7 +323,7 @@ namespace Oxide.Plugins
       return leftZone;
     }
 
-    private void TryRemovePVPDelay(BasePlayer player)
+    private bool TryRemovePVPDelay(BasePlayer player)
     {
       PrintDebug($"Removing {player.displayName} from pvp delay.");
       var playerId = player.userID.Get();
@@ -333,7 +333,9 @@ namespace Oxide.Plugins
           "OnPlayerRemovedFromPVPDelay", playerId, leftZone.zoneId, player);
         Pool.Free(ref leftZone);
         CheckHooks(HookCheckReasons.DelayRemoved);
+        return true;
       }
+      return false;
     }
 
     private bool CheckEntityOwner(BaseEntity baseEntity)
@@ -1714,7 +1716,21 @@ namespace Oxide.Plugins
       }
       PrintDebug($"{player.displayName} has entered PVP zoneId={zoneId} with eventName={eventName}.");
 
-      TryRemovePVPDelay(player);
+      if (!TryRemovePVPDelay(player))
+      {
+        // if player is not re-entering zone while in PVP delay, check for
+        //  weapon holster
+        var baseEvent = GetBaseEvent(eventName);
+        if (null == baseEvent || baseEvent.HolsterTime <= 0)
+        {
+          return;
+        }
+        player.equippingBlocked = true;
+        player.UpdateActiveItem(default);
+        player.Invoke(
+          () => { player.equippingBlocked = false; }, baseEvent.HolsterTime);
+        Print(player, Lang("Holster", player.UserIDString));
+      }
     }
 
     private void OnExitZone(string zoneId, BasePlayer player)
@@ -1730,7 +1746,9 @@ namespace Oxide.Plugins
       PrintDebug($"{player.displayName} has left PVP zoneId={zoneId} with eventName={eventName}.");
 
       var baseEvent = GetBaseEvent(eventName);
-      if (!baseEvent.PvpDelayEnabled || baseEvent.PvpDelayTime <= 0)
+      if (null == baseEvent ||
+          !baseEvent.PvpDelayEnabled ||
+          baseEvent.PvpDelayTime <= 0)
       {
         return;
       }
@@ -2420,22 +2438,25 @@ namespace Oxide.Plugins
       [JsonProperty(PropertyName = "Delay In Stopping Event", Order = 3)]
       public float EventStopDelay { get; set; }
 
-      [JsonProperty(PropertyName = "Enable PVP Delay", Order = 4)]
+      [JsonProperty(PropertyName = "Holster Time On Enter (In seconds, or 0 to disable)", Order = 4)]
+      public float HolsterTime { get; set; }
+
+      [JsonProperty(PropertyName = "Enable PVP Delay", Order = 5)]
       public bool PvpDelayEnabled { get; set; }
 
-      [JsonProperty(PropertyName = "PVP Delay Time", Order = 5)]
+      [JsonProperty(PropertyName = "PVP Delay Time", Order = 6)]
       public float PvpDelayTime { get; set; } = 10f;
 
-      [JsonProperty(PropertyName = "TruePVE Mapping", Order = 6)]
+      [JsonProperty(PropertyName = "TruePVE Mapping", Order = 7)]
       public string Mapping { get; set; } = "exclude";
 
-      [JsonProperty(PropertyName = "Use Blacklist Commands (If false, a whitelist is used)", Order = 7)]
+      [JsonProperty(PropertyName = "Use Blacklist Commands (If false, a whitelist is used)", Order = 8)]
       public bool UseBlacklistCommands { get; set; } = true;
 
-      [JsonProperty(PropertyName = "Command works for PVP delayed players", Order = 8)]
+      [JsonProperty(PropertyName = "Command works for PVP delayed players", Order = 9)]
       public bool CommandWorksForPVPDelay { get; set; } = false;
 
-      [JsonProperty(PropertyName = "Command List (If there is a '/' at the front, it is a chat command)", Order = 9)]
+      [JsonProperty(PropertyName = "Command List (If there is a '/' at the front, it is a chat command)", Order = 10)]
       public List<string> CommandList { get; set; } = new();
 
       public abstract BaseDynamicZone GetDynamicZone();
@@ -3027,6 +3048,7 @@ namespace Oxide.Plugins
         ["EventDataRemoved"] = "'{0}' event data was removed successfully",
         ["EventStarted"] = "'{0}' event started successfully",
         ["EventStopped"] = "'{0}' event stopped successfully",
+        ["Holster"] = "Ready your weapons!",
 
         ["AutoEventAutoStart"] = "'{0}' event auto start is {1}",
         ["AutoEventMove"] = "'{0}' event moves to your current location",
@@ -3058,6 +3080,7 @@ namespace Oxide.Plugins
         ["EventDataRemoved"] = "'{0}' 事件数据删除成功",
         ["EventStarted"] = "'{0}' 事件成功开启",
         ["EventStopped"] = "'{0}' 事件成功停止",
+        ["Holster"] = "准备好武器!",
 
         ["AutoEventAutoStart"] = "'{0}' 事件自动开启状态为 {1}",
         ["AutoEventMove"] = "'{0}' 事件移到了您的当前位置",
