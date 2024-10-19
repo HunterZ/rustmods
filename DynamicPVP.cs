@@ -554,8 +554,8 @@ namespace Oxide.Plugins
           case GeneralEventType.CargoShip:
             return configData.GeneralEvents.CargoShip;
           default:
-            PrintDebug($"ERROR: Unknown generalEventType={generalEventType} for eventName={eventName}.", DebugLevel.ERROR);
-            break;
+            PrintDebug($"ERROR: Missing BaseEvent lookup for generalEventType={generalEventType} for eventName={eventName}.", DebugLevel.ERROR);
+            return null;
         }
       }
       if (storedData.autoEvents.TryGetValue(eventName, out var autoEvent))
@@ -1238,7 +1238,7 @@ namespace Oxide.Plugins
       if (useEntityId &&
           _activeDynamicZones.ContainsKey(baseEntity.net.ID.ToString()))
       {
-        PrintDebug($"The eventName={eventName} for baseEntity.net.ID={baseEntity.net.ID}) created by baseEntity={baseEntity} already exists", DebugLevel.WARNING);
+        PrintDebug($"Aborting creation of redundant eventName={eventName} for baseEntity={baseEntity} with baseEntity.net.ID={baseEntity.net.ID}", DebugLevel.WARNING);
         return;
       }
       if (!CanCreateDynamicPVP(eventName, baseEntity))
@@ -1280,7 +1280,7 @@ namespace Oxide.Plugins
       }
 
       float duration = -1;
-      if (baseEvent is ITimedEvent timedEvent &&
+      if (baseEvent is TimedEvent timedEvent &&
           (baseEvent is not ITimedDisable timedDisable ||
            !timedDisable.IsTimedDisabled()))
       {
@@ -1318,7 +1318,7 @@ namespace Oxide.Plugins
 
       var stringBuilder = Pool.Get<StringBuilder>();
       stringBuilder.Clear();
-      var domeEvent = baseEvent as IDomeEvent;
+      var domeEvent = baseEvent as DomeMixedEvent;
       var sphereZone = dynamicZone as ISphereZone;
       if (DomeCreateAllowed(domeEvent, sphereZone))
       {
@@ -1333,7 +1333,7 @@ namespace Oxide.Plugins
         }
       }
 
-      var botEvent = baseEvent as IBotEvent;
+      var botEvent = baseEvent as BotDomeMixedEvent;
       if (BotReSpawnAllowed(botEvent))
       {
         if (SpawnBots(position, botEvent.BotProfileName, zoneId))
@@ -1427,7 +1427,7 @@ namespace Oxide.Plugins
       var stringBuilder = Pool.Get<StringBuilder>();
       stringBuilder.Clear();
       if (DomeCreateAllowed(
-        baseEvent as IDomeEvent, baseEvent.GetDynamicZone() as ISphereZone))
+        baseEvent as DomeMixedEvent, baseEvent.GetDynamicZone() as ISphereZone))
       {
         if (RemoveDome(zoneId))
         {
@@ -1439,7 +1439,7 @@ namespace Oxide.Plugins
         }
       }
 
-      if (BotReSpawnAllowed(baseEvent as IBotEvent))
+      if (BotReSpawnAllowed(baseEvent as BotDomeMixedEvent))
       {
         if (KillBots(zoneId))
         {
@@ -1517,7 +1517,7 @@ namespace Oxide.Plugins
     private readonly Dictionary<string, List<SphereEntity>> _zoneSpheres = new();
 
     private static bool DomeCreateAllowed(
-      IDomeEvent domeEvent, ISphereZone sphereZone) =>
+      DomeMixedEvent domeEvent, ISphereZone sphereZone) =>
       domeEvent != null && domeEvent.DomesEnabled && sphereZone?.Radius > 0f;
 
     private bool CreateDome(
@@ -1631,7 +1631,7 @@ namespace Oxide.Plugins
 
     #region BotReSpawn/MonBots Integration
 
-    private bool BotReSpawnAllowed(IBotEvent botEvent)
+    private bool BotReSpawnAllowed(BotDomeMixedEvent botEvent)
     {
       if (botEvent == null || string.IsNullOrEmpty(botEvent.BotProfileName))
       {
@@ -2408,44 +2408,49 @@ namespace Oxide.Plugins
 
     #region Event
 
+    // NOTE: reserve order 1-19
     public abstract class BaseEvent
     {
       [JsonProperty(PropertyName = "Enable Event", Order = 1)]
       public bool Enabled { get; set; }
 
-      [JsonProperty(PropertyName = "Enable PVP Delay", Order = 2)]
-      public bool PvpDelayEnabled { get; set; }
-
-      [JsonProperty(PropertyName = "PVP Delay Time", Order = 3)]
-      public float PvpDelayTime { get; set; } = 10f;
-
-      [JsonProperty(PropertyName = "Delay In Starting Event", Order = 6)]
+      [JsonProperty(PropertyName = "Delay In Starting Event", Order = 2)]
       public float EventStartDelay { get; set; }
 
-      [JsonProperty(PropertyName = "Delay In Stopping Event", Order = 7)]
+      [JsonProperty(PropertyName = "Delay In Stopping Event", Order = 3)]
       public float EventStopDelay { get; set; }
 
-      [JsonProperty(PropertyName = "TruePVE Mapping", Order = 8)]
+      [JsonProperty(PropertyName = "Enable PVP Delay", Order = 4)]
+      public bool PvpDelayEnabled { get; set; }
+
+      [JsonProperty(PropertyName = "PVP Delay Time", Order = 5)]
+      public float PvpDelayTime { get; set; } = 10f;
+
+      [JsonProperty(PropertyName = "TruePVE Mapping", Order = 6)]
       public string Mapping { get; set; } = "exclude";
 
-      [JsonProperty(PropertyName = "Use Blacklist Commands (If false, a whitelist is used)", Order = 10)]
+      [JsonProperty(PropertyName = "Use Blacklist Commands (If false, a whitelist is used)", Order = 7)]
       public bool UseBlacklistCommands { get; set; } = true;
 
-      [JsonProperty(PropertyName = "Command works for PVP delayed players", Order = 11)]
+      [JsonProperty(PropertyName = "Command works for PVP delayed players", Order = 8)]
       public bool CommandWorksForPVPDelay { get; set; } = false;
 
-      [JsonProperty(PropertyName = "Command List (If there is a '/' at the front, it is a chat command)", Order = 12)]
+      [JsonProperty(PropertyName = "Command List (If there is a '/' at the front, it is a chat command)", Order = 9)]
       public List<string> CommandList { get; set; } = new();
 
       public abstract BaseDynamicZone GetDynamicZone();
     }
 
-    public class DomeMixedEvent : BaseEvent, IDomeEvent
+    // NOTE: reserve order 20-29
+    public class DomeMixedEvent : BaseEvent
     {
+      [JsonProperty(PropertyName = "Enable Domes", Order = 20)]
       public bool DomesEnabled { get; set; } = true;
+
+      [JsonProperty(PropertyName = "Domes Darkness", Order = 21)]
       public int DomesDarkness { get; set; } = 8;
 
-      [JsonProperty(PropertyName = "Dynamic PVP Zone Settings", Order = 20)]
+      [JsonProperty(PropertyName = "Dynamic PVP Zone Settings", Order = 22)]
       public SphereCubeDynamicZone DynamicZone { get; set; } = new();
 
       public override BaseDynamicZone GetDynamicZone()
@@ -2454,56 +2459,65 @@ namespace Oxide.Plugins
       }
     }
 
-    public class BotDomeMixedEvent : DomeMixedEvent, IBotEvent
+    // NOTE: reserve order 30-39
+    public class BotDomeMixedEvent : DomeMixedEvent
     {
+      [JsonProperty(PropertyName = "Enable Bots (Need BotSpawn Plugin)", Order = 30)]
       public bool BotsEnabled { get; set; }
+
+      [JsonProperty(PropertyName = "BotSpawn Profile Name", Order = 31)]
       public string BotProfileName { get; set; } = string.Empty;
     }
 
+    // NOTE: reserve order 40-49
     public class MonumentEvent : DomeMixedEvent
     {
-      [JsonProperty(PropertyName = "Zone ID", Order = 21)]
+      [JsonProperty(PropertyName = "Zone ID", Order = 40)]
       public string ZoneId { get; set; } = string.Empty;
 
-      [JsonProperty(PropertyName = "Transform Position", Order = 22)]
+      [JsonProperty(PropertyName = "Transform Position", Order = 41)]
       public Vector3 TransformPosition { get; set; }
     }
 
+    // NOTE: reserve order 50-59
     public class AutoEvent : BotDomeMixedEvent
     {
-      [JsonProperty(PropertyName = "Auto Start", Order = 23)]
+      [JsonProperty(PropertyName = "Auto Start", Order = 50)]
       public bool AutoStart { get; set; }
 
-      [JsonProperty(PropertyName = "Zone ID", Order = 24)]
+      [JsonProperty(PropertyName = "Zone ID", Order = 51)]
       public string ZoneId { get; set; } = string.Empty;
 
-      [JsonProperty(PropertyName = "Position", Order = 25)]
+      [JsonProperty(PropertyName = "Position", Order = 52)]
       public Vector3 Position { get; set; }
     }
 
-    public class TimedEvent : BotDomeMixedEvent, ITimedEvent
+    // NOTE: reserve order 60-69
+    public class TimedEvent : BotDomeMixedEvent
     {
+      [JsonProperty(PropertyName = "Event Duration", Order = 60)]
       public float Duration { get; set; } = 600f;
     }
 
+    // NOTE: reserve order 70-79
     public class HackableCrateEvent : TimedEvent, ITimedDisable
     {
-      [JsonProperty(PropertyName = "Start Event When Spawned (If false, the event starts when unlocking)", Order = 24)]
+      [JsonProperty(PropertyName = "Start Event When Spawned (If false, the event starts when unlocking)", Order = 70)]
       public bool StartWhenSpawned { get; set; } = true;
 
-      [JsonProperty(PropertyName = "Stop Event When Killed", Order = 25)]
+      [JsonProperty(PropertyName = "Stop Event When Killed", Order = 71)]
       public bool StopWhenKilled { get; set; }
 
-      [JsonProperty(PropertyName = "Event Timer Starts When Looted", Order = 26)]
+      [JsonProperty(PropertyName = "Event Timer Starts When Looted", Order = 72)]
       public bool TimerStartWhenLooted { get; set; }
 
-      [JsonProperty(PropertyName = "Event Timer Starts When Unlocked", Order = 27)]
+      [JsonProperty(PropertyName = "Event Timer Starts When Unlocked", Order = 73)]
       public bool TimerStartWhenUnlocked { get; set; }
 
-      [JsonProperty(PropertyName = "Excluding Hackable Crate On OilRig", Order = 28)]
+      [JsonProperty(PropertyName = "Excluding Hackable Crate On OilRig", Order = 74)]
       public bool ExcludeOilRig { get; set; } = true;
 
-      [JsonProperty(PropertyName = "Excluding Hackable Crate on Cargo Ship", Order = 29)]
+      [JsonProperty(PropertyName = "Excluding Hackable Crate on Cargo Ship", Order = 75)]
       public bool ExcludeCargoShip { get; set; } = true;
 
       public bool IsTimedDisabled()
@@ -2512,15 +2526,16 @@ namespace Oxide.Plugins
       }
     }
 
+    // NOTE: reserve order 80-89
     public class SupplyDropEvent : TimedEvent, ITimedDisable
     {
       [JsonProperty(PropertyName = "Start Event When Spawned (If false, the event starts when landed)", Order = 24)]
       public bool StartWhenSpawned { get; set; } = true;
 
-      [JsonProperty(PropertyName = "Stop Event When Killed", Order = 25)]
+      [JsonProperty(PropertyName = "Stop Event When Killed", Order = 80)]
       public bool StopWhenKilled { get; set; }
 
-      [JsonProperty(PropertyName = "Event Timer Starts When Looted", Order = 26)]
+      [JsonProperty(PropertyName = "Event Timer Starts When Looted", Order = 81)]
       public bool TimerStartWhenLooted { get; set; }
 
       public bool IsTimedDisabled()
@@ -2529,9 +2544,10 @@ namespace Oxide.Plugins
       }
     }
 
+    // NOTE: reserve order 90-99
     public class CargoShipEvent : BaseEvent
     {
-      [JsonProperty(PropertyName = "Dynamic PVP Zone Settings", Order = 20)]
+      [JsonProperty(PropertyName = "Dynamic PVP Zone Settings", Order = 90)]
       public CubeParentDynamicZone DynamicZone { get; set; } = new()
       {
         Size = new Vector3(25.9f, 43.3f, 152.8f),
@@ -2548,66 +2564,43 @@ namespace Oxide.Plugins
       bool IsTimedDisabled();
     }
 
-    public interface ITimedEvent
-    {
-      [JsonProperty(PropertyName = "Event Duration", Order = 23)]
-      float Duration { get; set; }
-    }
-
-    public interface IBotEvent
-    {
-      [JsonProperty(PropertyName = "Enable Bots (Need BotSpawn Plugin)", Order = 21)]
-      bool BotsEnabled { get; set; }
-
-      [JsonProperty(PropertyName = "BotSpawn Profile Name", Order = 22)]
-      string BotProfileName { get; set; }
-    }
-
-    public interface IDomeEvent
-    {
-      [JsonProperty(PropertyName = "Enable Domes", Order = 4)]
-      bool DomesEnabled { get; set; }
-
-      [JsonProperty(PropertyName = "Domes Darkness", Order = 5)]
-      int DomesDarkness { get; set; }
-    }
-
     #endregion Interface
 
     #endregion Event
 
     #region Zone
 
+    // NOTE: reserve order 100-119
     public abstract class BaseDynamicZone
     {
-      [JsonProperty(PropertyName = "Zone Comfort", Order = 10)]
+      [JsonProperty(PropertyName = "Zone Comfort", Order = 100)]
       public float Comfort { get; set; }
 
-      [JsonProperty(PropertyName = "Zone Radiation", Order = 11)]
+      [JsonProperty(PropertyName = "Zone Radiation", Order = 101)]
       public float Radiation { get; set; }
 
-      [JsonProperty(PropertyName = "Zone Temperature", Order = 12)]
+      [JsonProperty(PropertyName = "Zone Temperature", Order = 102)]
       public float Temperature { get; set; }
 
-      [JsonProperty(PropertyName = "Enable Safe Zone", Order = 13)]
+      [JsonProperty(PropertyName = "Enable Safe Zone", Order = 103)]
       public bool SafeZone { get; set; }
 
-      [JsonProperty(PropertyName = "Eject Spawns", Order = 14)]
+      [JsonProperty(PropertyName = "Eject Spawns", Order = 104)]
       public string EjectSpawns { get; set; } = string.Empty;
 
-      [JsonProperty(PropertyName = "Zone Parent ID", Order = 15)]
+      [JsonProperty(PropertyName = "Zone Parent ID", Order = 105)]
       public string ParentId { get; set; } = string.Empty;
 
-      [JsonProperty(PropertyName = "Enter Message", Order = 16)]
+      [JsonProperty(PropertyName = "Enter Message", Order = 106)]
       public string EnterMessage { get; set; } = "Entering a PVP area!";
 
-      [JsonProperty(PropertyName = "Leave Message", Order = 17)]
+      [JsonProperty(PropertyName = "Leave Message", Order = 107)]
       public string LeaveMessage { get; set; } = "Leaving a PVP area.";
 
-      [JsonProperty(PropertyName = "Permission Required To Enter Zone", Order = 18)]
+      [JsonProperty(PropertyName = "Permission Required To Enter Zone", Order = 108)]
       public string Permission { get; set; } = string.Empty;
 
-      [JsonProperty(PropertyName = "Extra Zone Flags", Order = 20)]
+      [JsonProperty(PropertyName = "Extra Zone Flags", Order = 109)]
       public List<string> ExtraZoneFlags { get; set; } = new();
 
       private string[] _zoneSettings;
@@ -2678,8 +2671,10 @@ namespace Oxide.Plugins
       protected abstract string[] GetZoneSettings(Transform transform = null);
     }
 
+    // NOTE: reserve order 120-129
     public class SphereDynamicZone : BaseDynamicZone, ISphereZone
     {
+      [JsonProperty(PropertyName = "Zone Radius", Order = 120)]
       public float Radius { get; set; } = 100;
 
       protected override string[] GetZoneSettings(Transform transform = null)
@@ -2693,10 +2688,16 @@ namespace Oxide.Plugins
       }
     }
 
+    // NOTE: reserve order 130-139
     public class CubeDynamicZone : BaseDynamicZone, ICubeZone
     {
+      [JsonProperty(PropertyName = "Zone Size", Order = 130)]
       public Vector3 Size { get; set; }
+
+      [JsonProperty(PropertyName = "Zone Rotation", Order = 131)]
       public float Rotation { get; set; }
+
+      [JsonProperty(PropertyName = "Fixed Rotation", Order = 132)]
       public bool FixedRotation { get; set; }
 
       public override string[] ZoneSettings(Transform transform = null) =>
@@ -2722,11 +2723,19 @@ namespace Oxide.Plugins
       }
     }
 
+    // NOTE: reserve order 140-149
     public class SphereCubeDynamicZone : BaseDynamicZone, ICubeZone, ISphereZone
     {
+      [JsonProperty(PropertyName = "Zone Radius", Order = 140)]
       public float Radius { get; set; }
+
+      [JsonProperty(PropertyName = "Zone Size", Order = 141)]
       public Vector3 Size { get; set; }
+
+      [JsonProperty(PropertyName = "Zone Rotation", Order = 142)]
       public float Rotation { get; set; }
+
+      [JsonProperty(PropertyName = "Fixed Rotation", Order = 143)]
       public bool FixedRotation { get; set; }
 
       public override string[] ZoneSettings(Transform transform = null) =>
@@ -2759,13 +2768,17 @@ namespace Oxide.Plugins
       }
     }
 
+    // NOTE: reserve order 150-159
     public class SphereParentDynamicZone : SphereDynamicZone, IParentZone
     {
+      [JsonProperty(PropertyName = "Transform Position", Order = 150)]
       public Vector3 Center { get; set; }
     }
 
+    // NOTE: reserve order 160-169
     public class CubeParentDynamicZone : CubeDynamicZone, IParentZone
     {
+      [JsonProperty(PropertyName = "Transform Position", Order = 160)]
       public Vector3 Center { get; set; }
 
       protected override string[] GetZoneSettings(Transform transform = null)
@@ -2785,25 +2798,20 @@ namespace Oxide.Plugins
 
     public interface ISphereZone
     {
-      [JsonProperty(PropertyName = "Zone Radius", Order = 0)]
       float Radius { get; set; }
     }
 
     public interface ICubeZone
     {
-      [JsonProperty(PropertyName = "Zone Size", Order = 1)]
       Vector3 Size { get; set; }
 
-      [JsonProperty(PropertyName = "Zone Rotation", Order = 2)]
       float Rotation { get; set; }
 
-      [JsonProperty(PropertyName = "Fixed Rotation", Order = 3)]
       bool FixedRotation { get; set; }
     }
 
     public interface IParentZone
     {
-      [JsonProperty(PropertyName = "Transform Position", Order = 5)]
       Vector3 Center { get; set; }
     }
 
