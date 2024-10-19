@@ -1760,7 +1760,8 @@ namespace Oxide.Plugins
       });
       var playerID = player.userID.Get();
       Interface.CallHook(
-        "OnPlayerAddedToPVPDelay", playerID, zoneId, baseEvent.PvpDelayTime);
+        "OnPlayerAddedToPVPDelay",
+        playerID, zoneId, baseEvent.PvpDelayTime, player);
       // also notify TruePVE if we're using its API to implement the delay
       if (_useExcludePlayer)
       {
