@@ -60,7 +60,7 @@ namespace Oxide.Plugins
 
     // true if TruePVE 2.2.3+ ExcludePlayer() should be used for PVP delays,
     //  false if CanEntityTakeDamage() hook handler should be used
-    private bool _useExcludePlayer = false;
+    private bool _useExcludePlayer;
 
     // ZoneManager zone ID prefix
     private const string _zoneIdPrefix = "PlayerBasePVP:";
@@ -189,10 +189,9 @@ namespace Oxide.Plugins
 
     private static VehiclePrivilege GetVehiclePrivilege(BaseVehicle vehicle)
     {
-      foreach (BaseEntity child in vehicle.children)
+      foreach (var child in vehicle.children)
       {
-        if (child is not VehiclePrivilege) continue;
-        return (VehiclePrivilege)child;
+        if (child is VehiclePrivilege privilege) return privilege;
       }
       return null;
     }
@@ -769,7 +768,7 @@ namespace Oxide.Plugins
       Puts($"OnServerInitialized():  Created {_buildingData.Count} building zones...");
 
       // create zones immediately for all existing player-owned legacy shelters
-      foreach (var (p, shelterList) in LegacyShelter.SheltersPerPlayer)
+      foreach (var (_, shelterList) in LegacyShelter.SheltersPerPlayer)
       {
         foreach (var shelter in shelterList)
         {
@@ -1093,6 +1092,8 @@ namespace Oxide.Plugins
       _pvpDelayTimers.TryGetValue(playerID, out var delayData) ?
         delayData.Item2 : string.Empty;
 
+    private bool IsUsingExcludePlayer() => _useExcludePlayer;
+
     #endregion Oxide/RustPlugin API/Hooks
 
     #region ZoneManager Integration
@@ -1138,8 +1139,8 @@ namespace Oxide.Plugins
     {
       var zone = ZM_GetZoneByID(zoneID);
       var zoneTransform = zone?.transform;
-      var parentTransform = parentEntity.transform ?? zoneTransform?.parent;
-      var position = parentTransform?.position;
+      var parentTransform = parentEntity.transform;
+      var position = parentTransform.position;
       // abort if we didn't find the zone, or it's not parented
       if (null == zone || null == zoneTransform ||
           null == zoneTransform.parent || null == position)
@@ -1362,16 +1363,16 @@ namespace Oxide.Plugins
     // base class for tracking player base data
     private abstract class BaseData : Pool.IPooled
     {
-      public static uint SphereDarkness { get; set; } = 0;
+      public static uint SphereDarkness { get; set; }
 
       // center point of base
       public Vector3 Location { get; protected set; } = Vector3.zero;
 
       // radius of base
-      public float Radius { get; private set; } = 0.0f;
+      public float Radius { get; private set; }
 
       // spheres/domes associated with base
-      protected List<SphereEntity> _sphereList = null;
+      protected List<SphereEntity> _sphereList;
 
       protected virtual void Init(Vector3 location, float radius = 1.0f)
       {
@@ -1384,7 +1385,7 @@ namespace Oxide.Plugins
 
       public abstract void ClearEntity(bool destroying = false);
 
-      protected void CreateSpheres()
+      private void CreateSpheres()
       {
         if (null == _sphereList) return;
         for (var i = 0; i < SphereDarkness; ++i)
@@ -1400,7 +1401,7 @@ namespace Oxide.Plugins
         }
       }
 
-      protected void DestroySpheres()
+      private void DestroySpheres()
       {
         if (null == _sphereList) return;
         foreach (var sphere in _sphereList)
@@ -1437,9 +1438,9 @@ namespace Oxide.Plugins
       }
 
       // set/update base location and/or radius
-      // either option can be ommitted; this is for efficiency sice it may need
+      // either option can be omitted; this is for efficiency since it may need
       //  to iterate over a list of spheres
-      virtual public void Update(Vector3? location = null, float? radius = null)
+      public virtual void Update(Vector3? location = null, float? radius = null)
       {
         if (null == location && null == radius) return;
 
@@ -1461,7 +1462,7 @@ namespace Oxide.Plugins
     {
       // reference to TC entity
       // if null, the base is pending deletion
-      public BuildingPrivlidge ToolCupboard { get; private set; } = null;
+      public BuildingPrivlidge ToolCupboard { get; private set; }
 
       public void Init(
         BuildingPrivlidge toolCupboard, Vector3 location, float radius = 1.0f)
@@ -1481,7 +1482,7 @@ namespace Oxide.Plugins
     {
       // reference to legacy shelter entity
       // if null, the base is pending deletion
-      public EntityPrivilege LegacyShelter { get; private set; } = null;
+      public EntityPrivilege LegacyShelter { get; private set; }
 
       public void Init(
         EntityPrivilege legacyShelter, float radius = 1.0f)
@@ -1501,7 +1502,7 @@ namespace Oxide.Plugins
     {
       // reference to tugboat entity
       // if null, the base is pending deletion
-      public VehiclePrivilege Tugboat { get; private set; } = null;
+      public VehiclePrivilege Tugboat { get; private set; }
 
       public void Init(
         VehiclePrivilege tugboat, float radius = 1.0f,
@@ -1524,8 +1525,8 @@ namespace Oxide.Plugins
             var buoyancy = tugboatParent.GetComponent<Buoyancy>();
             if (buoyancy != null)
             {
-              buoyancy.CancelInvoke("CheckSleepState");
-              buoyancy.Invoke(new Action(buoyancy.Wake), 0f); //Force Awake
+              buoyancy.CancelInvoke(nameof(Buoyancy.CheckSleepState));
+              buoyancy.Invoke(buoyancy.Wake, 0f); //Force Awake
             }
           }
         }
@@ -1587,7 +1588,7 @@ namespace Oxide.Plugins
       public float pvpDelaySeconds = 5.0f;
 
       [JsonProperty(PropertyName = "Zone sphere darkness (0 to disable, maximum 10)")]
-      public uint sphereDarkness = 0;
+      public uint sphereDarkness;
 
       [JsonProperty(PropertyName = "Zone entry/exit ZoneManager messages")]
       public bool zoneMessages = true;
@@ -1626,10 +1627,10 @@ namespace Oxide.Plugins
     private sealed class TugboatConfigData
     {
       [JsonProperty(PropertyName = "Tugboat force global rendering on/off when spheres enabled (null=skip)")]
-      public bool? forceNetworking = null;
+      public bool? forceNetworking;
 
       [JsonProperty(PropertyName = "Tugboat force enable buoyancy when forcing global rendering")]
-      public bool forceBuoyancy = false;
+      public bool forceBuoyancy;
 
       [JsonProperty(PropertyName = "Tugboat zone radius")]
       public float radius = 32.0f;

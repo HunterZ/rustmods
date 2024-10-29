@@ -1122,8 +1122,7 @@ namespace Oxide.Plugins
       if (_pvpDelays.TryGetValue(player.userID, out LeftZone leftZone))
       {
         var baseEvent = GetBaseEvent(leftZone.eventName);
-        if (baseEvent != null &&
-            baseEvent.CommandWorksForPVPDelay &&
+        if (baseEvent?.CommandWorksForPVPDelay == true &&
             IsBlockedCommand(baseEvent, command, isChat))
         {
           return false;
@@ -1298,7 +1297,7 @@ namespace Oxide.Plugins
       var dynamicZone = baseEvent.GetDynamicZone();
       zoneSettings ??= dynamicZone.ZoneSettings();
 
-      PrintDebug($"Trying to create zoneId={zoneId} for eventName={eventName} at position={position}{(dynamicZone is ISphereZone ? $", radius={(dynamicZone as ISphereZone).Radius}m" : null)}{(dynamicZone is ICubeZone ? $", size={(dynamicZone as ICubeZone)?.Size}" : null)}{(dynamicZone is IParentZone ? $", center={(dynamicZone as IParentZone).Center}" : null)}, duration={duration}s.");
+      PrintDebug($"Trying to create zoneId={zoneId} for eventName={eventName} at position={position}{(dynamicZone is ISphereZone zone ? $", radius={zone.Radius}m" : null)}{(dynamicZone is ICubeZone cubeZone ? $", size={cubeZone.Size}" : null)}{(dynamicZone is IParentZone parentZone ? $", center={parentZone.Center}" : null)}, duration={duration}s.");
       var zoneRadius = dynamicZone is ISphereZone sz ? sz.Radius : 0;
       var zoneSize = dynamicZone is ICubeZone cz ? cz.Size.magnitude : 0;
       if (zoneRadius <= 0 && zoneSize <= 0)
@@ -1312,9 +1311,8 @@ namespace Oxide.Plugins
         return false;
       }
 
-      if (!_activeDynamicZones.ContainsKey(zoneId))
+      if (_activeDynamicZones.TryAdd(zoneId, eventName))
       {
-        _activeDynamicZones.Add(zoneId, eventName);
         CheckHooks(HookCheckReasons.ZoneAdded);
       }
 
@@ -1520,7 +1518,7 @@ namespace Oxide.Plugins
 
     private static bool DomeCreateAllowed(
       DomeMixedEvent domeEvent, ISphereZone sphereZone) =>
-      domeEvent != null && domeEvent.DomesEnabled && sphereZone?.Radius > 0f;
+      domeEvent?.DomesEnabled == true && sphereZone?.Radius > 0f;
 
     private bool CreateDome(
       string zoneId, Vector3 position, float radius, int darkness)
@@ -1865,8 +1863,7 @@ namespace Oxide.Plugins
         leftZone.zoneId : null;
 
     private string GetEventName(string zoneId) =>
-      _activeDynamicZones.TryGetValue(zoneId, out var eventName) ?
-        eventName : null;
+      _activeDynamicZones.GetValueOrDefault(zoneId);
 
     private bool CreateOrUpdateEventData(
       string eventName, string eventData, bool isTimed = false)
@@ -2377,7 +2374,7 @@ namespace Oxide.Plugins
       public bool CheckEntityOwner { get; set; } = true;
 
       [JsonProperty(PropertyName = "Use TruePVE PVP Delay API (more efficient and cross-plugin, but supersedes PVP Delay Flags)")]
-      public bool UseExcludePlayer { get; set; } = false;
+      public bool UseExcludePlayer { get; set; }
 
       [JsonProperty(PropertyName = "PVP Delay Flags")]
       public PvpDelayTypes PvpDelayFlags { get; set; } =
@@ -2398,7 +2395,7 @@ namespace Oxide.Plugins
       public string PrefixColor { get; set; } = "#00FFFF";
 
       [JsonProperty(PropertyName = "Chat SteamID Icon")]
-      public ulong SteamIdIcon { get; set; } = 0;
+      public ulong SteamIdIcon { get; set; }
 
       [JsonProperty(PropertyName = "Zone Show Duration (in seconds)")]
       public float ShowDuration { get; set; } = 15f;
@@ -2458,7 +2455,7 @@ namespace Oxide.Plugins
       public bool UseBlacklistCommands { get; set; } = true;
 
       [JsonProperty(PropertyName = "Command works for PVP delayed players", Order = 9)]
-      public bool CommandWorksForPVPDelay { get; set; } = false;
+      public bool CommandWorksForPVPDelay { get; set; }
 
       [JsonProperty(PropertyName = "Command List (If there is a '/' at the front, it is a chat command)", Order = 10)]
       public List<string> CommandList { get; set; } = new();

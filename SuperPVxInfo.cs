@@ -151,7 +151,7 @@ namespace Oxide.Plugins
 
       // remove timer entry if present, and destroy it if needed
       if (excludeTimers.Remove(pluginName, out var removedTimer) &&
-          null != removedTimer && !removedTimer.Destroyed)
+          false == removedTimer?.Destroyed)
       {
         removedTimer.Destroy();
       }
@@ -180,12 +180,10 @@ namespace Oxide.Plugins
       PlayerWatcher.AllowForceUpdate =
         null == _configData || _configData.forceUpdates;
       PlayerWatcher.Instance = this;
-      PlayerWatcher.PvpAboveHeight =
-        null == _configData ? 1000.0f : _configData.pvpAboveHeight;
-      PlayerWatcher.PvpBelowHeight =
-        null == _configData ? -50.0f : _configData.pvpBelowHeight;
+      PlayerWatcher.PvpAboveHeight = _configData?.pvpAboveHeight ?? 1000.0f;
+      PlayerWatcher.PvpBelowHeight = _configData?.pvpBelowHeight ?? -50.0f;
       PlayerWatcher.UpdateIntervalSeconds =
-        null == _configData ? 1.0f : _configData.updateIntervalSeconds;
+        _configData?.updateIntervalSeconds ?? 1.0f;
       if (null != _configData &&
           !string.IsNullOrEmpty(_configData.toggleCommand))
       {
@@ -243,7 +241,7 @@ namespace Oxide.Plugins
       {
         foreach (var (_, excludeTimer) in excludeTimers)
         {
-          if (null != excludeTimer && !excludeTimer.Destroyed)
+          if (false == excludeTimer?.Destroyed)
           {
             excludeTimer.Destroy();
           }
@@ -296,10 +294,10 @@ namespace Oxide.Plugins
         if (null == watcher) return;
 
         // check everything because the player could be anywhere now
-        if (watcher.InBaseType != null) watcher.CheckBase = true;
-        watcher.CheckPVxEvent = true;
-        watcher.CheckZone = true;
-        watcher.CheckPvpDelay = true;
+        if (watcher.InBaseType != null) watcher.SetCheckBase(true);
+        watcher.SetCheckPVxEvent(true);
+        watcher.SetCheckZone(true);
+        watcher.SetCheckPvpDelay(true);
         watcher.Force();
       });
 
@@ -357,12 +355,12 @@ namespace Oxide.Plugins
         if (hasTimers &&
             excludeTimers.TryGetValue(pluginName, out var excludeTimer))
         {
-          if (null != excludeTimer && !excludeTimer.Destroyed)
+          if (false == excludeTimer?.Destroyed)
           {
             excludeTimer.Reset(maxDelayLength);
             return;
           }
-          // pathological: remove defunct entry and we'll create a new one below
+          // pathological: remove defunct entry; we'll create a new one below
           excludeTimers.Remove(pluginName);
         }
 
@@ -394,11 +392,11 @@ namespace Oxide.Plugins
     #region ZoneManager Utilities
 
     bool ZM_CheckZoneID(string zoneId) =>
-      ZoneManager?.Call("CheckZoneID", zoneId) is string s && null != s;
+      ZoneManager?.Call("CheckZoneID", zoneId) is string;
 
     private string[] ZM_GetPlayerZoneIDs(BasePlayer player) =>
       ZoneManager?.Call("GetPlayerZoneIDs", player) is string[] s ?
-        s : new string[0];
+        s : Array.Empty<string>();
 
     // if player is in a zone, return its type if possible, else return null
     public PVxType? GetPlayerZoneType(BasePlayer player)
@@ -406,7 +404,7 @@ namespace Oxide.Plugins
       if (null == _configData || !IsValidPlayer(player, true)) return null;
 
       // get current zone (if any)
-      (var zoneId, var zoneName) = GetSmallestZoneIdAndName(player);
+      var (zoneId, zoneName) = GetSmallestZoneIdAndName(player);
 
       // go by zone name first
       if (!string.IsNullOrEmpty(zoneName))
@@ -483,16 +481,13 @@ namespace Oxide.Plugins
     }
 
     private bool ZM_GetZoneFlag(string zoneId, string zoneFlag) =>
-      ZoneManager?.Call("HasFlag", zoneId, zoneFlag) is bool flagState &&
-      flagState;
+      Convert.ToBoolean(ZoneManager?.Call("HasFlag", zoneId, zoneFlag));
 
     private string ZM_GetZoneName(string zoneId) =>
-      ZoneManager?.Call("GetZoneName", zoneId) is string zoneName ?
-        zoneName : "";
+      Convert.ToString(ZoneManager?.Call("GetZoneName", zoneId));
 
     private float ZM_GetZoneRadius(string zoneId) =>
-      ZoneManager?.Call("GetZoneRadius", zoneId) is float zoneRadius ?
-        zoneRadius : 0.0f;
+      Convert.ToSingle(ZoneManager?.Call("GetZoneRadius", zoneId));
 
     private Vector3 ZM_GetZoneSize(string zoneId) =>
       ZoneManager?.Call("GetZoneSize", zoneId) is Vector3 zoneSize ?
@@ -512,7 +507,7 @@ namespace Oxide.Plugins
         if (!IsValidPlayer(player, true)) return;
         var watcher = GetPlayerWatcher(player);
         if (null == watcher) return;
-        watcher.CheckZone = true;
+        watcher.SetCheckZone(true);
         watcher.Force();
       });
 
@@ -592,7 +587,7 @@ namespace Oxide.Plugins
       return null;
     }
 
-    // check whether player in an a PVP event that only provides event
+    // check whether player is in a PVP event that only provides event
     // start/stop hooks with location, requiring active polling of player
     // position
     private bool IsPlayerInPvpEvent(BasePlayer player)
@@ -677,7 +672,7 @@ namespace Oxide.Plugins
       if (checkPlayerValid && !IsValidPlayer(player, true)) return;
       var watcher = GetPlayerWatcher(player);
       if (null == watcher) return;
-      watcher.CheckZone = true;
+      watcher.SetCheckZone(true);
       watcher.InBaseType = null;
       watcher.Force();
     }
@@ -699,7 +694,7 @@ namespace Oxide.Plugins
         watcher.InPvpBubbleTypes &= ~type;
         if (PvpBubbleTypes.None == watcher.InPvpBubbleTypes)
         {
-          watcher.CheckZone = true;
+          watcher.SetCheckZone(true);
         }
       }
       if (watcher.InPvpBubbleTypes != oldState)
@@ -730,8 +725,8 @@ namespace Oxide.Plugins
       }
       else if (watcher.ClearPvpDelay(type) <= 0)
       {
-        watcher.CheckBase = true;
-        watcher.CheckZone = true;
+        watcher.SetCheckBase(true);
+        watcher.SetCheckZone(true);
       }
       watcher.Force();
     }
@@ -745,12 +740,12 @@ namespace Oxide.Plugins
       if (null == watcher) return;
       if (state)
       {
-        watcher.InPVxEventType = eventType;
+        watcher.SetInPVxEventType(eventType);
       }
       else
       {
-        watcher.CheckZone = true;
-        watcher.InPVxEventType = null;
+        watcher.SetCheckZone(true);
+        watcher.SetInPVxEventType(null);
       }
       watcher.Force();
     }
@@ -1096,7 +1091,7 @@ namespace Oxide.Plugins
       }
 
       // enable status for new type if configured and enabled
-      if (_configData.SimpleStatusSettings.TryGetValue(type, out var ssSettings)
+      if (_configData.SimpleStatusPVxSettings.TryGetValue(type, out var ssSettings)
           && ssSettings.Enabled)
       {
         SimpleStatus.CallHook(
@@ -1117,7 +1112,7 @@ namespace Oxide.Plugins
     private void SS_HideAllStatuses(BasePlayer player)
     {
       if (null == SimpleStatus || null == _configData) return;
-      foreach (var (type, ssData) in _configData.SimpleStatusSettings)
+      foreach (var (type, ssData) in _configData.SimpleStatusPVxSettings)
       {
         if (null == ssData || !ssData.Enabled) continue;
         SimpleStatus.CallHook(
@@ -1126,11 +1121,11 @@ namespace Oxide.Plugins
     }
 
     // register SimpleStatus statuses for each enabled PVxType value
-    // NOTE: apparently there is no corresponding destroy API
+    // NOTE: apparently there is no corresponding "destroy" API
     private void SS_CreateStatuses()
     {
       if (null == SimpleStatus || null == _configData) return;
-      foreach (var (type, ssData) in _configData.SimpleStatusSettings)
+      foreach (var (type, ssData) in _configData.SimpleStatusPVxSettings)
       {
         if (null == ssData || !ssData.Enabled) continue;
         SimpleStatus.CallHook(
@@ -1147,7 +1142,7 @@ namespace Oxide.Plugins
     private sealed class NotificationSettings
     {
       [JsonProperty(PropertyName = "Chat notify enabled")]
-      public bool ChatEnabled { get; set; } = false;
+      public bool ChatEnabled { get; set; }
 
       [JsonProperty(PropertyName = "Chat notify prefix (empty string to disable)")]
       public string ChatPrefix { get; set; } = "[SuperPVxInfo]: ";
@@ -1200,12 +1195,7 @@ namespace Oxide.Plugins
       [JsonProperty(PropertyName = "Fade Out")]
       public float FadeOut { get; set; } = 0.25f;
 
-      private string _json;
-
-      public UiSettings()
-      {
-        _json = "";
-      }
+      private string _json = "";
 
       [JsonIgnore]
       public string Json
@@ -1263,7 +1253,7 @@ namespace Oxide.Plugins
     private sealed class SimpleStatusSettings
     {
       [JsonProperty(PropertyName = "Enabled")]
-      public bool Enabled { get; set; } = false;
+      public bool Enabled { get; set; }
 
       [JsonProperty(PropertyName = "Background Color")]
       public string Color { get; set; } = "0.5 0.5 0.5 1.0";
@@ -1288,26 +1278,22 @@ namespace Oxide.Plugins
 
       // dictionary containing SimpleStatus values
       [JsonIgnore]
-      private Dictionary<string, object> _dict = null;
+      private Dictionary<string, object> _dict;
       // accessor for SimpleStatus values dictionary
       // Populates and returns the dictionary on first call, and returns the
       //  cached dictionary on subsequent calls
       public Dictionary<string, object> ToDict()
       {
-        if (null == _dict)
+        return _dict ??= new Dictionary<string, object>
         {
-          _dict = new()
-          {
-            ["color"] = Color,
-            ["title"] = TitleText,
-            ["titleColor"] = TitleColor,
-            ["text"] = StatusText,
-            ["textColor"] = StatusColor,
-            ["icon"] = IconPath,
-            ["iconColor"] = IconColor
-          };
-        }
-        return _dict;
+          ["color"] = Color,
+          ["title"] = TitleText,
+          ["titleColor"] = TitleColor,
+          ["text"] = StatusText,
+          ["textColor"] = StatusColor,
+          ["icon"] = IconPath,
+          ["iconColor"] = IconColor
+        };
       }
     }
 
@@ -1395,7 +1381,7 @@ namespace Oxide.Plugins
 
       [JsonProperty(PropertyName = "Simple Status UI Settings")]
       public Dictionary<PVxType, SimpleStatusSettings>
-        SimpleStatusSettings { get; set; } = new()
+        SimpleStatusPVxSettings { get; set; } = new()
       {
         [PVxType.PVE] = new SimpleStatusSettings
         {
@@ -1563,7 +1549,7 @@ namespace Oxide.Plugins
       if (null != _saveDataTimer) return;
       // start a save timer
       _saveDataTimer = timer.Once(
-        null == _configData ? 5.0f : _configData.saveIntervalSeconds,
+        _configData?.saveIntervalSeconds ?? 5.0f,
         WriteData);
     }
 
@@ -1582,7 +1568,7 @@ namespace Oxide.Plugins
     #region Player Watcher
 
     // player watcher class
-    public class PlayerWatcher : FacepunchBehaviour
+    private sealed class PlayerWatcher : FacepunchBehaviour
     {
       // public static members
 
@@ -1605,38 +1591,42 @@ namespace Oxide.Plugins
       public float BaseRadius { get; set; }
       // true if abandoned/raidable base exit check requested
       private bool _checkBase;
-      public bool CheckBase {
-        get { return _checkBase; }
-        set { _forceUpdate |= value != _checkBase; _checkBase = value; }
+      public void SetCheckBase(bool value)
+      {
+        _forceUpdate |= value != _checkBase;
+        _checkBase = value;
       }
       // true if PVP delay check requested
       private bool _checkPvpDelay;
-      public bool CheckPvpDelay {
-        get { return _checkPvpDelay; }
-        set { _forceUpdate |= value != _checkPvpDelay; _checkPvpDelay = value; }
+      public void SetCheckPvpDelay(bool value)
+      {
+        _forceUpdate |= value != _checkPvpDelay;
+        _checkPvpDelay = value;
       }
       // true if dangerous treasures exit check requested
       private bool _checkPVxEvent;
-      public bool CheckPVxEvent {
-        get { return _checkPVxEvent; }
-        set { _forceUpdate |= value != _checkPVxEvent; _checkPVxEvent = value; }
+      public void SetCheckPVxEvent(bool value)
+      {
+        _forceUpdate |= value != _checkPVxEvent;
+        _checkPVxEvent = value;
       }
       // true if zone check requested
       private bool _checkZone;
-      public bool CheckZone {
-        get { return _checkZone; }
-        set { _forceUpdate |= value != _checkZone; _checkZone = value; }
+      public void SetCheckZone(bool value)
+      {
+        _forceUpdate |= value != _checkZone;
+        _checkZone = value;
       }
       // non-null if in abandoned/raidable base or bubble
       private PVxType? _inBaseType;
       public PVxType? InBaseType {
-        get { return _inBaseType; }
+        get => _inBaseType;
         set { _forceUpdate |= value != _inBaseType; _inBaseType = value; }
       }
       // in cargo train event PvP bubble
       private PvpBubbleTypes _inPvpBubbleTypes;
       public PvpBubbleTypes InPvpBubbleTypes {
-        get { return _inPvpBubbleTypes; }
+        get => _inPvpBubbleTypes;
         set {
           _forceUpdate |= value != _inPvpBubbleTypes;
           _inPvpBubbleTypes = value;
@@ -1644,12 +1634,10 @@ namespace Oxide.Plugins
       }
       // in dangerous treasures PVx event
       private PVxType? _inPVxEventType;
-      public PVxType? InPVxEventType {
-        get { return _inPVxEventType; }
-        set {
-          _forceUpdate |= value != _inPVxEventType;
-          _inPVxEventType = value;
-        }
+      public void SetInPVxEventType(PVxType? value)
+      {
+        _forceUpdate |= value != _inPVxEventType;
+        _inPVxEventType = value;
       }
 
       // private members
@@ -1693,7 +1681,7 @@ namespace Oxide.Plugins
       public void Force()
       {
         if (!_forceUpdate) return;
-        if (AllowForceUpdate) Invoke("Watch", 0.0f);
+        if (AllowForceUpdate) Invoke(nameof(Watch), 0.0f);
         _forceUpdate = false;
       }
 
@@ -1744,7 +1732,7 @@ namespace Oxide.Plugins
       //  much too frequently for our needs, wasting a lot of processing power
       //  on time counting overhead
       public void StartWatching() =>
-        InvokeRepeating("Watch", 0.0f, UpdateIntervalSeconds);
+        InvokeRepeating(nameof(Watch), 0.0f, UpdateIntervalSeconds);
 
       // update states, derive resulting PVx state, and - if the latter changed
       //  - update the GUI
@@ -1825,8 +1813,7 @@ namespace Oxide.Plugins
         if (true == _inTutorial)                      return PVxType.PVE;
         if (PVxType.PVE == _inZoneType)               return PVxType.PVE;
         // defer to default state (or PVE if somehow not defined)
-        return Instance?._configData == null ?
-          PVxType.PVE : Instance._configData.defaultType;
+        return Instance?._configData?.defaultType ?? PVxType.PVE;
       }
 
       // send message with the given key to watcher's player if appropriate

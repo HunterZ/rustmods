@@ -19,10 +19,10 @@ namespace Oxide.Plugins
     };
 
     // periodic global status broadcast timer
-    private Timer _broadcastTimer = null;
+    private Timer _broadcastTimer;
 
     // data managed via config file
-    private ConfigData _configData = null;
+    private ConfigData _configData;
 
     // "can't craft" warning suppression timers by userID
     private readonly Dictionary<ulong, Timer> _craftWarned = new();
@@ -93,7 +93,7 @@ namespace Oxide.Plugins
     {
       double wipeElapsedSeconds = GetWipeElapsedSeconds();
       // unrolled loop for simplicity
-      return new int[]
+      return new[]
       {
         GetUnlockStatus(0, wipeElapsedSeconds),
         GetUnlockStatus(1, wipeElapsedSeconds),
@@ -129,8 +129,7 @@ namespace Oxide.Plugins
       DestroyBroadcastTimer();
       // only set new timer if config value is positive (i.e. broadcast period
       //  in seconds)
-      var broadcastConfig = null == _configData ?
-        0 : _configData.BroadcastConfig;
+      var broadcastConfig = _configData?.BroadcastConfig ?? 0;
       if (broadcastConfig > 0)
       {
         _broadcastTimer =
@@ -166,8 +165,7 @@ namespace Oxide.Plugins
     private void DestroyWarnTimer(ulong userId)
     {
       if (_craftWarned.Remove(userId, out var wTimer) &&
-          null != wTimer &&
-          !wTimer.Destroyed)
+          false == wTimer?.Destroyed)
       {
         wTimer.Destroy();
       }
