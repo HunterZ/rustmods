@@ -7,7 +7,7 @@ using System.Text;
 
 namespace Oxide.Plugins
 {
-  [Info("Timed Workbench Unlock", "HunterZ", "2.2.1")]
+  [Info("Timed Workbench Unlock", "HunterZ", "2.3.0")]
   [Description("Provides timed/manual/disabled unlocking of workbenches")]
   class TimedWorkbenchUnlock : RustPlugin
   {
@@ -252,6 +252,89 @@ namespace Oxide.Plugins
         null, "UnlockNotice", (index + 1).ToString(CultureInfo.CurrentCulture));
     }
 
+    // return whether crafting of the given item ID should be allowed
+    private bool AllowCraftAttempt(BasePlayer player, int itemid)
+    {
+      // do nothing if any of the following are true:
+      // - player reference invalid
+      // - player in Tutorial Island
+      // - player crafting something other than a workbench
+      // - player has skiplock permission (note: admins not exempt by default)
+      if (null == player ||
+          player.IsInTutorial ||
+          !_WORKBENCH_ID.Contains(itemid) ||
+          player.IPlayer.HasPermission(PrefixPermission(PERMISSION_SKIPLOCK)))
+      {
+        return true;
+      }
+
+      // get status
+      var wbIndex = Array.IndexOf(_WORKBENCH_ID, itemid);
+      var status = GetUnlockStatus(wbIndex);
+
+      // do nothing if workbench is unlocked
+      if (0 == status) return true;
+
+      // warn player
+      if (_configData.ReportAsSound) WarnSound(player);
+
+      // abort here if text reports disabled, to avoid building time string
+      if (status > 0 && !_configData.ReportAsChat && !_configData.ReportAsToast)
+      {
+        return false;
+      }
+
+      var timeString = status > 0 ?
+        TimeSpan.FromSeconds(status).ToString("g", CultureInfo.CurrentCulture) :
+        null;
+
+      if (_configData.ReportAsChat)
+      {
+        WarnChat(player, timeString);
+      }
+
+      if (_configData.ReportAsToast)
+      {
+        WarnToast(player, timeString);
+      }
+
+      // block crafting
+      return false;
+    }
+
+    private void WarnChat(BasePlayer player, string timeString = null)
+    {
+      // abort if chat spam suppression timer active for player
+      var userId = player.userID.Get();
+      if (_craftWarned.ContainsKey(userId)) return;
+
+      SendMessage(
+        player.IPlayer,
+        null == timeString ? "CannotCraftManual" : "CannotCraft",
+        timeString);
+
+      // set chat spam suppression timer
+      _craftWarned.Add(userId, timer.Once(5.0f, () =>
+      {
+        DestroyWarnTimer(userId);
+      }));
+    }
+
+    private static void WarnSound(BasePlayer player)
+    {
+      Effect.server.Run(
+        "assets/prefabs/locks/keypad/effects/lock.code.denied.prefab",
+        player.transform.position);
+    }
+
+    private void WarnToast(BasePlayer player, string timeString = null)
+    {
+      SendToast(
+        player.IPlayer,
+        null == timeString ? "CannotCraftManual" : "CannotCraft",
+        timeString);
+    }
+
     #endregion Utilities
 
     #region Messaging
@@ -324,10 +407,18 @@ namespace Oxide.Plugins
       SendRawMessage(player, FormatMessage(player, langCode, args));
     }
 
+    private void SendToast(
+      IPlayer player, string langCode, params string[] args)
+    {
+      var basePlayer = player.Object as BasePlayer;
+      if (null == basePlayer) return;
+      basePlayer.ShowToast(0, FormatMessage(player, langCode, args));
+    }
+
     // decorate a string with color codes
     // note that only red or green should be used, as FormatMessage() only
     //  strips those
-    private string Colorize(string str, string color) =>
+    private static string Colorize(string str, string color) =>
       "<color=" + color + ">" + str + "</color>";
 
     #endregion Messaging
@@ -381,61 +472,13 @@ namespace Oxide.Plugins
     }
 
     private object CanCraft(
-      PlayerBlueprints playerBlueprints, ItemDefinition itemDefinition)
-    {
-      // suppress IDE null reference return warnings, as the method signature is
-      //  imposed by Oxide
-#pragma warning disable CS8603 // Possible null reference return.
+      PlayerBlueprints playerBlueprints, ItemDefinition itemDefinition) =>
+      !_configData.BlockCraft || AllowCraftAttempt(
+        playerBlueprints.baseEntity, itemDefinition.itemid) ? null : false;
 
-      var player = playerBlueprints.baseEntity;
-      // do nothing if any of the following are true:
-      // - player reference invalid
-      // - player in Tutorial Island
-      // - player crafting something other than a workbench
-      // - player has skiplock permission (note: admins not exempt by default)
-      if (null == player ||
-          player.IsInTutorial ||
-          !_WORKBENCH_ID.Contains(itemDefinition.itemid) ||
-          player.IPlayer.HasPermission(PrefixPermission(PERMISSION_SKIPLOCK)))
-      {
-        return null;
-      }
-
-      // get status
-      var wbIndex = Array.IndexOf(_WORKBENCH_ID, itemDefinition.itemid);
-      var status = GetUnlockStatus(wbIndex);
-
-      // do nothing if workbench is unlocked
-      if (0 == status) return null;
-
-      var userId = player.userID.Get();
-
-      // if player recently warned, block crafting silently
-      if (_craftWarned.ContainsKey(userId)) return false;
-
-      // warn player
-      if (status > 0) // => timed lockout
-      {
-        var timeSpan = TimeSpan.FromSeconds(status);
-        SendMessage(player.IPlayer, "CannotCraft", timeSpan.ToString(
-          "g", CultureInfo.CurrentCulture));
-      }
-      else // status < 0 => permanent lockout
-      {
-        SendMessage(player.IPlayer, "CannotCraftManual");
-      }
-
-      // set warning suppression timer
-      _craftWarned.Add(userId, timer.Once(5.0f, () =>
-      {
-        DestroyWarnTimer(userId);
-      }));
-
-
-      // block crafting
-      return false;
-#pragma warning restore CS8603 // Possible null reference return.
-    }
+    private object CanResearchItem(BasePlayer player, Item item) =>
+      !_configData.BlockResearch || AllowCraftAttempt(
+        player, item.info.itemid) ? null : false;
 
     private void OnPlayerConnected(BasePlayer player) =>
       ReportStatus(player.IPlayer);
@@ -649,6 +692,21 @@ namespace Oxide.Plugins
 
       [JsonProperty(PropertyName = "Workbench unlock times (seconds from start of wipe, or 0 for unlocked, or -1 for permanently locked)")]
       public int[] WBConfig { get; set; } = _DEFAULT_WB_SECONDS;
+
+      [JsonProperty(PropertyName = "Block crafting of locked workbench(es)")]
+      public bool BlockCraft = true;
+
+      [JsonProperty(PropertyName = "Block researching of locked workbench(es)")]
+      public bool BlockResearch = true;
+
+      [JsonProperty(PropertyName = "Report craft failure as chat message")]
+      public bool ReportAsChat = false;
+
+      [JsonProperty(PropertyName = "Report craft failure as sound effect")]
+      public bool ReportAsSound = true;
+
+      [JsonProperty(PropertyName = "Report craft failure as toast message")]
+      public bool ReportAsToast = true;
     }
 
     #endregion Configuration
