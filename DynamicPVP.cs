@@ -1,7 +1,6 @@
 ﻿//Requires: ZoneManager
 
 using System;
-using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -13,6 +12,7 @@ using Oxide.Core;
 using Oxide.Core.Libraries.Covalence;
 using Oxide.Core.Plugins;
 using UnityEngine;
+using IEnumerator = System.Collections.IEnumerator;
 using Random = UnityEngine.Random;
 
 namespace Oxide.Plugins
@@ -234,7 +234,7 @@ namespace Oxide.Plugins
 
       if (_activeDynamicZones.Count > 0)
       {
-        PrintDebug($"Deleting {_activeDynamicZones.Count} active zones.");
+        PrintDebug($"Deleting {_activeDynamicZones.Count} active zones");
         foreach (var entry in _activeDynamicZones.ToArray())
         {
           DeleteDynamicZone(entry.Key);
@@ -282,6 +282,7 @@ namespace Oxide.Plugins
     {
       if (player == null || !player.userID.IsSteamId())
       {
+        PrintDebug("OnPlayerRespawned(): Ignoring respawn of null/NPC player");
         return;
       }
       TryRemovePVPDelay(player);
@@ -302,7 +303,7 @@ namespace Oxide.Plugins
     private LeftZone GetOrAddPVPDelay(
       BasePlayer player, string zoneId, string eventName)
     {
-      PrintDebug($"Adding {player.displayName} to pvp delay.");
+      PrintDebug($"Adding {player.displayName} to pvp delay");
       var added = false;
       if (_pvpDelays.TryGetValue(player.userID, out var leftZone))
       {
@@ -325,7 +326,7 @@ namespace Oxide.Plugins
 
     private bool TryRemovePVPDelay(BasePlayer player)
     {
-      PrintDebug($"Removing {player.displayName} from pvp delay.");
+      PrintDebug($"Removing {player.displayName} from pvp delay");
       var playerId = player.userID.Get();
       if (_pvpDelays.Remove(playerId, out var leftZone))
       {
@@ -345,7 +346,7 @@ namespace Oxide.Plugins
           // HeliSignals and BradleyDrops exception
           baseEntity.skinID == 0)
       {
-        PrintDebug($"{baseEntity} is owned by the player {baseEntity.OwnerID}. Skipping event creation.");
+        PrintDebug($"Skipping event creation because baseEntity={baseEntity} is owned by player={baseEntity.OwnerID}");
         return false;
       }
       return true;
@@ -355,7 +356,7 @@ namespace Oxide.Plugins
     {
       if (Interface.CallHook("OnCreateDynamicPVP", eventName, entity) != null)
       {
-        PrintDebug($"There are other plugins that prevent {eventName} events from being created.", DebugLevel.WARNING);
+        PrintDebug($"Skipping event creation for eventName={eventName} due to OnCreateDynamicPVP hook result");
         return false;
       }
       return true;
@@ -412,30 +413,31 @@ namespace Oxide.Plugins
       {
         return;
       }
-      bool hasCommands = HasCommands();
-      if (hasCommands)
+      // also return if subscription status already matches command status
+      if (HasCommands() == _subscribedCommands)
       {
-        if (!_subscribedCommands)
-        {
-          Subscribe(nameof(OnPlayerCommand));
-          Subscribe(nameof(OnServerCommand));
-          _subscribedCommands = true;
-        }
         return;
       }
+      // subscription status needs to change, so toggle things
       if (_subscribedCommands)
       {
         Unsubscribe(nameof(OnPlayerCommand));
         Unsubscribe(nameof(OnServerCommand));
-        _subscribedCommands = false;
       }
+      else
+      {
+        Subscribe(nameof(OnPlayerCommand));
+        Subscribe(nameof(OnServerCommand));
+      }
+      _subscribedCommands = !_subscribedCommands;
     }
 
     private void CheckPvpDelayHooks(bool added)
     {
-      // if using TruePVE's ExcludePlayer API, just ensure we're unsubscribed
+      // optimization: abort if using TruePVE's ExcludePlayer API
       if (_useExcludePlayer)
       {
+        // ...ensure we're unsubscribed from damage hook, just in case
         if (_subscribedDamage)
         {
           Unsubscribe(nameof(CanEntityTakeDamage));
@@ -449,21 +451,21 @@ namespace Oxide.Plugins
       {
         return;
       }
-      bool haveDelays = _pvpDelays.Count > 0;
-      if (haveDelays)
+      // also return if subscription status already matches delay status
+      if (_pvpDelays.Count > 0 == _subscribedDamage)
       {
-        if (!_subscribedDamage)
-        {
-          Subscribe(nameof(CanEntityTakeDamage));
-          _subscribedDamage = true;
-        }
         return;
       }
+      // subscription status needs to change, so toggle things
       if (_subscribedDamage)
       {
         Unsubscribe(nameof(CanEntityTakeDamage));
-        _subscribedDamage = false;
       }
+      else
+      {
+        Subscribe(nameof(CanEntityTakeDamage));
+      }
+      _subscribedDamage = !_subscribedDamage;
     }
 
     private void CheckZoneHooks(bool added)
@@ -474,23 +476,23 @@ namespace Oxide.Plugins
       {
         return;
       }
-      bool haveZones = _activeDynamicZones.Count > 0;
-      if (haveZones)
+      // also return if subscription status already matches zone status
+      if (_activeDynamicZones.Count > 0 == _subscribedZones)
       {
-        if (!_subscribedZones)
-        {
-          Subscribe(nameof(OnEnterZone));
-          Subscribe(nameof(OnExitZone));
-          _subscribedZones = true;
-        }
         return;
       }
+      // subscription status needs to change, so toggle things
       if (_subscribedZones)
       {
         Unsubscribe(nameof(OnEnterZone));
         Unsubscribe(nameof(OnExitZone));
-        _subscribedZones = false;
       }
+      else
+      {
+        Subscribe(nameof(OnEnterZone));
+        Subscribe(nameof(OnExitZone));
+      }
+      _subscribedZones = !_subscribedZones;
     }
 
     private void CheckHooks(HookCheckReasons reasons)
@@ -573,7 +575,7 @@ namespace Oxide.Plugins
       {
         return monumentEvent;
       }
-      PrintDebug($"ERROR: Failed to get base event settings for {eventName}.", DebugLevel.ERROR);
+      PrintDebug($"ERROR: Failed to get base event settings for {eventName}", DebugLevel.ERROR);
       return null;
     }
 
@@ -589,17 +591,20 @@ namespace Oxide.Plugins
     {
       if (dieselEngine == null || dieselEngine.net == null)
       {
+        PrintDebug("ERROR: OnDieselEngineToggled(): Engine or Net is null", DebugLevel.ERROR);
         return;
       }
       var zoneId = dieselEngine.net.ID.ToString();
       if (dieselEngine.IsOn())
       {
+        PrintDebug($"OnDieselEngineToggled(): Requesting 'just-in-case' delete of zoneId={zoneId} due to excavator enable");
         DeleteDynamicZone(zoneId);
         HandleGeneralEvent(
           GeneralEventType.ExcavatorIgnition, dieselEngine, true);
       }
       else
       {
+        PrintDebug($"OnDieselEngineToggled(): Scheduling delete of zoneId={zoneId} due to excavator disable");
         HandleDeleteDynamicZone(zoneId);
       }
     }
@@ -612,16 +617,18 @@ namespace Oxide.Plugins
     {
       if (hackableLockedCrate == null || hackableLockedCrate.net == null)
       {
+        PrintDebug("ERROR: OnEntitySpawned(HackableLockedCrate): Crate or Net is null", DebugLevel.ERROR);
         return;
       }
 
       if (!configData.GeneralEvents.HackableCrate.Enabled ||
           !configData.GeneralEvents.HackableCrate.StartWhenSpawned)
       {
+        PrintDebug("OnEntitySpawned(HackableLockedCrate): Ignoring due to event or spawn start disabled");
         return;
       }
 
-      PrintDebug("Trying to create hackable crate spawn event.");
+      PrintDebug("Trying to create hackable crate spawn event");
       NextTick(() => LockedCrateEvent(hackableLockedCrate));
     }
 
@@ -629,9 +636,10 @@ namespace Oxide.Plugins
     {
       if (hackableLockedCrate == null || hackableLockedCrate.net == null)
       {
+        PrintDebug("ERROR: OnCrateHack(): Crate or Net is null", DebugLevel.ERROR);
         return;
       }
-      PrintDebug("Trying to create hackable crate hack event.");
+      PrintDebug("OnCrateHack(): Trying to create hackable crate hack event");
       NextTick(() => LockedCrateEvent(hackableLockedCrate));
     }
 
@@ -639,10 +647,13 @@ namespace Oxide.Plugins
     {
       if (hackableLockedCrate == null || hackableLockedCrate.net == null)
       {
+        PrintDebug("ERROR: OnCrateHackEnd(): Crate or Net is null", DebugLevel.ERROR);
         return;
       }
+      var zoneId = hackableLockedCrate.net.ID.ToString();
+      PrintDebug($"OnCrateHackEnd(): Scheduling delete of zoneId={zoneId} in {configData.GeneralEvents.HackableCrate.Duration}s");
       HandleDeleteDynamicZone(
-        hackableLockedCrate.net.ID.ToString(),
+        zoneId,
         configData.GeneralEvents.HackableCrate.Duration,
         GeneralEventType.HackableCrate.ToString());
     }
@@ -651,15 +662,19 @@ namespace Oxide.Plugins
     {
       if (hackableLockedCrate == null || hackableLockedCrate.net == null)
       {
+        PrintDebug("ERROR: OnLootEntity(HackableLockedCrate): Crate or Net is null", DebugLevel.ERROR);
         return;
       }
       if (!configData.GeneralEvents.HackableCrate.Enabled ||
           !configData.GeneralEvents.HackableCrate.TimerStartWhenLooted)
       {
+        PrintDebug("OnLootEntity(HackableLockedCrate): Ignoring due to event or loot delay disabled");
         return;
       }
+      var zoneId = hackableLockedCrate.net.ID.ToString();
+      PrintDebug($"OnLootEntity(HackableLockedCrate): Scheduling delete of zoneId={zoneId} in {configData.GeneralEvents.HackableCrate.Duration}s");
       HandleDeleteDynamicZone(
-        hackableLockedCrate.net.ID.ToString(),
+        zoneId,
         configData.GeneralEvents.HackableCrate.Duration,
         GeneralEventType.HackableCrate.ToString());
     }
@@ -668,20 +683,25 @@ namespace Oxide.Plugins
     {
       if (hackableLockedCrate == null || hackableLockedCrate.net == null)
       {
+        PrintDebug("ERROR: OnEntityKill(HackableLockedCrate): Crate or Net is null", DebugLevel.ERROR);
         return;
       }
 
       if (!configData.GeneralEvents.HackableCrate.Enabled ||
           !configData.GeneralEvents.HackableCrate.StopWhenKilled)
       {
+        PrintDebug("OnEntityKill(HackableLockedCrate): Ignoring due to event or kill stop disabled");
         return;
       }
       var zoneId = hackableLockedCrate.net.ID.ToString();
       //When the timer starts, don't stop the event immediately
-      if (!_eventTimers.ContainsKey(zoneId))
+      if (_eventTimers.ContainsKey(zoneId))
       {
-        HandleDeleteDynamicZone(zoneId);
+        PrintDebug($"OnEntityKill(HackableLockedCrate): Ignoring due to event timer already active for zoneId={zoneId}");
+        return;
       }
+      PrintDebug($"OnEntityKill(HackableLockedCrate): Scheduling delete of zoneId={zoneId}");
+      HandleDeleteDynamicZone(zoneId);
     }
 
     private void LockedCrateEvent(HackableLockedCrate hackableLockedCrate)
@@ -1014,11 +1034,33 @@ namespace Oxide.Plugins
 
     #region Monument Event
 
+    private (bool, bool) CreateMonumentEvent(
+      string monumentName, Transform transform, List<string> createdEvents)
+    {
+      bool added = false;
+      bool created = false;
+      if (!configData.MonumentEvents.TryGetValue(
+            monumentName, out var monumentEvent))
+      {
+        added = true;
+        monumentEvent = new();
+        configData.MonumentEvents.Add(monumentName, monumentEvent);
+        Puts($"A new monument {monumentName} was found and added to the config.");
+      }
+      if (monumentEvent.Enabled && HandleMonumentEvent(
+            monumentName, transform, monumentEvent))
+      {
+        created = true;
+        createdEvents.Add(monumentName);
+      }
+      return (added, created);
+    }
+
     private IEnumerator CreateMonumentEvents()
     {
       var changed = false;
       var createdEvents = new List<string>();
-      foreach (var landmarkInfo in TerrainMeta.Path.Landmarks)
+      foreach (LandmarkInfo landmarkInfo in TerrainMeta.Path.Landmarks)
       {
         if (!landmarkInfo.shouldDisplayOnMap)
         {
@@ -1055,20 +1097,167 @@ namespace Oxide.Plugins
             _oilRigPosition = landmarkInfo.transform.position;
             break;
         }
-        if (!configData.MonumentEvents.TryGetValue(
-              monumentName, out var monumentEvent))
+        var result = CreateMonumentEvent(
+          monumentName, landmarkInfo.transform, createdEvents);
+        if (result.Item1) changed = true;
+        if (result.Item2) yield return CoroutineEx.waitForFixedUpdate;
+      }
+      // wait for logging to catch up
+      yield return CoroutineEx.waitForSeconds(0.5f);
+      // also read in Train Tunnels cells
+      foreach (DungeonGridCell cell in TerrainMeta.Path.DungeonGridCells)
+      {
+        if (!cell.name.StartsWith("assets/bundled/prefabs/autospawn/tunnel"))
         {
-          changed = true;
-          monumentEvent = new();
-          configData.MonumentEvents.Add(monumentName, monumentEvent);
-          Puts($"A new monument {monumentName} was found and added to the config.");
+          PrintDebug($"Skipping unsupported DungeonGridCell type due to non-tunnel: {cell.name}");
+          continue;
         }
-        if (monumentEvent.Enabled && HandleMonumentEvent(
-              monumentName, landmarkInfo.transform, monumentEvent))
+        // derive user-friendly tunnel section name from its prefab name
+        var cellName = "Train Tunnel";
+        // get the "tunnelXYZ" part of the name
+        var cellNameSlashSplit = cell.name.Split("/");
+        if (cellNameSlashSplit.Length < 6)
         {
-          createdEvents.Add(monumentName);
-          yield return CoroutineEx.waitForSeconds(0.5f);
+          PrintDebug($"Skipping unsupported DungeonGridCell type due to path components: {cell.name}");
+          continue;
         }
+        var upwards = "tunnel-upwards" == cellNameSlashSplit[4];
+        var cellNameDashSplit = cellNameSlashSplit[5].Split("-");
+        if (cellNameDashSplit.Length < 2)
+        {
+          PrintDebug($"Skipping unsupported DungeonGridCell type due to name components: {cell.name}");
+          continue;
+        }
+        // extract feature part of name
+        var cellType = cellNameSlashSplit[5];
+        if (upwards)
+        {
+          cellName += " Upwards";
+        }
+        else if (cellType.StartsWith("curve"))
+        {
+          cellName += " Curve";
+        }
+        else if (cellType.StartsWith("intersection"))
+        {
+          cellName += " Intersection";
+        }
+        else if (cellType.StartsWith("station"))
+        {
+          cellName += " Station";
+        }
+        else if (cellType.StartsWith("straight"))
+        {
+          cellName += " Straight";
+        }
+        else if (cellType.StartsWith("transition"))
+        {
+          cellName += " Transition";
+        }
+        // extract direction part of name
+        var cellDirection =
+          cellNameDashSplit[upwards ? cellNameDashSplit.Length - 1 : 1]
+          .Split(".")[0];
+        switch (cellDirection)
+        {
+          case "e":  cellName += " East";        break;
+          case "n":  cellName += " North";       break;
+          case "ne": cellName += " North-East";  break;
+          case "nw": cellName += " North-West";  break;
+          case "s":  cellName += " South";       break;
+          case "se": cellName += " South-East";  break;
+          case "sn": cellName += " North-South"; break;
+          case "sw": cellName += " South-West";  break;
+          case "w":  cellName += " West";        break;
+          case "we": cellName += " East-West";   break;
+          default:
+          {
+            PrintDebug($"Skipping unsupported DungeonGridCell type due to unknown direction '{cellDirection}': {cell.name}");
+            continue;
+          }
+        }
+        if (string.IsNullOrEmpty(cellName))
+        {
+          PrintDebug($"Failed to extract name from DungeonGridCell type: {cell.name}");
+          continue;
+        }
+        PrintDebug($"Adding/creating Train Tunnels section event {cellName} for DungeonGridCell type: {cell.name}");
+        var result = CreateMonumentEvent(
+          cellName, cell.transform, createdEvents);
+        if (result.Item1) changed = true;
+        if (result.Item2) yield return CoroutineEx.waitForFixedUpdate;
+      }
+      // wait for logging to catch up
+      yield return CoroutineEx.waitForSeconds(0.5f);
+      // also generate a monument for the "tunnel dwelling" sections between
+      //  Train Tunnel entrances and stations
+      foreach (DungeonGridInfo entrance in TerrainMeta.Path.DungeonGridEntrances)
+      {
+        if (entrance.Links.Count <= 0)
+        {
+          PrintDebug($"Skipping DungeonGridInfo type with empty Links list: {entrance.name}");
+          continue;
+        }
+        // create a bounding box around all links, in order to find the center
+        Bounds linkBounds = new(Vector3.zero, Vector3.zero);
+        foreach (GameObject link in entrance.Links)
+        {
+          if (!link.name.StartsWith("assets/bundled/prefabs/autospawn/tunnel-link/"))
+          {
+            // skip silently because this isn't a problem - we want to skip
+            //  surface entrances and stations because they're endpoints that
+            //  are covered by other zone types
+            continue;
+          }
+          if (Vector3.zero == linkBounds.center &&
+              Vector3.zero == linkBounds.size)
+          {
+            // this is the first valid entry; record its position and extents
+            linkBounds.center = link.transform.position;
+            linkBounds.extents = link.transform.GetBounds().extents;
+          }
+          else
+          {
+            // get link's bounds, but use world coorindate center
+            var tempBounds = link.transform.GetBounds();
+            tempBounds.center = link.transform.position;
+            linkBounds.Encapsulate(tempBounds);
+          }
+        }
+        if (linkBounds.size == Vector3.zero)
+        {
+          PrintDebug($"Skipping DungeonGridInfo type with empty bounds: {entrance.name}");
+          continue;
+        }
+        // find the link closest to the center of the bounding box
+        // this is done in 2D, because most of the links are at the bottom of
+        //  the volume, and we want to pick one of those for consistency
+        var boundsCenter = linkBounds.center.XZ2D();
+        int transformIndex = -1;
+        float transformDistance = 0.0f;
+        for (int i = 0; i < entrance.Links.Count; ++i)
+        {
+          GameObject link = entrance.Links[i];
+          if (!link.name.StartsWith("assets/bundled/prefabs/autospawn/tunnel-link/"))
+          {
+            continue;
+          }
+          var distance =
+            Vector3.Distance(boundsCenter, link.transform.position.XZ2D());
+          if (transformIndex < 0 || distance < transformDistance)
+          {
+            transformIndex = i;
+            transformDistance = distance;
+          }
+        }
+        // create event around the transform for the centermost link
+        // NOTE: the name is meant to avoid confusion with "Train Tunnel Link",
+        //  which is used for linkages between above and below ground rail lines
+        var result = CreateMonumentEvent(
+          "Train Tunnel Dwelling",
+          entrance.Links[transformIndex].transform, createdEvents);
+        if (result.Item1) changed = true;
+        if (result.Item2) yield return CoroutineEx.waitForFixedUpdate;
       }
       if (changed)
       {
@@ -1079,14 +1268,16 @@ namespace Oxide.Plugins
         PrintDebug($"{createdEvents.Count} monument event(s) successfully created: {string.Join(", ", createdEvents)}");
         createdEvents.Clear();
       }
-
+      // wait for logging to catch up
+      yield return CoroutineEx.waitForSeconds(0.5f);
+      // create auto events from data file
       foreach (var entry in storedData.autoEvents)
       {
         if (entry.Value.AutoStart && CreateDynamicZone(
               entry.Key, entry.Value.Position, entry.Value.ZoneId))
         {
           createdEvents.Add(entry.Key);
-          yield return CoroutineEx.waitForSeconds(0.5f);
+          yield return CoroutineEx.waitForFixedUpdate;
         }
       }
       if (createdEvents.Count > 0)
@@ -1265,18 +1456,20 @@ namespace Oxide.Plugins
     {
       if (position == Vector3.zero)
       {
-        PrintDebug($"ERROR: Invalid location, zone creation failed for eventName={eventName}.", DebugLevel.ERROR);
+        PrintDebug($"CreateDynamicZone(): ERROR: Invalid location, zone creation failed for eventName={eventName}.", DebugLevel.ERROR);
         return false;
       }
       var baseEvent = GetBaseEvent(eventName);
       if (baseEvent == null)
       {
+        PrintDebug($"CreateDynamicZone(): ERROR: No baseEvent for eventName={eventName}.", DebugLevel.ERROR);
         return false;
       }
       if (delay && baseEvent.EventStartDelay > 0f)
       {
         timer.Once(baseEvent.EventStartDelay, () =>
           CreateDynamicZone(eventName, position, zoneId, zoneSettings, false));
+        PrintDebug($"CreateDynamicZone(): Delaying zone creation for eventName={eventName} by {baseEvent.EventStartDelay}s.", DebugLevel.INFO);
         return false;
       }
 
@@ -1380,7 +1573,9 @@ namespace Oxide.Plugins
       if (string.IsNullOrEmpty(zoneId) ||
           !_activeDynamicZones.TryGetValue(zoneId, out var eventName))
       {
-        PrintDebug($"ERROR: Invalid zoneId={zoneId}.", DebugLevel.ERROR);
+        // this isn't an error, because sometimes a delete is requested "just in
+        //  case", and/or because multiple delete stimuli occurred
+        PrintDebug($"HandleDeleteDynamicZone(): Skipping delete for unknown zoneId={zoneId}.");
         return;
       }
       if (Interface.CallHook("OnDeleteDynamicPVP", zoneId, eventName) != null)
@@ -1413,7 +1608,9 @@ namespace Oxide.Plugins
       if (string.IsNullOrEmpty(zoneId) ||
           !_activeDynamicZones.TryGetValue(zoneId, out var eventName))
       {
-        PrintDebug($"ERROR: Invalid zoneId={zoneId}.", DebugLevel.ERROR);
+        // this isn't an error, because sometimes a delete is requested "just in
+        //  case", and/or because multiple delete stimuli occurred
+        PrintDebug($"DeleteDynamicZone(): Skipping delete for unknown zoneId={zoneId}.");
         return false;
       }
 
@@ -2007,11 +2204,9 @@ namespace Oxide.Plugins
         new(pos.x - halfSize.x, pos.y - halfSize.y, pos.z + halfSize.z),
         new(pos.x - halfSize.x, pos.y - halfSize.y, pos.z - halfSize.z),
         // axes
-        new(pos.x - halfSize.x, pos.y, pos.z),
+        new(pos.x, pos.y, pos.z),
         new(pos.x + halfSize.x, pos.y, pos.z),
-        new(pos.x, pos.y - halfSize.y, pos.z),
         new(pos.x, pos.y + halfSize.y, pos.z),
-        new(pos.x, pos.y, pos.z - halfSize.z),
         new(pos.x, pos.y, pos.z + halfSize.z)
       };
 
@@ -2024,49 +2219,80 @@ namespace Oxide.Plugins
 
       // corners
       player.SendConsoleCommand(
-        "ddraw.line", duration, color, vertices[0], vertices[1]);
+        "ddraw.line",  duration, color, vertices[0], vertices[1]);
       player.SendConsoleCommand(
-        "ddraw.line", duration, color, vertices[0], vertices[2]);
+        "ddraw.line",  duration, color, vertices[0], vertices[2]);
       player.SendConsoleCommand(
-        "ddraw.line", duration, color, vertices[0], vertices[4]);
+        "ddraw.line",  duration, color, vertices[0], vertices[4]);
       player.SendConsoleCommand(
-        "ddraw.line", duration, color, vertices[1], vertices[3]);
+        "ddraw.line",  duration, color, vertices[1], vertices[3]);
       player.SendConsoleCommand(
-        "ddraw.line", duration, color, vertices[1], vertices[5]);
+        "ddraw.line",  duration, color, vertices[1], vertices[5]);
       player.SendConsoleCommand(
-        "ddraw.line", duration, color, vertices[2], vertices[3]);
+        "ddraw.line",  duration, color, vertices[2], vertices[3]);
       player.SendConsoleCommand(
-        "ddraw.line", duration, color, vertices[2], vertices[6]);
+        "ddraw.line",  duration, color, vertices[2], vertices[6]);
       player.SendConsoleCommand(
-        "ddraw.line", duration, color, vertices[3], vertices[7]);
+        "ddraw.line",  duration, color, vertices[3], vertices[7]);
       player.SendConsoleCommand(
-        "ddraw.line", duration, color, vertices[4], vertices[5]);
+        "ddraw.line",  duration, color, vertices[4], vertices[5]);
       player.SendConsoleCommand(
-        "ddraw.line", duration, color, vertices[4], vertices[6]);
+        "ddraw.line",  duration, color, vertices[4], vertices[6]);
       player.SendConsoleCommand(
-        "ddraw.line", duration, color, vertices[5], vertices[7]);
+        "ddraw.line",  duration, color, vertices[5], vertices[7]);
       player.SendConsoleCommand(
-        "ddraw.line", duration, color, vertices[6], vertices[7]);
+        "ddraw.line",  duration, color, vertices[6], vertices[7]);
       // axes
       player.SendConsoleCommand(
-        "ddraw.arrow", duration, Color.red,   vertices[8],  vertices[9],  5);
+        "ddraw.arrow", duration, Color.red,   vertices[8], vertices[9],  5);
       player.SendConsoleCommand(
-        "ddraw.arrow", duration, Color.green, vertices[10], vertices[11], 5);
+        "ddraw.arrow", duration, Color.green, vertices[8], vertices[10], 5);
       player.SendConsoleCommand(
-        "ddraw.arrow", duration, Color.blue,  vertices[12], vertices[13], 5);
+        "ddraw.arrow", duration, Color.blue,  vertices[8], vertices[11], 5);
       player.SendConsoleCommand(
-        "ddraw.text", duration, Color.red,   vertices[9] , "+x");
+        "ddraw.text",  duration, Color.red,   vertices[9],  "+x");
       player.SendConsoleCommand(
-        "ddraw.text", duration, Color.green, vertices[11], "+y");
+        "ddraw.text",  duration, Color.green, vertices[10], "+y");
       player.SendConsoleCommand(
-        "ddraw.text", duration, Color.blue,  vertices[13], "+z");
+        "ddraw.text",  duration, Color.blue,  vertices[11], "+z");
     }
 
     private static void DrawSphere(
       BasePlayer player, float duration, Color color,
-      Vector3 position, float radius) =>
+      Vector3 pos, float radius, float rotation)
+    {
       player.SendConsoleCommand(
-        "ddraw.sphere", duration, color, position, radius);
+        "ddraw.sphere", duration, color, pos, radius);
+
+      // axes
+      Vector3[] vertices =
+      {
+        new(pos.x,          pos.y,          pos.z),
+        new(pos.x + radius, pos.y,          pos.z),
+        new(pos.x,          pos.y + radius, pos.z),
+        new(pos.x,          pos.y,          pos.z + radius)
+      };
+
+      // rotate all the points
+      var rotQ = Quaternion.Euler(0, rotation, 0);
+      for (int i = 0; i < vertices.Length; ++i)
+      {
+        vertices[i] = (rotQ * (vertices[i] - pos)) + pos;
+      }
+
+      player.SendConsoleCommand(
+        "ddraw.arrow", duration, Color.red,   vertices[0], vertices[1], 5);
+      player.SendConsoleCommand(
+        "ddraw.arrow", duration, Color.green, vertices[0], vertices[2], 5);
+      player.SendConsoleCommand(
+        "ddraw.arrow", duration, Color.blue,  vertices[0], vertices[3], 5);
+      player.SendConsoleCommand(
+        "ddraw.text", duration, Color.red,    vertices[1], "+x");
+      player.SendConsoleCommand(
+        "ddraw.text", duration, Color.green,  vertices[2], "+y");
+      player.SendConsoleCommand(
+        "ddraw.text", duration, Color.blue,   vertices[3], "+z");
+    }
 
     private void CommandHelp(IPlayer iPlayer)
     {
@@ -2143,19 +2369,19 @@ namespace Oxide.Plugins
           case SphereCubeDynamicZone scdZone:
           {
             zoneColor = Color.yellow;
+            var rotation = scdZone.Rotation;
+            if (!scdZone.FixedRotation)
+            {
+              rotation += zoneData.transform.eulerAngles.y;
+            }
             if (scdZone.Radius > 0)
             {
               DrawSphere(
                 player, configData.Chat.ShowDuration,zoneColor,
-                zonePosition, scdZone.Radius);
+                zonePosition, scdZone.Radius, rotation);
             }
             else if (scdZone.Size.sqrMagnitude > 0)
             {
-              var rotation = scdZone.Rotation;
-              if (!scdZone.FixedRotation)
-              {
-                rotation += zoneData.transform.eulerAngles.y;
-              }
               DrawCube(
                 player, configData.Chat.ShowDuration, zoneColor,
                 zonePosition, scdZone.Size, rotation);
@@ -2187,7 +2413,7 @@ namespace Oxide.Plugins
             {
               DrawSphere(
                 player, configData.Chat.ShowDuration, zoneColor,
-                zonePosition, sdZone.Radius);
+                zonePosition, sdZone.Radius, 0);
             }
             break;
           }
@@ -2723,8 +2949,7 @@ namespace Oxide.Plugins
       public bool FixedRotation { get; set; }
 
       public override string[] ZoneSettings(Transform transform = null) =>
-        transform == null || FixedRotation ?
-          base.ZoneSettings(transform) : GetZoneSettings(transform);
+        GetZoneSettings(transform);
 
       protected override string[] GetZoneSettings(Transform transform = null)
       {
@@ -2761,8 +2986,7 @@ namespace Oxide.Plugins
       public bool FixedRotation { get; set; }
 
       public override string[] ZoneSettings(Transform transform = null) =>
-        transform == null || FixedRotation || Radius > 0f ?
-          base.ZoneSettings(transform) : GetZoneSettings(transform);
+        GetZoneSettings(transform);
 
       protected override string[] GetZoneSettings(Transform transform = null)
       {
@@ -2776,15 +3000,14 @@ namespace Oxide.Plugins
         {
           zoneSettings.Add("size");
           zoneSettings.Add($"{Size.x} {Size.y} {Size.z}");
-
-          zoneSettings.Add("rotation");
-          var transformedRotation = Rotation;
-          if (transform != null && !FixedRotation)
-          {
-            transformedRotation += transform.rotation.eulerAngles.y;
-          }
-          zoneSettings.Add(transformedRotation.ToString(CultureInfo.InvariantCulture));
         }
+        zoneSettings.Add("rotation");
+        var transformedRotation = Rotation;
+        if (transform != null && !FixedRotation)
+        {
+          transformedRotation += transform.rotation.eulerAngles.y;
+        }
+        zoneSettings.Add(transformedRotation.ToString(CultureInfo.InvariantCulture));
         GetBaseZoneSettings(zoneSettings);
         return zoneSettings.ToArray();
       }
