@@ -108,6 +108,10 @@ namespace Oxide.Plugins
       AddCovalenceCommand(configData.Chat.Command, nameof(CmdDynamicPVP));
       Unsubscribe(nameof(CanEntityTakeDamage));
       Unsubscribe(nameof(OnCargoPlaneSignaled));
+      Unsubscribe(nameof(OnCargoShipEgress));
+      Unsubscribe(nameof(OnCargoShipHarborApproach));
+      Unsubscribe(nameof(OnCargoShipHarborArrived));
+      Unsubscribe(nameof(OnCargoShipHarborLeave));
       Unsubscribe(nameof(OnCrateHack));
       Unsubscribe(nameof(OnCrateHackEnd));
       Unsubscribe(nameof(OnDieselEngineToggled));
@@ -213,16 +217,14 @@ namespace Oxide.Plugins
       }
       if (configData.GeneralEvents.CargoShip.Enabled)
       {
+        Subscribe(nameof(OnCargoShipEgress));
+        Subscribe(nameof(OnCargoShipHarborApproach));
+        Subscribe(nameof(OnCargoShipHarborArrived));
+        Subscribe(nameof(OnCargoShipHarborLeave));
         Subscribe(nameof(OnEntityKill));
         Subscribe(nameof(OnEntitySpawned));
-        foreach (var serverEntity in BaseNetworkable.serverEntities)
-        {
-          if (serverEntity is CargoShip cargoShip)
-          {
-            OnEntitySpawned(cargoShip);
-          }
-        }
       }
+      StartupGeneralEvents();
     }
 
     private void Unload()
@@ -585,7 +587,66 @@ namespace Oxide.Plugins
 
     #region General Event
 
+    // determine whether any General Events should be created based on currently
+    //  existing entities of interest
+    // this is expected to only be called on startup
+    private void StartupGeneralEvents()
+    {
+      // TODO: Bradley, Patrol Helicopter, Supply Drop, Timed Supply
+      bool checkGeneralEvents = false;
+      checkGeneralEvents |= configData.GeneralEvents.CargoShip.Enabled;
+      // NOTE: StopWhenKilled is checked because we don't want to start events
+      //  whose end is determined by a timer, as we don't know elapsed times
+      checkGeneralEvents |=
+        configData.GeneralEvents.HackableCrate.Enabled &&
+        configData.GeneralEvents.HackableCrate.StopWhenKilled;
+      checkGeneralEvents |= configData.GeneralEvents.ExcavatorIgnition.Enabled;
+      if (!checkGeneralEvents)
+      {
+        return;
+      }
+      foreach (var serverEntity in BaseNetworkable.serverEntities)
+      {
+        // Cargo Ship Event
+        if (configData.GeneralEvents.CargoShip.Enabled &&
+            serverEntity is CargoShip cargoShip &&
+            null != cargoShip)
+        {
+          StartupCargoShip(cargoShip);
+          continue;
+        }
+        // Excavator Ingnition Event
+        if (configData.GeneralEvents.ExcavatorIgnition.Enabled &&
+            serverEntity is DieselEngine dieselEngine &&
+            null != dieselEngine &&
+            dieselEngine.IsOn())
+        {
+          StartupDieselEngine(dieselEngine);
+        }
+        // Hackable Crate Event
+        if (configData.GeneralEvents.HackableCrate.Enabled &&
+            configData.GeneralEvents.HackableCrate.StopWhenKilled &&
+            serverEntity is HackableLockedCrate hackableLockedCrate &&
+            null != hackableLockedCrate)
+        {
+          StartupHackableLockedCrate(hackableLockedCrate);
+        }
+      }
+    }
+
     #region ExcavatorIgnition Event
+
+    // invoke appropriate hook handler for current DieselEngine state
+    // this is only used on startup, to (re)create events for already-existing
+    //  DieselEngine entities
+    private void StartupDieselEngine(DieselEngine dieselEngine)
+    {
+      if (dieselEngine.IsOn())
+      {
+        PrintDebug("Found activated Giant Excavator");
+        OnDieselEngineToggled(dieselEngine);
+      }
+    }
 
     private void OnDieselEngineToggled(DieselEngine dieselEngine)
     {
@@ -612,6 +673,49 @@ namespace Oxide.Plugins
     #endregion ExcavatorIgnition Event
 
     #region HackableLockedCrate Event
+
+    // invoke appropriate hook handler for current HackableLockedCrate state
+    // this is only used on startup, to (re)create events for already-existing
+    //  HackableLockedCrate entities
+    private void StartupHackableLockedCrate(
+      HackableLockedCrate hackableLockedCrate)
+    {
+
+      if (0 != hackableLockedCrate.FirstLooterId &&
+          configData.GeneralEvents.HackableCrate.TimerStartWhenLooted)
+      {
+        // looted and stop after time since loot enabled
+        // we don't know elapsed time, so err on the side of assuming the event
+        //  has already ended
+        PrintDebug("Found looted hackable locked crate, and TimerStartWhenLooted set; ignoring because elapsed time unknown");
+      }
+      else if (
+        hackableLockedCrate.HasFlag(HackableLockedCrate.Flag_FullyHacked) &&
+        configData.GeneralEvents.HackableCrate.TimerStartWhenUnlocked)
+      {
+        // unlocked and stop after time since unlock enabled
+        // we don't know elapsed time, so err on the side of assuming the event
+        //  has already ended
+        PrintDebug("Found unlocked hackable locked crate and TimerStartWhenUnlocked set; ignoring because elapsed time unknown");
+      }
+      else if (hackableLockedCrate.HasFlag(HackableLockedCrate.Flag_Hacking) &&
+               !configData.GeneralEvents.HackableCrate.StartWhenSpawned)
+      {
+        // hacking and start on hacking enabled
+        PrintDebug("Found hacking hackable locked crate and StartWhenSpawned NOT set; triggering OnCrateHack()");
+        OnCrateHack(hackableLockedCrate);
+      }
+      else if (configData.GeneralEvents.HackableCrate.StartWhenSpawned)
+      {
+        // any other state and start on spawn + stop when killed enabled
+        PrintDebug("Found hackable locked crate, and StartWhenSpawned set; triggering OnEntitySpawned()");
+        OnEntitySpawned(hackableLockedCrate);
+      }
+      else
+      {
+        PrintDebug("Found hackable locked crate, but ignoring because of either start on hack, or stop on timer with elapsed time unknown");
+      }
+    }
 
     private void OnEntitySpawned(HackableLockedCrate hackableLockedCrate)
     {
@@ -722,8 +826,15 @@ namespace Oxide.Plugins
         PrintDebug("The hackable locked crate is on a cargo ship. Skipping event creation.");
         return;
       }
-      HandleGeneralEvent(
-        GeneralEventType.HackableCrate, hackableLockedCrate, true);
+      // call this here, because otherwise it's difficult to ensure that we call
+      //  it exactly once
+      var eventName = GeneralEventType.HackableCrate.ToString();
+      if (!CanCreateDynamicPVP(eventName, hackableLockedCrate))
+      {
+        return;
+      }
+      // NOTE: we are already NextTick() protected here
+      HandleParentedEntityEvent(eventName, hackableLockedCrate);
     }
 
     private static bool IsOnTheCargoShip(
@@ -991,7 +1102,51 @@ namespace Oxide.Plugins
 
     #region CargoShip Event
 
-    private void OnEntitySpawned(CargoShip cargoShip)
+    // invoke appropriate hook handler for current CargoShip state
+    // this is only used on startup, to (re)create events for already-existing
+    //  CargoShip entities
+    private void StartupCargoShip(CargoShip cargoShip)
+    {
+      if (cargoShip.IsShipDocked)
+      {
+        // docked
+        PrintDebug("Found docked cargo ship");
+        OnCargoShipHarborArrived(cargoShip);
+      }
+      else if (cargoShip.HasFlag(CargoShip.Egressing))
+      {
+        // leaving the map
+        PrintDebug("Found egressing cargo ship");
+        OnCargoShipEgress(cargoShip);
+      }
+      else if (
+        cargoShip.isDoingHarborApproach && cargoShip.currentHarborApproachNode <
+          cargoShip.harborApproachPath.nodes.Count / 2)
+      {
+        // approaching a Harbor
+        PrintDebug("Found cargo ship approaching Harbor");
+        OnCargoShipHarborApproach(cargoShip, null);
+      }
+      else if (cargoShip.HasFlag(CargoShip.HasDocked))
+      {
+        // not in any other state, but has previously docked, so this is
+        //  equivalent to having most recently received an
+        //  OnCargoShipHarborLeave hook call
+        PrintDebug("Found cargo ship leaving Harbor");
+        OnCargoShipHarborLeave(cargoShip);
+      }
+      else
+      {
+        // not docked, not egressing, not approaching, has never docked
+        // this implies it has most recently spawned
+        PrintDebug("Found spawned cargo ship");
+        OnEntitySpawned(cargoShip);
+      }
+    }
+
+    // create/update or attempt to delete CargoShip event zone, based on
+    //  specified desired state
+    private void HandleCargoState(CargoShip cargoShip, bool state)
     {
       if (cargoShip == null || cargoShip.net == null)
       {
@@ -1001,17 +1156,62 @@ namespace Oxide.Plugins
       {
         return;
       }
-      PrintDebug("Trying to create CargoShip spawn event.");
+      // create/update or attempt to delete zone, based on desired state
+      var zoneId = cargoShip.net.ID.ToString();
+      var zoneExists = _activeDynamicZones.ContainsKey(zoneId);
+      if (zoneExists == state)
+      {
+        PrintDebug($"CargoShip event {zoneId} is already in desired state={state}");
+        return;
+      }
+      if (state)
+      {
+        PrintDebug($"Trying to create CargoShip post-spawn event {zoneId}");
+        if (!CheckEntityOwner(cargoShip))
+        {
+          return;
+        }
+        var eventName = GeneralEventType.CargoShip.ToString();
+        // call this here, because otherwise it's difficult to ensure that we
+        //  call it exactly once
+        if (!CanCreateDynamicPVP(eventName, cargoShip))
+        {
+          return;
+        }
+        NextTick(() => HandleParentedEntityEvent(eventName, cargoShip));
+      }
+      else
+      {
+        PrintDebug($"Trying to delete CargoShip post-spawn event {zoneId}");
+        HandleDeleteDynamicZone(zoneId);
+      }
+    }
+
+    private void OnEntitySpawned(CargoShip cargoShip)
+    {
+      if (cargoShip == null || cargoShip.net == null)
+      {
+        // bad entity
+        return;
+      }
+      if (!configData.GeneralEvents.CargoShip.Enabled ||
+          !configData.GeneralEvents.CargoShip.SpawnState)
+      {
+        // not configured to create event on spawn
+        return;
+      }
+      PrintDebug("Trying to create CargoShip spawn event");
       if (!CheckEntityOwner(cargoShip))
       {
         return;
       }
       var eventName = GeneralEventType.CargoShip.ToString();
+      // call this here, because otherwise it's difficult to ensure that we call
+      //  it exactly once
       if (!CanCreateDynamicPVP(eventName, cargoShip))
       {
         return;
       }
-
       NextTick(() => HandleParentedEntityEvent(eventName, cargoShip));
     }
 
@@ -1027,6 +1227,21 @@ namespace Oxide.Plugins
       }
       HandleDeleteDynamicZone(cargoShip.net.ID.ToString());
     }
+
+    private void OnCargoShipEgress(CargoShip cargoShip) => HandleCargoState(
+      cargoShip, configData.GeneralEvents.CargoShip.EgressState);
+
+    private void OnCargoShipHarborApproach(
+      CargoShip cargoShip, CargoNotifier _) => HandleCargoState(
+        cargoShip, configData.GeneralEvents.CargoShip.ApproachState);
+
+    private void OnCargoShipHarborArrived(
+      CargoShip cargoShip) => HandleCargoState(
+        cargoShip, configData.GeneralEvents.CargoShip.DockState);
+
+    private void OnCargoShipHarborLeave(
+      CargoShip cargoShip) => HandleCargoState(
+        cargoShip, configData.GeneralEvents.CargoShip.DepartState);
 
     #endregion CargoShip Event
 
@@ -1367,6 +1582,10 @@ namespace Oxide.Plugins
 
     #region DynamicZone Handler
 
+    // create a zone that is parented to an entity, such that they move together
+    // NOTE: caller is responsible for calling CheckEntityOwner() and
+    //  CanCreateDynamicPVP() first, because this method can't easily implement
+    //  calling them exactly once
     private void HandleParentedEntityEvent(
       string eventName, BaseEntity parentEntity, bool delay = true)
     {
@@ -1392,6 +1611,7 @@ namespace Oxide.Plugins
       {
         return;
       }
+      // attach the zone to the parent entity, so that they move together
       timer.Once(0.25f, () =>
       {
         var zone = GetZoneById(zoneId);
@@ -1401,14 +1621,21 @@ namespace Oxide.Plugins
           DeleteDynamicZone(zoneId);
           return;
         }
+        // only support parenting if event implements IParentZone
+        if (baseEvent.GetDynamicZone() is not IParentZone parentZone)
+        {
+          PrintDebug($"ERROR: Not parenteing zoneId={zoneId} for eventName={eventName} because its DynamicZone does not implement IParentZone.", DebugLevel.ERROR);
+          DeleteDynamicZone(zoneId);
+          return;
+        }
         var zoneTransform = zone.transform;
+        var position = parentEntity.transform.TransformPoint(parentZone.Center);
         zoneTransform.SetParent(parentEntity.transform);
         zoneTransform.rotation = parentEntity.transform.rotation;
-        zoneTransform.position =
-          baseEvent.GetDynamicZone() is IParentZone parentZone ?
-            parentEntity.transform.TransformPoint(parentZone.Center) :
-            parentEntity.transform.position;
+        zoneTransform.position = position;
         PrintDebug($"The zone={zone} with zoneId={zoneId} for eventName={eventName} was parented to parentEntity={parentEntity}.");
+        // also parent any domes
+        ParentDome(zoneId, position, parentEntity);
       });
     }
 
@@ -1427,11 +1654,18 @@ namespace Oxide.Plugins
       GeneralEventType generalEventType, BaseEntity baseEntity, bool useEntityId)
     {
       var eventName = generalEventType.ToString();
-      if (useEntityId &&
-          _activeDynamicZones.ContainsKey(baseEntity.net.ID.ToString()))
+      if (useEntityId)
       {
-        PrintDebug($"Aborting creation of redundant eventName={eventName} for baseEntity={baseEntity} with baseEntity.net.ID={baseEntity.net.ID}", DebugLevel.WARNING);
-        return;
+        if (null == baseEntity || null == baseEntity.net)
+        {
+          PrintDebug($"Aborting creation of eventName={eventName}, because entity is null", DebugLevel.WARNING);
+          return;
+        }
+        if (_activeDynamicZones.ContainsKey(baseEntity.net.ID.ToString()))
+        {
+          PrintDebug($"Aborting creation of redundant eventName={eventName} for baseEntity={baseEntity} with baseEntity.net.ID={baseEntity.net.ID}", DebugLevel.WARNING);
+          return;
+        }
       }
       if (!CanCreateDynamicPVP(eventName, baseEntity))
       {
@@ -1474,7 +1708,7 @@ namespace Oxide.Plugins
       }
 
       float duration = -1;
-      if (baseEvent is TimedEvent timedEvent &&
+      if (baseEvent is BaseTimedEvent timedEvent &&
           (baseEvent is not ITimedDisable timedDisable ||
            !timedDisable.IsTimedDisabled()))
       {
@@ -1511,7 +1745,7 @@ namespace Oxide.Plugins
 
       var stringBuilder = Pool.Get<StringBuilder>();
       stringBuilder.Clear();
-      var domeEvent = baseEvent as DomeMixedEvent;
+      var domeEvent = baseEvent as DomeEvent;
       var sphereZone = dynamicZone as ISphereZone;
       if (DomeCreateAllowed(domeEvent, sphereZone))
       {
@@ -1526,7 +1760,7 @@ namespace Oxide.Plugins
         }
       }
 
-      var botEvent = baseEvent as BotDomeMixedEvent;
+      var botEvent = baseEvent as BotDomeEvent;
       if (BotReSpawnAllowed(botEvent))
       {
         if (SpawnBots(position, botEvent.BotProfileName, zoneId))
@@ -1592,7 +1826,10 @@ namespace Oxide.Plugins
         TryRemoveEventTimer(zoneId);
         if (baseEvent.GetDynamicZone() is IParentZone)
         {
+          // untether zone from parent entity
           GetZoneById(zoneId)?.transform.SetParent(null, true);
+          // also untether any domes
+          ParentDome(zoneId, Vector3.zero, null);
         }
         _eventTimers.Add(zoneId, timer.Once(
           baseEvent.EventStopDelay, () => DeleteDynamicZone(zoneId)));
@@ -1624,7 +1861,7 @@ namespace Oxide.Plugins
       var stringBuilder = Pool.Get<StringBuilder>();
       stringBuilder.Clear();
       if (DomeCreateAllowed(
-        baseEvent as DomeMixedEvent, baseEvent.GetDynamicZone() as ISphereZone))
+        baseEvent as DomeEvent, baseEvent.GetDynamicZone() as ISphereZone))
       {
         if (RemoveDome(zoneId))
         {
@@ -1636,7 +1873,7 @@ namespace Oxide.Plugins
         }
       }
 
-      if (BotReSpawnAllowed(baseEvent as BotDomeMixedEvent))
+      if (BotReSpawnAllowed(baseEvent as BotDomeEvent))
       {
         if (KillBots(zoneId))
         {
@@ -1714,7 +1951,7 @@ namespace Oxide.Plugins
     private readonly Dictionary<string, List<SphereEntity>> _zoneSpheres = new();
 
     private static bool DomeCreateAllowed(
-      DomeMixedEvent domeEvent, ISphereZone sphereZone) =>
+      DomeEvent domeEvent, ISphereZone sphereZone) =>
       domeEvent?.DomesEnabled == true && sphereZone?.Radius > 0f;
 
     private bool CreateDome(
@@ -1740,6 +1977,30 @@ namespace Oxide.Plugins
       }
       _zoneSpheres.Add(zoneId, sphereEntities);
       return true;
+    }
+
+    private void ParentDome(string zoneId, Vector3 position, BaseEntity parentEntity = null)
+    {
+      if (string.IsNullOrEmpty(zoneId) ||
+          !_zoneSpheres.TryGetValue(zoneId, out var sphereEntities))
+      {
+        return;
+      }
+      foreach (var sphereEntity in sphereEntities)
+      {
+        if (null == parentEntity)
+        {
+          // un-tethering dome from parent entity
+          sphereEntity.SetParent(null, true);
+        }
+        else
+        {
+          // tethering dome to parent entity
+          sphereEntity.SetParent(parentEntity);
+          sphereEntity.transform.position = position;
+          sphereEntity.EnableGlobalBroadcast(parentEntity.globalBroadcast);
+        }
+      }
     }
 
     private bool RemoveDome(string zoneId)
@@ -1828,7 +2089,7 @@ namespace Oxide.Plugins
 
     #region BotReSpawn/MonBots Integration
 
-    private bool BotReSpawnAllowed(BotDomeMixedEvent botEvent)
+    private bool BotReSpawnAllowed(BotDomeEvent botEvent)
     {
       if (botEvent == null || string.IsNullOrEmpty(botEvent.BotProfileName))
       {
@@ -2155,7 +2416,7 @@ namespace Oxide.Plugins
           position == default ? autoEvent.Position : position,
           autoEvent.ZoneId);
       }
-      if (baseEvent is TimedEvent)
+      if (baseEvent is BaseTimedEvent)
       {
         return CreateDynamicZone(eventName, position);
       }
@@ -2389,31 +2650,21 @@ namespace Oxide.Plugins
             break;
           }
 
-          case CubeDynamicZone cdZone:
+          case SphereCubeParentDynamicZone scpdZone:
           {
-            zoneColor = Color.cyan;
-            if (cdZone.Size.sqrMagnitude > 0)
-            {
-              var rotation = cdZone.Rotation;
-              if (!cdZone.FixedRotation)
-              {
-                rotation += zoneData.transform.eulerAngles.y;
-              }
-              DrawCube(
-                player, configData.Chat.ShowDuration, zoneColor,
-                zonePosition, cdZone.Size, rotation);
-            }
-            break;
-          }
-
-          case SphereDynamicZone sdZone:
-          {
-            zoneColor = Color.magenta;
-            if (sdZone.Radius > 0)
+            zoneColor = Color.blue;
+            var rotation = zoneData.transform.eulerAngles.y;
+            if (scpdZone.Radius > 0)
             {
               DrawSphere(
+                player, configData.Chat.ShowDuration,zoneColor,
+                zonePosition, scpdZone.Radius, rotation);
+            }
+            else if (scpdZone.Size.sqrMagnitude > 0)
+            {
+              DrawCube(
                 player, configData.Chat.ShowDuration, zoneColor,
-                zonePosition, sdZone.Radius, 0);
+                zonePosition, scpdZone.Size, rotation);
             }
             break;
           }
@@ -2690,25 +2941,17 @@ namespace Oxide.Plugins
     }
 
     // NOTE: reserve order 20-29
-    public class DomeMixedEvent : BaseEvent
+    public abstract class DomeEvent : BaseEvent
     {
       [JsonProperty(PropertyName = "Enable Domes", Order = 20)]
       public bool DomesEnabled { get; set; } = true;
 
       [JsonProperty(PropertyName = "Domes Darkness", Order = 21)]
       public int DomesDarkness { get; set; } = 8;
-
-      [JsonProperty(PropertyName = "Dynamic PVP Zone Settings", Order = 22)]
-      public SphereCubeDynamicZone DynamicZone { get; set; } = new();
-
-      public override BaseDynamicZone GetDynamicZone()
-      {
-        return DynamicZone;
-      }
     }
 
     // NOTE: reserve order 30-39
-    public class BotDomeMixedEvent : DomeMixedEvent
+    public abstract class BotDomeEvent : DomeEvent
     {
       [JsonProperty(PropertyName = "Enable Bots (Need BotSpawn Plugin)", Order = 30)]
       public bool BotsEnabled { get; set; }
@@ -2718,55 +2961,91 @@ namespace Oxide.Plugins
     }
 
     // NOTE: reserve order 40-49
-    public class MonumentEvent : DomeMixedEvent
+    public class MonumentEvent : DomeEvent
     {
-      [JsonProperty(PropertyName = "Zone ID", Order = 40)]
+      [JsonProperty(PropertyName = "Dynamic PVP Zone Settings", Order = 40)]
+      public SphereCubeDynamicZone DynamicZone { get; set; } = new();
+
+      [JsonProperty(PropertyName = "Zone ID", Order = 41)]
       public string ZoneId { get; set; } = string.Empty;
 
-      [JsonProperty(PropertyName = "Transform Position", Order = 41)]
+      [JsonProperty(PropertyName = "Transform Position", Order = 42)]
       public Vector3 TransformPosition { get; set; }
+
+      public override BaseDynamicZone GetDynamicZone()
+      {
+        return DynamicZone;
+      }
     }
 
     // NOTE: reserve order 50-59
-    public class AutoEvent : BotDomeMixedEvent
+    public class AutoEvent : BotDomeEvent
     {
-      [JsonProperty(PropertyName = "Auto Start", Order = 50)]
+      [JsonProperty(PropertyName = "Dynamic PVP Zone Settings", Order = 50)]
+      public SphereCubeDynamicZone DynamicZone { get; set; } = new();
+
+      [JsonProperty(PropertyName = "Auto Start", Order = 51)]
       public bool AutoStart { get; set; }
 
-      [JsonProperty(PropertyName = "Zone ID", Order = 51)]
+      [JsonProperty(PropertyName = "Zone ID", Order = 52)]
       public string ZoneId { get; set; } = string.Empty;
 
-      [JsonProperty(PropertyName = "Position", Order = 52)]
+      [JsonProperty(PropertyName = "Position", Order = 53)]
       public Vector3 Position { get; set; }
+
+      public override BaseDynamicZone GetDynamicZone()
+      {
+        return DynamicZone;
+      }
     }
 
-    // NOTE: reserve order 60-69
-    public class TimedEvent : BotDomeMixedEvent
+    // NOTE: reserve order 60-64
+    public abstract class BaseTimedEvent : BotDomeEvent
     {
       [JsonProperty(PropertyName = "Event Duration", Order = 60)]
       public float Duration { get; set; } = 600f;
     }
 
-    // NOTE: reserve order 70-79
-    public class HackableCrateEvent : TimedEvent, ITimedDisable
+    // NOTE: reserve order 65-69
+    public class TimedEvent : BaseTimedEvent
     {
-      [JsonProperty(PropertyName = "Start Event When Spawned (If false, the event starts when unlocking)", Order = 70)]
+      [JsonProperty(PropertyName = "Dynamic PVP Zone Settings", Order = 65)]
+      public SphereCubeDynamicZone DynamicZone { get; set; } = new();
+
+      public override BaseDynamicZone GetDynamicZone()
+      {
+        return DynamicZone;
+      }
+    }
+
+    // NOTE: reserve order 70-79
+    public class HackableCrateEvent : BaseTimedEvent, ITimedDisable
+    {
+      [JsonProperty(PropertyName = "Dynamic PVP Zone Settings", Order = 70)]
+      public SphereCubeParentDynamicZone DynamicZone { get; set; } = new();
+
+      [JsonProperty(PropertyName = "Start Event When Spawned (If false, the event starts when unlocking)", Order = 71)]
       public bool StartWhenSpawned { get; set; } = true;
 
-      [JsonProperty(PropertyName = "Stop Event When Killed", Order = 71)]
+      [JsonProperty(PropertyName = "Stop Event When Killed", Order = 72)]
       public bool StopWhenKilled { get; set; }
 
-      [JsonProperty(PropertyName = "Event Timer Starts When Looted", Order = 72)]
+      [JsonProperty(PropertyName = "Event Timer Starts When Looted", Order = 73)]
       public bool TimerStartWhenLooted { get; set; }
 
-      [JsonProperty(PropertyName = "Event Timer Starts When Unlocked", Order = 73)]
+      [JsonProperty(PropertyName = "Event Timer Starts When Unlocked", Order = 74)]
       public bool TimerStartWhenUnlocked { get; set; }
 
-      [JsonProperty(PropertyName = "Excluding Hackable Crate On OilRig", Order = 74)]
+      [JsonProperty(PropertyName = "Excluding Hackable Crate On OilRig", Order = 75)]
       public bool ExcludeOilRig { get; set; } = true;
 
-      [JsonProperty(PropertyName = "Excluding Hackable Crate on Cargo Ship", Order = 75)]
+      [JsonProperty(PropertyName = "Excluding Hackable Crate on Cargo Ship", Order = 76)]
       public bool ExcludeCargoShip { get; set; } = true;
+
+      public override BaseDynamicZone GetDynamicZone()
+      {
+        return DynamicZone;
+      }
 
       public bool IsTimedDisabled()
       {
@@ -2775,16 +3054,24 @@ namespace Oxide.Plugins
     }
 
     // NOTE: reserve order 80-89
-    public class SupplyDropEvent : TimedEvent, ITimedDisable
+    public class SupplyDropEvent : BaseTimedEvent, ITimedDisable
     {
-      [JsonProperty(PropertyName = "Start Event When Spawned (If false, the event starts when landed)", Order = 24)]
+      [JsonProperty(PropertyName = "Dynamic PVP Zone Settings", Order = 80)]
+      public SphereCubeDynamicZone DynamicZone { get; set; } = new();
+
+      [JsonProperty(PropertyName = "Start Event When Spawned (If false, the event starts when landed)", Order = 81)]
       public bool StartWhenSpawned { get; set; } = true;
 
-      [JsonProperty(PropertyName = "Stop Event When Killed", Order = 80)]
+      [JsonProperty(PropertyName = "Stop Event When Killed", Order = 82)]
       public bool StopWhenKilled { get; set; }
 
-      [JsonProperty(PropertyName = "Event Timer Starts When Looted", Order = 81)]
+      [JsonProperty(PropertyName = "Event Timer Starts When Looted", Order = 83)]
       public bool TimerStartWhenLooted { get; set; }
+
+      public override BaseDynamicZone GetDynamicZone()
+      {
+        return DynamicZone;
+      }
 
       public bool IsTimedDisabled()
       {
@@ -2793,10 +3080,25 @@ namespace Oxide.Plugins
     }
 
     // NOTE: reserve order 90-99
-    public class CargoShipEvent : BaseEvent
+    public class CargoShipEvent : DomeEvent
     {
-      [JsonProperty(PropertyName = "Dynamic PVP Zone Settings", Order = 90)]
-      public CubeParentDynamicZone DynamicZone { get; set; } = new()
+      [JsonProperty(PropertyName = "Event State On Spawn (true=enabled, false=disabled)", Order = 90)]
+      public bool SpawnState { get; set; } = true;
+
+      [JsonProperty(PropertyName = "Event State On Harbor Approach", Order = 91)]
+      public bool ApproachState { get; set; } = true;
+
+      [JsonProperty(PropertyName = "Event State On Harbor Docking", Order = 92)]
+      public bool DockState { get; set; } = true;
+
+      [JsonProperty(PropertyName = "Event State On Harbor Departure", Order = 93)]
+      public bool DepartState { get; set; } = true;
+
+      [JsonProperty(PropertyName = "Event State On Map Egress", Order = 94)]
+      public bool EgressState { get; set; } = true;
+
+      [JsonProperty(PropertyName = "Dynamic PVP Zone Settings", Order = 95)]
+      public SphereCubeParentDynamicZone DynamicZone { get; set; } = new()
       {
         Size = new Vector3(25.9f, 43.3f, 152.8f),
         Center = new Vector3(0f, 21.6f, 6.6f)
@@ -2919,59 +3221,8 @@ namespace Oxide.Plugins
       protected abstract string[] GetZoneSettings(Transform transform = null);
     }
 
-    // NOTE: reserve order 120-129
-    public class SphereDynamicZone : BaseDynamicZone, ISphereZone
-    {
-      [JsonProperty(PropertyName = "Zone Radius", Order = 120)]
-      public float Radius { get; set; } = 100;
-
-      protected override string[] GetZoneSettings(Transform transform = null)
-      {
-        var zoneSettings = new List<string>
-        {
-          "radius", Radius.ToString(CultureInfo.InvariantCulture)
-        };
-        GetBaseZoneSettings(zoneSettings);
-        return zoneSettings.ToArray();
-      }
-    }
-
-    // NOTE: reserve order 130-139
-    public class CubeDynamicZone : BaseDynamicZone, ICubeZone
-    {
-      [JsonProperty(PropertyName = "Zone Size", Order = 130)]
-      public Vector3 Size { get; set; }
-
-      [JsonProperty(PropertyName = "Zone Rotation", Order = 131)]
-      public float Rotation { get; set; }
-
-      [JsonProperty(PropertyName = "Fixed Rotation", Order = 132)]
-      public bool FixedRotation { get; set; }
-
-      public override string[] ZoneSettings(Transform transform = null) =>
-        GetZoneSettings(transform);
-
-      protected override string[] GetZoneSettings(Transform transform = null)
-      {
-        var transformedRotation = Rotation;
-        if (transform != null && !FixedRotation)
-        {
-          transformedRotation += transform.rotation.eulerAngles.y;
-        }
-
-        var zoneSettings = new List<string>
-        {
-          "size", $"{Size.x} {Size.y} {Size.z}",
-          "rotation", transformedRotation.ToString(CultureInfo.InvariantCulture)
-        };
-
-        GetBaseZoneSettings(zoneSettings);
-        return zoneSettings.ToArray();
-      }
-    }
-
     // NOTE: reserve order 140-149
-    public class SphereCubeDynamicZone : BaseDynamicZone, ICubeZone, ISphereZone
+    public class SphereCubeDynamicZone : BaseDynamicZone, ISphereZone, ICubeZone, IRotateZone
     {
       [JsonProperty(PropertyName = "Zone Radius", Order = 140)]
       public float Radius { get; set; }
@@ -3013,29 +3264,36 @@ namespace Oxide.Plugins
       }
     }
 
-    // NOTE: reserve order 150-159
-    public class SphereParentDynamicZone : SphereDynamicZone, IParentZone
+    // NOTE: EXPERIMENTAL order 200-249
+    public class SphereCubeParentDynamicZone : BaseDynamicZone, ISphereZone, ICubeZone, IParentZone
     {
-      [JsonProperty(PropertyName = "Transform Position", Order = 150)]
-      public Vector3 Center { get; set; }
-    }
+      [JsonProperty(PropertyName = "Zone Radius", Order = 200)]
+      public float Radius { get; set; }
 
-    // NOTE: reserve order 160-169
-    public class CubeParentDynamicZone : CubeDynamicZone, IParentZone
-    {
-      [JsonProperty(PropertyName = "Transform Position", Order = 160)]
+      [JsonProperty(PropertyName = "Zone Size", Order = 201)]
+      public Vector3 Size { get; set; }
+
+      [JsonProperty(PropertyName = "Transform Position", Order = 202)]
       public Vector3 Center { get; set; }
+
+      public override string[] ZoneSettings(Transform transform = null) =>
+        GetZoneSettings(transform);
 
       protected override string[] GetZoneSettings(Transform transform = null)
       {
-        var zoneSettings = new List<string>
+        var zoneSettings = new List<string>();
+        if (Radius > 0f)
         {
-          "size",
-          $"{Size.x} {Size.y} {Size.z}"
-        };
+          zoneSettings.Add("radius");
+          zoneSettings.Add(Radius.ToString(CultureInfo.InvariantCulture));
+        }
+        else
+        {
+          zoneSettings.Add("size");
+          zoneSettings.Add($"{Size.x} {Size.y} {Size.z}");
+        }
         GetBaseZoneSettings(zoneSettings);
-        var array = zoneSettings.ToArray();
-        return array;
+        return zoneSettings.ToArray();
       }
     }
 
@@ -3049,15 +3307,18 @@ namespace Oxide.Plugins
     public interface ICubeZone
     {
       Vector3 Size { get; set; }
-
-      float Rotation { get; set; }
-
-      bool FixedRotation { get; set; }
     }
 
     public interface IParentZone
     {
       Vector3 Center { get; set; }
+    }
+
+    public interface IRotateZone
+    {
+      float Rotation { get; set; }
+
+      bool FixedRotation { get; set; }
     }
 
     #endregion Interface
