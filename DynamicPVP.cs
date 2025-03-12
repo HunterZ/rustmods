@@ -27,7 +27,12 @@ namespace Oxide.Plugins
     private readonly Plugin BotReSpawn, TruePVE, ZoneManager;
 
     private const string PermissionAdmin = "dynamicpvp.admin";
-    private const string PrefabSphere = "assets/prefabs/visualization/sphere.prefab";
+    private const string PrefabLargeOilRig =
+      "assets/bundled/prefabs/autospawn/monument/offshore/oilrig_1.prefab";
+    private const string PrefabOilRig =
+      "assets/bundled/prefabs/autospawn/monument/offshore/oilrig_2.prefab";
+    private const string PrefabSphere =
+      "assets/prefabs/visualization/sphere.prefab";
     private const string ZoneName = "DynamicPVP";
 
     private readonly Dictionary<string, Timer> _eventTimers = new();
@@ -36,8 +41,8 @@ namespace Oxide.Plugins
     private readonly Dictionary<string, string> _activeDynamicZones = new();
 
     private bool _dataChanged;
-    private Vector3 _oilRigPosition;
-    private Vector3 _largeOilRigPosition;
+    private Vector3 _oilRigPosition = Vector3.zero;
+    private Vector3 _largeOilRigPosition = Vector3.zero;
     private Coroutine _createEventsCoroutine;
     private bool _useExcludePlayer;
     private bool _subscribedCommands;
@@ -845,6 +850,30 @@ namespace Oxide.Plugins
 
     private bool IsOnTheOilRig(HackableLockedCrate hackableLockedCrate)
     {
+      // this may now get called before monument event creation if hackable
+      //  crates exist on startup, so populate oilrig positions here if needed
+      if (Vector3.zero == _oilRigPosition ||
+          Vector3.zero == _largeOilRigPosition)
+      {
+        foreach (LandmarkInfo landmarkInfo in TerrainMeta.Path.Landmarks)
+        {
+          switch (landmarkInfo.name)
+          {
+            case PrefabLargeOilRig:
+              _largeOilRigPosition = landmarkInfo.transform.position;
+              break;
+            case PrefabOilRig:
+              _oilRigPosition = landmarkInfo.transform.position;
+              break;
+          }
+          if (Vector3.zero != _oilRigPosition &&
+              Vector3.zero != _largeOilRigPosition)
+          {
+            break;
+          }
+        }
+      }
+
       if (_oilRigPosition != Vector3.zero && Vector3Ex.Distance2D(
             hackableLockedCrate.transform.position, _oilRigPosition) < 50f)
       {
@@ -1305,10 +1334,10 @@ namespace Oxide.Plugins
           case "assets/bundled/prefabs/autospawn/monument/harbor/harbor_2.prefab":
             monumentName += " B";
             break;
-          case "assets/bundled/prefabs/autospawn/monument/offshore/oilrig_1.prefab":
+          case PrefabLargeOilRig:
             _largeOilRigPosition = landmarkInfo.transform.position;
             break;
-          case "assets/bundled/prefabs/autospawn/monument/offshore/oilrig_2.prefab":
+          case PrefabOilRig:
             _oilRigPosition = landmarkInfo.transform.position;
             break;
         }
