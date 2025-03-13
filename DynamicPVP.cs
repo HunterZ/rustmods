@@ -175,6 +175,9 @@ namespace Oxide.Plugins
           configData.GeneralEvents.TimedSupply.Enabled)
       {
         Subscribe(nameof(OnCargoPlaneSignaled));
+        // this is now subscribed regardless of start on spawn-vs-landing, as we
+        //  need to tether the zone to the drop on landing in both cases
+        Subscribe(nameof(OnSupplyDropLanded));
       }
       if (configData.GeneralEvents.HackableCrate.Enabled &&
           configData.GeneralEvents.HackableCrate.TimerStartWhenUnlocked)
@@ -194,13 +197,6 @@ namespace Oxide.Plugins
           !configData.GeneralEvents.HackableCrate.StartWhenSpawned)
       {
         Subscribe(nameof(OnCrateHack));
-      }
-      if ((configData.GeneralEvents.TimedSupply.Enabled &&
-           !configData.GeneralEvents.TimedSupply.StartWhenSpawned) ||
-          (configData.GeneralEvents.SupplySignal.Enabled &&
-           !configData.GeneralEvents.SupplySignal.StartWhenSpawned))
-      {
-        Subscribe(nameof(OnSupplyDropLanded));
       }
       if ((configData.GeneralEvents.TimedSupply.Enabled &&
            configData.GeneralEvents.TimedSupply.StartWhenSpawned) ||
@@ -839,7 +835,8 @@ namespace Oxide.Plugins
         return;
       }
       // NOTE: we are already NextTick() protected here
-      HandleParentedEntityEvent(eventName, hackableLockedCrate);
+      HandleParentedEntityEvent(
+        eventName, hackableLockedCrate, parentOnCreate: true);
     }
 
     private static bool IsOnTheCargoShip(
@@ -974,8 +971,13 @@ namespace Oxide.Plugins
       {
         return;
       }
-      if (_activeDynamicZones.ContainsKey(supplyDrop.net.ID.ToString()))
+      var zoneId = supplyDrop.net.ID.ToString();
+      if (_activeDynamicZones.TryGetValue(zoneId, out var eventName))
       {
+        // event was already created on spawn
+        // attach the event zone to the entity
+        ParentZoneToEntity(
+          zoneId, GetBaseEvent(eventName), supplyDrop, false, false);
         return;
       }
       NextTick(() => OnSupplyDropEvent(supplyDrop, true));
@@ -1074,7 +1076,6 @@ namespace Oxide.Plugins
           PrintDebug("Event for supply signals disabled. Skipping event creation.");
           return;
         }
-
         if (isLanded == configData.GeneralEvents.SupplySignal.StartWhenSpawned)
         {
           PrintDebug($"{GetSupplyDropStateName(isLanded)} for supply signals disabled.");
@@ -1084,7 +1085,13 @@ namespace Oxide.Plugins
         entry.Value?.Destroy();
         activeSupplySignals.Remove(entry.Key);
         PrintDebug($"Removing Supply signal from active list. Active supply signals remaining: {activeSupplySignals.Count}");
-        HandleGeneralEvent(GeneralEventType.SupplySignal, supplyDrop, true);
+        var eventNameSS = GeneralEventType.SupplySignal.ToString();
+        if (!CanCreateDynamicPVP(eventNameSS, supplyDrop))
+        {
+          return;
+        }
+        HandleParentedEntityEvent(
+          eventNameSS, supplyDrop, parentOnCreate: isLanded);
         return;
       }
 
@@ -1099,8 +1106,13 @@ namespace Oxide.Plugins
         PrintDebug($"{GetSupplyDropStateName(isLanded)} for timed supply disabled.");
         return;
       }
-
-      HandleGeneralEvent(GeneralEventType.SupplyDrop, supplyDrop, true);
+      var eventNameSD = GeneralEventType.SupplyDrop.ToString();
+      if (!CanCreateDynamicPVP(eventNameSD, supplyDrop))
+      {
+        return;
+      }
+      HandleParentedEntityEvent(
+        eventNameSD, supplyDrop, parentOnCreate: isLanded);
     }
 
     private KeyValuePair<Vector3, Timer>? GetSupplySignalNear(Vector3 position)
@@ -1207,7 +1219,8 @@ namespace Oxide.Plugins
         {
           return;
         }
-        NextTick(() => HandleParentedEntityEvent(eventName, cargoShip));
+        NextTick(() => HandleParentedEntityEvent(
+          eventName, cargoShip, parentOnCreate: true));
       }
       else
       {
@@ -1241,7 +1254,8 @@ namespace Oxide.Plugins
       {
         return;
       }
-      NextTick(() => HandleParentedEntityEvent(eventName, cargoShip));
+      NextTick(() =>
+        HandleParentedEntityEvent(eventName, cargoShip, parentOnCreate: true));
     }
 
     private void OnEntityKill(CargoShip cargoShip)
@@ -1616,7 +1630,8 @@ namespace Oxide.Plugins
     //  CanCreateDynamicPVP() first, because this method can't easily implement
     //  calling them exactly once
     private void HandleParentedEntityEvent(
-      string eventName, BaseEntity parentEntity, bool delay = true)
+      string eventName, BaseEntity parentEntity, bool parentOnCreate,
+      bool delay = true)
     {
       if (parentEntity == null || parentEntity.net == null)
       {
@@ -1629,43 +1644,39 @@ namespace Oxide.Plugins
       }
       if (delay && baseEvent.EventStartDelay > 0f)
       {
-        timer.Once(baseEvent.EventStartDelay, () =>
-          HandleParentedEntityEvent(eventName, parentEntity, false));
+        timer.Once(baseEvent.EventStartDelay, () => HandleParentedEntityEvent(
+          eventName, parentEntity, parentOnCreate, false));
         return;
       }
       PrintDebug($"Trying to create parented entity eventName={eventName} on parentEntity={parentEntity}.");
+      var zonePosition = parentEntity.transform.position;
+      if (!parentOnCreate)
+      {
+        var groundY = TerrainMeta.HeightMap.GetHeight(zonePosition);
+        if (Math.Abs(zonePosition.y - groundY) < 10.0f)
+        {
+          // entity is already near the ground; force enable immediate parenting
+          // this catches the case that e.g. a Supply Drop landed during the
+          //  event start delay
+          parentOnCreate = true;
+        }
+        else
+        {
+          // entity is not near the ground yet; start the zone on the ground
+          zonePosition.y = groundY;
+        }
+      }
       var zoneId = parentEntity.net.ID.ToString();
-      if (!CreateDynamicZone(
-        eventName, parentEntity.transform.position, zoneId, delay: false))
+      if (!CreateDynamicZone(eventName, zonePosition, zoneId, delay: false))
       {
         return;
       }
-      // attach the zone to the parent entity, so that they move together
-      timer.Once(0.25f, () =>
+      if (parentOnCreate)
       {
-        var zone = GetZoneById(zoneId);
-        if (parentEntity == null || zone == null)
-        {
-          PrintDebug($"ERROR: The zoneId={zoneId} created by eventName={eventName} has null zone={zone} and/or parentEntity={parentEntity}.", DebugLevel.ERROR);
-          DeleteDynamicZone(zoneId);
-          return;
-        }
-        // only support parenting if event implements IParentZone
-        if (baseEvent.GetDynamicZone() is not IParentZone parentZone)
-        {
-          PrintDebug($"ERROR: Not parenteing zoneId={zoneId} for eventName={eventName} because its DynamicZone does not implement IParentZone.", DebugLevel.ERROR);
-          DeleteDynamicZone(zoneId);
-          return;
-        }
-        var zoneTransform = zone.transform;
-        var position = parentEntity.transform.TransformPoint(parentZone.Center);
-        zoneTransform.SetParent(parentEntity.transform);
-        zoneTransform.rotation = parentEntity.transform.rotation;
-        zoneTransform.position = position;
-        PrintDebug($"The zone={zone} with zoneId={zoneId} for eventName={eventName} was parented to parentEntity={parentEntity}.");
-        // also parent any domes
-        ParentDome(zoneId, position, parentEntity);
-      });
+        // attach the zone to the parent entity, so that they move together
+        ParentZoneToEntity(zoneId, baseEvent, parentEntity, true, true);
+      }
+      // else something will attach it later
     }
 
     private bool HandleMonumentEvent(
@@ -2289,6 +2300,41 @@ namespace Oxide.Plugins
 
     private List<BasePlayer> GetPlayersInZone(string zoneId) =>
       ZoneManager.Call("GetPlayersInZone", zoneId) as List<BasePlayer>;
+
+    private void ParentZoneToEntity(
+      string zoneId, BaseEvent baseEvent, BaseEntity parentEntity,
+      bool deleteOnFailure, bool delay = true)
+    {
+      if (delay)
+      {
+        timer.Once(0.25f, () => ParentZoneToEntity(
+          zoneId, baseEvent, parentEntity, deleteOnFailure, false));
+        return;
+      }
+      var zone = GetZoneById(zoneId);
+      if (parentEntity == null || zone == null)
+      {
+        PrintDebug($"ERROR: The zoneId={zoneId} has null zone={zone} and/or parentEntity={parentEntity}.", DebugLevel.ERROR);
+        if (deleteOnFailure) DeleteDynamicZone(zoneId);
+        return;
+      }
+      // only support parenting if event implements IParentZone
+      if (baseEvent.GetDynamicZone() is not IParentZone parentZone)
+      {
+        PrintDebug($"ERROR: Not parenting zoneId={zoneId} to parentEntity={parentEntity} because event's DynamicZone does not implement IParentZone.", DebugLevel.ERROR);
+        if (deleteOnFailure) DeleteDynamicZone(zoneId);
+        return;
+      }
+      var zoneTransform = zone.transform;
+      var position = parentEntity.transform.TransformPoint(parentZone.Center);
+      zoneTransform.SetParent(parentEntity.transform);
+      zoneTransform.rotation = parentEntity.transform.rotation;
+      zoneTransform.position = position;
+      PrintDebug($"Parented zoneId={zoneId} to parentEntity={parentEntity}.");
+      // also parent any domes
+      ParentDome(zoneId, position, parentEntity);
+      return;
+    }
 
     #endregion ZoneManager Integration
 
@@ -3086,7 +3132,7 @@ namespace Oxide.Plugins
     public class SupplyDropEvent : BaseTimedEvent, ITimedDisable
     {
       [JsonProperty(PropertyName = "Dynamic PVP Zone Settings", Order = 80)]
-      public SphereCubeDynamicZone DynamicZone { get; set; } = new();
+      public SphereCubeParentDynamicZone DynamicZone { get; set; } = new();
 
       [JsonProperty(PropertyName = "Start Event When Spawned (If false, the event starts when landed)", Order = 81)]
       public bool StartWhenSpawned { get; set; } = true;
