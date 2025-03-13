@@ -17,7 +17,7 @@ using Random = UnityEngine.Random;
 
 namespace Oxide.Plugins
 {
-  [Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "4.3.0", ResourceId = 2728)]
+  [Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "4.4.0", ResourceId = 2728)]
   [Description("Creates temporary PvP zones on certain actions/events")]
   public class DynamicPVP : RustPlugin
   {
@@ -974,10 +974,16 @@ namespace Oxide.Plugins
       var zoneId = supplyDrop.net.ID.ToString();
       if (_activeDynamicZones.TryGetValue(zoneId, out var eventName))
       {
-        // event was already created on spawn
-        // attach the event zone to the entity
-        ParentZoneToEntity(
-          zoneId, GetBaseEvent(eventName), supplyDrop, false, false);
+        // event was already created on spawn; parent the event to the entity,
+        //  so that they move together
+        // NOTES:
+        // - don't delete on failure, because leaving the existing zone on the
+        //    ground is better than deleting it
+        // - no need to delay parenting, as the zone presumably has already
+        //    existed for a bit
+        ParentEventToEntity(
+          zoneId, GetBaseEvent(eventName), supplyDrop, deleteOnFailure: false,
+          delay: false);
         return;
       }
       NextTick(() => OnSupplyDropEvent(supplyDrop, true));
@@ -1673,8 +1679,10 @@ namespace Oxide.Plugins
       }
       if (parentOnCreate)
       {
-        // attach the zone to the parent entity, so that they move together
-        ParentZoneToEntity(zoneId, baseEvent, parentEntity, true, true);
+        // attach the event (zone, plus domes if applicable) to the parent
+        //  entity, so that they move together
+        ParentEventToEntity(
+          zoneId, baseEvent, parentEntity, deleteOnFailure: true);
       }
       // else something will attach it later
     }
@@ -2301,13 +2309,15 @@ namespace Oxide.Plugins
     private List<BasePlayer> GetPlayersInZone(string zoneId) =>
       ZoneManager.Call("GetPlayersInZone", zoneId) as List<BasePlayer>;
 
-    private void ParentZoneToEntity(
+    // parent event's zone and (if applicable) domes to a given entity, so that
+    //  they move together
+    private void ParentEventToEntity(
       string zoneId, BaseEvent baseEvent, BaseEntity parentEntity,
       bool deleteOnFailure, bool delay = true)
     {
       if (delay)
       {
-        timer.Once(0.25f, () => ParentZoneToEntity(
+        timer.Once(0.25f, () => ParentEventToEntity(
           zoneId, baseEvent, parentEntity, deleteOnFailure, false));
         return;
       }
