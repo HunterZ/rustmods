@@ -17,7 +17,7 @@ using Random = UnityEngine.Random;
 
 namespace Oxide.Plugins
 {
-  [Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "4.4.0", ResourceId = 2728)]
+  [Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "4.4.1", ResourceId = 2728)]
   [Description("Creates temporary PvP zones on certain actions/events")]
   public class DynamicPVP : RustPlugin
   {
@@ -1584,7 +1584,7 @@ namespace Oxide.Plugins
         }
       }
 
-      var result = GetPlayerZoneIds(player);
+      var result = ZM_GetPlayerZoneIDs(player);
       if (result == null ||
           result.Length == 0 ||
           (result.Length == 1 && string.IsNullOrEmpty(result[0])))
@@ -1821,7 +1821,7 @@ namespace Oxide.Plugins
         }
       }
 
-      if (TryCreateMapping(zoneId, baseEvent.Mapping))
+      if (TP_AddOrUpdateMapping(zoneId, baseEvent.Mapping))
       {
         stringBuilder.Append("Mapping,");
       }
@@ -1875,7 +1875,7 @@ namespace Oxide.Plugins
         if (baseEvent.GetDynamicZone() is IParentZone)
         {
           // untether zone from parent entity
-          GetZoneById(zoneId)?.transform.SetParent(null, true);
+          ZM_GetZoneByID(zoneId)?.transform.SetParent(null, true);
           // also untether any domes
           ParentDome(zoneId, Vector3.zero, null);
         }
@@ -1933,7 +1933,7 @@ namespace Oxide.Plugins
         }
       }
 
-      if (TryRemoveMapping(zoneId))
+      if (TP_RemoveMapping(zoneId))
       {
         stringBuilder.Append("Mapping,");
       }
@@ -1942,7 +1942,7 @@ namespace Oxide.Plugins
         PrintDebug($"ERROR: Mapping NOT removed for zoneId={zoneId} with eventName={eventName}.", DebugLevel.ERROR);
       }
 
-      var players = GetPlayersInZone(zoneId);
+      var players = ZM_GetPlayersInZone(zoneId);
       var zoneRemoved = RemoveZone(zoneId, eventName);
       if (zoneRemoved)
       {
@@ -1971,7 +1971,7 @@ namespace Oxide.Plugins
 
     private void DeleteOldDynamicZones()
     {
-      var zoneIds = GetZoneIds();
+      var zoneIds = ZM_GetZoneIDs();
       if (zoneIds == null || zoneIds.Length <= 0)
       {
         return;
@@ -1979,14 +1979,14 @@ namespace Oxide.Plugins
       int attempts = 0, successes = 0;
       foreach (var zoneId in zoneIds)
       {
-        if (GetZoneName(zoneId) == ZoneName)
+        if (ZM_GetZoneName(zoneId) == ZoneName)
         {
           attempts++;
           if (RemoveZone(zoneId))
           {
             successes++;
           }
-          TryRemoveMapping(zoneId);
+          TP_RemoveMapping(zoneId);
         }
       }
       PrintDebug($"Deleted {successes} of {attempts} obsolete DynamicPVP zone(s)", DebugLevel.WARNING);
@@ -2099,7 +2099,7 @@ namespace Oxide.Plugins
         if (configData.Global.PvpDelayFlags.HasFlag(
               PvpDelayTypes.ZonePlayersCanDamageDelayedPlayers) &&
             !string.IsNullOrEmpty(victimLeftZone.zoneId) &&
-            IsPlayerInZone(victimLeftZone, attacker))
+            ZM_IsPlayerInZone(victimLeftZone, attacker))
         {
           //ZonePlayer attack DelayedPlayer
           return true;
@@ -2118,7 +2118,7 @@ namespace Oxide.Plugins
           configData.Global.PvpDelayFlags.HasFlag(
             PvpDelayTypes.DelayedPlayersCanDamageZonePlayers) &&
           !string.IsNullOrEmpty(attackerLeftZone2.zoneId) &&
-          IsPlayerInZone(attackerLeftZone2, victim))
+          ZM_IsPlayerInZone(attackerLeftZone2, victim))
       {
         //DelayedPlayer attack ZonePlayer
         return true;
@@ -2126,11 +2126,11 @@ namespace Oxide.Plugins
       return null;
     }
 
-    private static bool TryCreateMapping(string zoneId, string mapping) =>
+    private static bool TP_AddOrUpdateMapping(string zoneId, string mapping) =>
         Convert.ToBoolean(
           Interface.CallHook("AddOrUpdateMapping", zoneId, mapping));
 
-    private static bool TryRemoveMapping(string zoneId) =>
+    private static bool TP_RemoveMapping(string zoneId) =>
         Convert.ToBoolean(Interface.CallHook("RemoveMapping", zoneId));
 
     #endregion TruePVE/NextGenPVE Integration
@@ -2156,7 +2156,7 @@ namespace Oxide.Plugins
       {
         return false;
       }
-      var result = CreateGroupSpawn(location, profileName, groupId);
+      var result = BS_AddGroupSpawn(location, profileName, groupId);
       if (result == null || result.Length < 2)
       {
         PrintDebug("AddGroupSpawn returned invalid response.");
@@ -2182,7 +2182,7 @@ namespace Oxide.Plugins
       {
         return true;
       }
-      var result = RemoveGroupSpawn(groupId);
+      var result = BS_RemoveGroupSpawn(groupId);
       if (result == null || result.Length < 2)
       {
         PrintDebug("RemoveGroupSpawn returned invalid response.");
@@ -2196,12 +2196,12 @@ namespace Oxide.Plugins
       return true;
     }
 
-    private string[] CreateGroupSpawn(
+    private string[] BS_AddGroupSpawn(
       Vector3 location, string profileName, string groupId, int quantity = 0) =>
       BotReSpawn?.Call(
         "AddGroupSpawn", location, profileName, groupId, quantity) as string[];
 
-    private string[] RemoveGroupSpawn(string groupId) =>
+    private string[] BS_RemoveGroupSpawn(string groupId) =>
       BotReSpawn?.Call("RemoveGroupSpawn", groupId) as string[];
 
     #endregion BotReSpawn/MonBots Integration
@@ -2291,22 +2291,22 @@ namespace Oxide.Plugins
       }
     }
 
-    private string[] GetZoneIds() => ZoneManager.Call("GetZoneIDs") as string[];
+    private string[] ZM_GetZoneIDs() => ZoneManager.Call("GetZoneIDs") as string[];
 
-    private string GetZoneName(string zoneId) =>
+    private string ZM_GetZoneName(string zoneId) =>
       Convert.ToString(ZoneManager.Call("GetZoneName", zoneId));
 
-    private ZoneManager.Zone GetZoneById(string zoneId) =>
+    private ZoneManager.Zone ZM_GetZoneByID(string zoneId) =>
       ZoneManager.Call("GetZoneByID", zoneId) as ZoneManager.Zone;
 
-    private string[] GetPlayerZoneIds(BasePlayer player) =>
+    private string[] ZM_GetPlayerZoneIDs(BasePlayer player) =>
       ZoneManager.Call("GetPlayerZoneIDs", player) as string[];
 
-    private bool IsPlayerInZone(LeftZone leftZone, BasePlayer player) =>
+    private bool ZM_IsPlayerInZone(LeftZone leftZone, BasePlayer player) =>
       Convert.ToBoolean(
         ZoneManager.Call("IsPlayerInZone", leftZone.zoneId, player));
 
-    private List<BasePlayer> GetPlayersInZone(string zoneId) =>
+    private List<BasePlayer> ZM_GetPlayersInZone(string zoneId) =>
       ZoneManager.Call("GetPlayersInZone", zoneId) as List<BasePlayer>;
 
     // parent event's zone and (if applicable) domes to a given entity, so that
@@ -2321,7 +2321,7 @@ namespace Oxide.Plugins
           zoneId, baseEvent, parentEntity, deleteOnFailure, false));
         return;
       }
-      var zone = GetZoneById(zoneId);
+      var zone = ZM_GetZoneByID(zoneId);
       if (parentEntity == null || zone == null)
       {
         PrintDebug($"ERROR: The zoneId={zoneId} has null zone={zone} and/or parentEntity={parentEntity}.", DebugLevel.ERROR);
@@ -2705,7 +2705,7 @@ namespace Oxide.Plugins
 
       foreach (var activeEvent in _activeDynamicZones)
       {
-        var zoneData = GetZoneById(activeEvent.Key);
+        var zoneData = ZM_GetZoneByID(activeEvent.Key);
         if (null == zoneData) continue;
         var zonePosition = zoneData.transform.position;
         var baseZone = GetBaseEvent(activeEvent.Value)?.GetDynamicZone();
