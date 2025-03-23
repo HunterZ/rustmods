@@ -1114,7 +1114,7 @@ namespace Oxide.Plugins
       var supplySignal = GetSupplySignalNear(supplyDrop.transform.position);
       if (null != supplySignal)
       {
-        PrintDebug($"Supply drop is probably from supply signal");
+        PrintDebug("Supply drop is probably from supply signal");
         if (!configData.GeneralEvents.SupplySignal.Enabled)
         {
           PrintDebug("Event for supply signals disabled. Skipping event creation.");
@@ -1139,7 +1139,7 @@ namespace Oxide.Plugins
         return;
       }
 
-      PrintDebug($"Supply drop is probably NOT from supply signal");
+      PrintDebug("Supply drop is probably NOT from supply signal");
       if (!configData.GeneralEvents.TimedSupply.Enabled)
       {
         PrintDebug("Event for timed supply disabled. Skipping event creation.");
