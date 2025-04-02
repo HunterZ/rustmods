@@ -1,6 +1,7 @@
 ﻿//Requires: ZoneManager
 
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -12,19 +13,16 @@ using Oxide.Core;
 using Oxide.Core.Libraries.Covalence;
 using Oxide.Core.Plugins;
 using UnityEngine;
-using IEnumerator = System.Collections.IEnumerator;
-using Random = UnityEngine.Random;
 
 namespace Oxide.Plugins
 {
-  [Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "4.5.0", ResourceId = 2728)]
+  [Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "4.6.0", ResourceId = 2728)]
   [Description("Creates temporary PvP zones on certain actions/events")]
   public class DynamicPVP : RustPlugin
   {
     #region Fields
 
-    [PluginReference]
-    private readonly Plugin BotReSpawn, TruePVE, ZoneManager;
+    [PluginReference] private readonly Plugin BotReSpawn, TruePVE, ZoneManager;
 
     private const string PermissionAdmin = "dynamicpvp.admin";
     private const string PrefabLargeOilRig =
@@ -40,14 +38,22 @@ namespace Oxide.Plugins
     //ID -> EventName
     private readonly Dictionary<string, string> _activeDynamicZones = new();
 
-    private bool _dataChanged;
     private Vector3 _oilRigPosition = Vector3.zero;
     private Vector3 _largeOilRigPosition = Vector3.zero;
-    private Coroutine _createEventsCoroutine;
     private bool _useExcludePlayer;
     private bool _subscribedCommands;
     private bool _subscribedDamage;
     private bool _subscribedZones;
+    private bool _brokenLabs;
+    private bool _brokenTunnels;
+    private bool _dataChanged;
+    private Coroutine _createEventsCoroutine;
+    private readonly YieldInstruction _fastYield = null;
+    private readonly YieldInstruction _throttleYield =
+      CoroutineEx.waitForSeconds(0.1f);
+    private readonly YieldInstruction _pauseYield =
+      CoroutineEx.waitForSeconds(0.5f);
+    private float _targetFps = -1.0f;
 
     public static DynamicPVP Instance { get; private set; }
 
@@ -101,12 +107,29 @@ namespace Oxide.Plugins
       ZoneRemoved  = 1 << 3
     }
 
+    private readonly Collider[] _colliderBuffer = new Collider[8];
+
+    private enum MonumentEventType
+    {
+      Default,
+      Custom,
+      TunnelEntrance,
+      TunnelLink,
+      TunnelSection,
+      UnderwaterLabs
+    }
+
+    private readonly Dictionary<string, OriginalMonumentGeometry>
+      _originalMonumentGeometries = new();
+
     #endregion Fields
 
     #region Oxide Hooks
 
     private void Init()
     {
+      _brokenLabs = _brokenTunnels = false;
+
       Instance = this;
       LoadData();
       permission.RegisterPermission(PermissionAdmin, this);
@@ -133,6 +156,7 @@ namespace Oxide.Plugins
       {
         _debugStringBuilder = Pool.Get<StringBuilder>();
       }
+
       // setup new TruePVE "ExcludePlayer" support
       _useExcludePlayer = configData.Global.UseExcludePlayer;
       // if ExcludePlayer is disabled in config but is supported...
@@ -155,6 +179,7 @@ namespace Oxide.Plugins
           Puts("Some/all PVP delay flags NOT active, but TruePVE 2.2.3+ detected; please consider switching to TruePVE PVP Delay API in the config file for performance and cross-plugin support");
         }
       } // else ExcludePlayer is already enabled, or TruePVE 2.2.3+ not running
+
       _subscribedCommands = _subscribedDamage = _subscribedZones = false;
     }
 
@@ -224,8 +249,12 @@ namespace Oxide.Plugins
         Subscribe(nameof(OnEntityKill));
         Subscribe(nameof(OnEntitySpawned));
       }
-      _createEventsCoroutine =
-        ServerMgr.Instance.StartCoroutine(CreateEvents());
+
+      NextTick(() =>
+      {
+        _createEventsCoroutine =
+          ServerMgr.Instance.StartCoroutine(CreateEvents());
+      });
     }
 
     private void Unload()
@@ -262,6 +291,7 @@ namespace Oxide.Plugins
             sphereEntity.KillMessage();
           }
         }
+
         Pool.FreeUnmanaged(ref sphereEntities);
       }
 
@@ -273,15 +303,18 @@ namespace Oxide.Plugins
       if (null == _debugStringBuilder) return;
       Pool.FreeUnmanaged(ref _debugStringBuilder);
       _debugStringBuilder = null;
+
+      _originalMonumentGeometries.Clear();
     }
 
-    private void OnServerSave() => timer.Once(Random.Range(0f, 60f), () =>
-    {
-      SaveDebug();
-      if (!_dataChanged) return;
-      SaveData();
-      _dataChanged = false;
-    });
+    private void OnServerSave() =>
+      timer.Once(UnityEngine.Random.Range(0f, 60f), () =>
+      {
+        SaveDebug();
+        if (!_dataChanged) return;
+        SaveData();
+        _dataChanged = false;
+      });
 
     private void OnPlayerRespawned(BasePlayer player)
     {
@@ -320,12 +353,14 @@ namespace Oxide.Plugins
         leftZone = Pool.Get<LeftZone>();
         _pvpDelays.Add(player.userID, leftZone);
       }
+
       leftZone.zoneId = zoneId;
       leftZone.eventName = eventName;
       if (added)
       {
         CheckHooks(HookCheckReasons.DelayAdded);
       }
+
       return leftZone;
     }
 
@@ -381,14 +416,17 @@ namespace Oxide.Plugins
         {
           continue;
         }
+
         if (baseEvent.CommandWorksForPVPDelay ||
             _activeDynamicZones.ContainsValue(leftZone.eventName))
         {
           Pool.FreeUnmanaged(ref checkedEvents);
           return true;
         }
+
         checkedEvents.Add(leftZone.eventName);
       }
+
       foreach (var eventName in _activeDynamicZones.Values)
       {
         // optimization: skip if we've already checked this in the other loop
@@ -396,11 +434,13 @@ namespace Oxide.Plugins
         {
           continue;
         }
+
         var baseEvent = GetBaseEvent(eventName);
         if (null == baseEvent || baseEvent.CommandList.Count <= 0) continue;
         Pool.FreeUnmanaged(ref checkedEvents);
         return true;
       }
+
       Pool.FreeUnmanaged(ref checkedEvents);
       return false;
     }
@@ -413,11 +453,13 @@ namespace Oxide.Plugins
       {
         return;
       }
+
       // also return if subscription status already matches command status
       if (HasCommands() == _subscribedCommands)
       {
         return;
       }
+
       // subscription status needs to change, so toggle things
       if (_subscribedCommands)
       {
@@ -429,6 +471,7 @@ namespace Oxide.Plugins
         Subscribe(nameof(OnPlayerCommand));
         Subscribe(nameof(OnServerCommand));
       }
+
       _subscribedCommands = !_subscribedCommands;
     }
 
@@ -443,17 +486,14 @@ namespace Oxide.Plugins
         _subscribedDamage = false;
         return;
       }
+
       // optimization: abort if adding a delay and already subscribed, or if
       //  removing a delay and already unsubscribed
-      if (added == _subscribedDamage)
-      {
-        return;
-      }
+      if (added == _subscribedDamage) return;
+
       // also return if subscription status already matches delay status
-      if (_pvpDelays.Count > 0 == _subscribedDamage)
-      {
-        return;
-      }
+      if (_pvpDelays.Count > 0 == _subscribedDamage) return;
+
       // subscription status needs to change, so toggle things
       if (_subscribedDamage)
       {
@@ -463,6 +503,7 @@ namespace Oxide.Plugins
       {
         Subscribe(nameof(CanEntityTakeDamage));
       }
+
       _subscribedDamage = !_subscribedDamage;
     }
 
@@ -474,11 +515,13 @@ namespace Oxide.Plugins
       {
         return;
       }
+
       // also return if subscription status already matches zone status
       if (_activeDynamicZones.Count > 0 == _subscribedZones)
       {
         return;
       }
+
       // subscription status needs to change, so toggle things
       if (_subscribedZones)
       {
@@ -490,6 +533,7 @@ namespace Oxide.Plugins
         Subscribe(nameof(OnEnterZone));
         Subscribe(nameof(OnExitZone));
       }
+
       _subscribedZones = !_subscribedZones;
     }
 
@@ -531,11 +575,13 @@ namespace Oxide.Plugins
       {
         throw new ArgumentNullException(nameof(eventName));
       }
+
       if (Interface.CallHook("OnGetBaseEvent", eventName)
           is BaseEvent externalEvent)
       {
         return externalEvent;
       }
+
       if (Enum.IsDefined(typeof(GeneralEventType), eventName) &&
           Enum.TryParse(eventName, true, out GeneralEventType generalEventType))
       {
@@ -556,23 +602,29 @@ namespace Oxide.Plugins
           case GeneralEventType.CargoShip:
             return configData.GeneralEvents.CargoShip;
           default:
-            PrintDebug($"ERROR: Missing BaseEvent lookup for generalEventType={generalEventType} for eventName={eventName}.", DebugLevel.Error);
+            PrintDebug(
+              $"ERROR: Missing BaseEvent lookup for generalEventType={generalEventType} for eventName={eventName}.",
+              DebugLevel.Error);
             return null;
         }
       }
+
       if (storedData.autoEvents.TryGetValue(eventName, out var autoEvent))
       {
         return autoEvent;
       }
+
       if (storedData.timedEvents.TryGetValue(eventName, out var timedEvent))
       {
         return timedEvent;
       }
+
       if (configData.MonumentEvents.TryGetValue(
             eventName, out var monumentEvent))
       {
         return monumentEvent;
       }
+
       PrintDebug($"ERROR: Failed to get base event settings for {eventName}", DebugLevel.Error);
       return null;
     }
@@ -583,13 +635,32 @@ namespace Oxide.Plugins
 
     #region Startup
 
+    // utility method to return an appropriate yield instruction based on
+    //  whether this is a long pause for debug logging to catch up, whether
+    //  current server framerate is too low, etc.
+    private YieldInstruction DynamicYield(bool pause = false)
+    {
+      // perform one-time caching of target FPS
+      if (_targetFps <= 0) _targetFps = Mathf.Min(ConVar.FPS.limit, 30);
+
+      return
+        pause && configData.Global.DebugEnabled ? _pauseYield :
+        Performance.report.frameRate >= _targetFps ? _fastYield :
+        _throttleYield;
+    }
+
     // coroutine to orchestrate creation of all relevant events on startup
     private IEnumerator CreateEvents()
     {
+      var startTime = DateTime.UtcNow;
+      Puts("Creating General Events");
       yield return CreateGeneralEvents();
+      // this will get logged at a lower level
       yield return CreateMonumentEvents();
+      Puts("Creating Auto Events");
       yield return CreateAutoEvents();
       _createEventsCoroutine = null;
+      Puts($"Startup event creation completed in {(DateTime.UtcNow - startTime).TotalSeconds} seconds");
     }
 
     #endregion Startup
@@ -621,23 +692,23 @@ namespace Oxide.Plugins
             // Cargo Ship Event
             case CargoShip cargoShip:
               StartupCargoShip(cargoShip);
-              yield return CoroutineEx.waitForFixedUpdate;
+              yield return DynamicYield();
               break;
             // Excavator Ignition Event
             case DieselEngine dieselEngine:
               StartupDieselEngine(dieselEngine);
-              yield return CoroutineEx.waitForFixedUpdate;
+              yield return DynamicYield();
               break;
             // Hackable Crate Event
             case HackableLockedCrate hackableLockedCrate:
               StartupHackableLockedCrate(hackableLockedCrate);
-              yield return CoroutineEx.waitForFixedUpdate;
+              yield return DynamicYield();
               break;
           }
         }
       }
 
-      yield return null;
+      yield return DynamicYield(true);
     }
 
     #region ExcavatorIgnition Event
@@ -652,16 +723,19 @@ namespace Oxide.Plugins
         PrintDebug("DieselEngine is null");
         return;
       }
+
       if (!configData.GeneralEvents.ExcavatorIgnition.Enabled)
       {
         PrintDebug("Excavator Ignition Event is disabled");
         return;
       }
+
       if (!dieselEngine.IsOn())
       {
         PrintDebug("DieselEngine is off");
         return;
       }
+
       PrintDebug("Found activated Giant Excavator");
       OnDieselEngineToggled(dieselEngine);
     }
@@ -673,10 +747,12 @@ namespace Oxide.Plugins
         PrintDebug("ERROR: OnDieselEngineToggled(): Engine or Net is null", DebugLevel.Error);
         return;
       }
+
       var zoneId = dieselEngine.net.ID.ToString();
       if (dieselEngine.IsOn())
       {
-        PrintDebug($"OnDieselEngineToggled(): Requesting 'just-in-case' delete of zoneId={zoneId} due to excavator enable");
+        PrintDebug(
+          $"OnDieselEngineToggled(): Requesting 'just-in-case' delete of zoneId={zoneId} due to excavator enable");
         DeleteDynamicZone(zoneId);
         HandleGeneralEvent(
           GeneralEventType.ExcavatorIgnition, dieselEngine, true);
@@ -703,23 +779,27 @@ namespace Oxide.Plugins
         PrintDebug("HackableLockedCrate is null");
         return;
       }
+
       if (!configData.GeneralEvents.HackableCrate.Enabled)
       {
         PrintDebug("Hackable Crate Event is disabled");
         return;
       }
+
       if (!configData.GeneralEvents.HackableCrate.StopWhenKilled)
       {
         PrintDebug("Hackable Crate Event doesn't stop when killed");
         return;
       }
+
       if (0 != hackableLockedCrate.FirstLooterId &&
           configData.GeneralEvents.HackableCrate.TimerStartWhenLooted)
       {
         // looted and stop after time since loot enabled
         // we don't know elapsed time, so err on the side of assuming the event
         //  has already ended
-        PrintDebug("Found looted hackable locked crate, and TimerStartWhenLooted set; ignoring because elapsed time unknown");
+        PrintDebug(
+          "Found looted hackable locked crate, and TimerStartWhenLooted set; ignoring because elapsed time unknown");
       }
       else if (
         hackableLockedCrate.HasFlag(HackableLockedCrate.Flag_FullyHacked) &&
@@ -728,7 +808,8 @@ namespace Oxide.Plugins
         // unlocked and stop after time since unlock enabled
         // we don't know elapsed time, so err on the side of assuming the event
         //  has already ended
-        PrintDebug("Found unlocked hackable locked crate and TimerStartWhenUnlocked set; ignoring because elapsed time unknown");
+        PrintDebug(
+          "Found unlocked hackable locked crate and TimerStartWhenUnlocked set; ignoring because elapsed time unknown");
       }
       else if (hackableLockedCrate.HasFlag(HackableLockedCrate.Flag_Hacking) &&
                !configData.GeneralEvents.HackableCrate.StartWhenSpawned)
@@ -745,7 +826,8 @@ namespace Oxide.Plugins
       }
       else
       {
-        PrintDebug("Found hackable locked crate, but ignoring because of either start on hack, or stop on timer with elapsed time unknown");
+        PrintDebug(
+          "Found hackable locked crate, but ignoring because of either start on hack, or stop on timer with elapsed time unknown");
       }
     }
 
@@ -775,6 +857,7 @@ namespace Oxide.Plugins
         PrintDebug("ERROR: OnCrateHack(): Crate or Net is null", DebugLevel.Error);
         return;
       }
+
       PrintDebug("OnCrateHack(): Trying to create hackable crate hack event");
       NextTick(() => LockedCrateEvent(hackableLockedCrate));
     }
@@ -786,29 +869,35 @@ namespace Oxide.Plugins
         PrintDebug("ERROR: OnCrateHackEnd(): Crate or Net is null", DebugLevel.Error);
         return;
       }
+
       var zoneId = hackableLockedCrate.net.ID.ToString();
-      PrintDebug($"OnCrateHackEnd(): Scheduling delete of zoneId={zoneId} in {configData.GeneralEvents.HackableCrate.Duration}s");
+      PrintDebug(
+        $"OnCrateHackEnd(): Scheduling delete of zoneId={zoneId} in {configData.GeneralEvents.HackableCrate.Duration}s");
       HandleDeleteDynamicZone(
         zoneId,
         configData.GeneralEvents.HackableCrate.Duration,
         GeneralEventType.HackableCrate.ToString());
     }
 
-    private void OnLootEntity(BasePlayer player, HackableLockedCrate hackableLockedCrate)
+    private void OnLootEntity(
+      BasePlayer player, HackableLockedCrate hackableLockedCrate)
     {
       if (!hackableLockedCrate || null == hackableLockedCrate.net)
       {
         PrintDebug("ERROR: OnLootEntity(HackableLockedCrate): Crate or Net is null", DebugLevel.Error);
         return;
       }
+
       if (!configData.GeneralEvents.HackableCrate.Enabled ||
           !configData.GeneralEvents.HackableCrate.TimerStartWhenLooted)
       {
         PrintDebug("OnLootEntity(HackableLockedCrate): Ignoring due to event or loot delay disabled");
         return;
       }
+
       var zoneId = hackableLockedCrate.net.ID.ToString();
-      PrintDebug($"OnLootEntity(HackableLockedCrate): Scheduling delete of zoneId={zoneId} in {configData.GeneralEvents.HackableCrate.Duration}s");
+      PrintDebug(
+        $"OnLootEntity(HackableLockedCrate): Scheduling delete of zoneId={zoneId} in {configData.GeneralEvents.HackableCrate.Duration}s");
       HandleDeleteDynamicZone(
         zoneId,
         configData.GeneralEvents.HackableCrate.Duration,
@@ -829,13 +918,16 @@ namespace Oxide.Plugins
         PrintDebug("OnEntityKill(HackableLockedCrate): Ignoring due to event or kill stop disabled");
         return;
       }
+
       var zoneId = hackableLockedCrate.net.ID.ToString();
       //When the timer starts, don't stop the event immediately
       if (_eventTimers.ContainsKey(zoneId))
       {
-        PrintDebug($"OnEntityKill(HackableLockedCrate): Ignoring due to event timer already active for zoneId={zoneId}");
+        PrintDebug(
+          $"OnEntityKill(HackableLockedCrate): Ignoring due to event timer already active for zoneId={zoneId}");
         return;
       }
+
       PrintDebug($"OnEntityKill(HackableLockedCrate): Scheduling delete of zoneId={zoneId}");
       HandleDeleteDynamicZone(zoneId);
     }
@@ -846,18 +938,21 @@ namespace Oxide.Plugins
       {
         return;
       }
+
       if (configData.GeneralEvents.HackableCrate.ExcludeOilRig &&
           IsOnTheOilRig(hackableLockedCrate))
       {
         PrintDebug("The hackable locked crate is on an oil rig. Skipping event creation.");
         return;
       }
+
       if (configData.GeneralEvents.HackableCrate.ExcludeCargoShip &&
           IsOnTheCargoShip(hackableLockedCrate))
       {
         PrintDebug("The hackable locked crate is on a cargo ship. Skipping event creation.");
         return;
       }
+
       // call this here, because otherwise it's difficult to ensure that we call
       //  it exactly once
       var eventName = GeneralEventType.HackableCrate.ToString();
@@ -865,6 +960,7 @@ namespace Oxide.Plugins
       {
         return;
       }
+
       // NOTE: we are already NextTick() protected here
       HandleParentedEntityEvent(
         eventName, hackableLockedCrate, parentOnCreate: true);
@@ -873,7 +969,8 @@ namespace Oxide.Plugins
     private static bool IsOnTheCargoShip(
       HackableLockedCrate hackableLockedCrate)
     {
-      return hackableLockedCrate.GetComponentInParent<CargoShip>();
+      var crateParent = hackableLockedCrate?.transform.parent;
+      return crateParent && crateParent.HasComponent<CargoShip>();
     }
 
     private bool IsOnTheOilRig(HackableLockedCrate hackableLockedCrate)
@@ -894,6 +991,7 @@ namespace Oxide.Plugins
               _oilRigPosition = landmarkInfo.transform.position;
               break;
           }
+
           if (Vector3.zero != _oilRigPosition &&
               Vector3.zero != _largeOilRigPosition)
           {
@@ -927,6 +1025,7 @@ namespace Oxide.Plugins
       {
         return;
       }
+
       PatrolHelicopterEvent(patrolHelicopter);
     }
 
@@ -936,6 +1035,7 @@ namespace Oxide.Plugins
       {
         return;
       }
+
       BradleyApcEvent(bradleyApc);
     }
 
@@ -945,11 +1045,13 @@ namespace Oxide.Plugins
       {
         return;
       }
+
       PrintDebug("Trying to create Patrol Helicopter killed event.");
       if (!CheckEntityOwner(patrolHelicopter))
       {
         return;
       }
+
       HandleGeneralEvent(GeneralEventType.Helicopter, patrolHelicopter, false);
     }
 
@@ -959,11 +1061,13 @@ namespace Oxide.Plugins
       {
         return;
       }
+
       PrintDebug("Trying to create Bradley APC killed event.");
       if (!CheckEntityOwner(bradleyAPC))
       {
         return;
       }
+
       HandleGeneralEvent(GeneralEventType.Bradley, bradleyAPC, false);
     }
 
@@ -983,11 +1087,13 @@ namespace Oxide.Plugins
       {
         return;
       }
-      var dropPosition = cargoPlane.dropPosition;
+
+      Vector3 dropPosition = cargoPlane.dropPosition;
       if (activeSupplySignals.ContainsKey(dropPosition))
       {
         return;
       }
+
       // TODO: why is this a hard-coded 15-minute delay?
       activeSupplySignals.Add(dropPosition,
         timer.Once(900f, () => activeSupplySignals.Remove(dropPosition)));
@@ -1003,6 +1109,7 @@ namespace Oxide.Plugins
       {
         return;
       }
+
       var zoneId = supplyDrop.net.ID.ToString();
       if (_activeDynamicZones.TryGetValue(zoneId, out var eventName))
       {
@@ -1018,6 +1125,7 @@ namespace Oxide.Plugins
           delay: false);
         return;
       }
+
       NextTick(() => OnSupplyDropEvent(supplyDrop, true));
     }
 
@@ -1027,6 +1135,7 @@ namespace Oxide.Plugins
       {
         return;
       }
+
       var zoneId = supplyDrop.net.ID.ToString();
       if (!_activeDynamicZones.TryGetValue(zoneId, out var eventName))
       {
@@ -1053,6 +1162,7 @@ namespace Oxide.Plugins
       {
         return;
       }
+
       HandleDeleteDynamicZone(zoneId, eventConfig.Duration, eventName);
     }
 
@@ -1062,6 +1172,7 @@ namespace Oxide.Plugins
       {
         return;
       }
+
       var zoneId = supplyDrop.net.ID.ToString();
       if (!_activeDynamicZones.TryGetValue(zoneId, out var eventName))
       {
@@ -1105,7 +1216,9 @@ namespace Oxide.Plugins
       {
         return;
       }
-      PrintDebug($"Trying to create supply drop {GetSupplyDropStateName(isLanded)} event at {supplyDrop.transform.position}.");
+
+      PrintDebug(
+        $"Trying to create supply drop {GetSupplyDropStateName(isLanded)} event at {supplyDrop.transform.position}.");
       if (!CheckEntityOwner(supplyDrop))
       {
         return;
@@ -1120,20 +1233,24 @@ namespace Oxide.Plugins
           PrintDebug("Event for supply signals disabled. Skipping event creation.");
           return;
         }
+
         if (isLanded == configData.GeneralEvents.SupplySignal.StartWhenSpawned)
         {
           PrintDebug($"{GetSupplyDropStateName(isLanded)} for supply signals disabled.");
           return;
         }
+
         var entry = supplySignal.Value;
         entry.Value?.Destroy();
         activeSupplySignals.Remove(entry.Key);
-        PrintDebug($"Removing Supply signal from active list. Active supply signals remaining: {activeSupplySignals.Count}");
+        PrintDebug(
+          $"Removing Supply signal from active list. Active supply signals remaining: {activeSupplySignals.Count}");
         var eventNameSS = GeneralEventType.SupplySignal.ToString();
         if (!CanCreateDynamicPVP(eventNameSS, supplyDrop))
         {
           return;
         }
+
         HandleParentedEntityEvent(
           eventNameSS, supplyDrop, parentOnCreate: isLanded);
         return;
@@ -1145,16 +1262,19 @@ namespace Oxide.Plugins
         PrintDebug("Event for timed supply disabled. Skipping event creation.");
         return;
       }
+
       if (isLanded == configData.GeneralEvents.TimedSupply.StartWhenSpawned)
       {
         PrintDebug($"{GetSupplyDropStateName(isLanded)} for timed supply disabled.");
         return;
       }
+
       var eventNameSD = GeneralEventType.SupplyDrop.ToString();
       if (!CanCreateDynamicPVP(eventNameSD, supplyDrop))
       {
         return;
       }
+
       HandleParentedEntityEvent(
         eventNameSD, supplyDrop, parentOnCreate: isLanded);
     }
@@ -1195,11 +1315,13 @@ namespace Oxide.Plugins
         PrintDebug("CargoShip is null");
         return;
       }
+
       if (!configData.GeneralEvents.CargoShip.Enabled)
       {
         PrintDebug("Cargo Ship Event is disabled");
         return;
       }
+
       if (cargoShip.IsShipDocked)
       {
         // docked
@@ -1214,7 +1336,7 @@ namespace Oxide.Plugins
       }
       else if (
         cargoShip.isDoingHarborApproach && cargoShip.currentHarborApproachNode <
-          cargoShip.harborApproachPath.nodes.Count / 2)
+        cargoShip.harborApproachPath.nodes.Count / 2)
       {
         // approaching a Harbor
         PrintDebug("Found cargo ship approaching Harbor");
@@ -1245,10 +1367,12 @@ namespace Oxide.Plugins
       {
         return;
       }
+
       if (!configData.GeneralEvents.CargoShip.Enabled)
       {
         return;
       }
+
       // create/update or attempt to delete zone, based on desired state
       var zoneId = cargoShip.net.ID.ToString();
       var zoneExists = _activeDynamicZones.ContainsKey(zoneId);
@@ -1257,6 +1381,7 @@ namespace Oxide.Plugins
         PrintDebug($"CargoShip event {zoneId} is already in desired state={state}");
         return;
       }
+
       if (state)
       {
         PrintDebug($"Trying to create CargoShip post-spawn event {zoneId}");
@@ -1264,6 +1389,7 @@ namespace Oxide.Plugins
         {
           return;
         }
+
         var eventName = GeneralEventType.CargoShip.ToString();
         // call this here, because otherwise it's difficult to ensure that we
         //  call it exactly once
@@ -1271,6 +1397,7 @@ namespace Oxide.Plugins
         {
           return;
         }
+
         NextTick(() => HandleParentedEntityEvent(
           eventName, cargoShip, parentOnCreate: true));
       }
@@ -1288,17 +1415,20 @@ namespace Oxide.Plugins
         // bad entity
         return;
       }
+
       if (!configData.GeneralEvents.CargoShip.Enabled ||
           !configData.GeneralEvents.CargoShip.SpawnState)
       {
         // not configured to create event on spawn
         return;
       }
+
       PrintDebug("Trying to create CargoShip spawn event");
       if (!CheckEntityOwner(cargoShip))
       {
         return;
       }
+
       var eventName = GeneralEventType.CargoShip.ToString();
       // call this here, because otherwise it's difficult to ensure that we call
       //  it exactly once
@@ -1306,6 +1436,7 @@ namespace Oxide.Plugins
       {
         return;
       }
+
       NextTick(() =>
         HandleParentedEntityEvent(eventName, cargoShip, parentOnCreate: true));
     }
@@ -1316,10 +1447,12 @@ namespace Oxide.Plugins
       {
         return;
       }
+
       if (!configData.GeneralEvents.CargoShip.Enabled)
       {
         return;
       }
+
       HandleDeleteDynamicZone(cargoShip.net.ID.ToString());
     }
 
@@ -1328,15 +1461,15 @@ namespace Oxide.Plugins
 
     private void OnCargoShipHarborApproach(
       CargoShip cargoShip, CargoNotifier _) => HandleCargoState(
-        cargoShip, configData.GeneralEvents.CargoShip.ApproachState);
+      cargoShip, configData.GeneralEvents.CargoShip.ApproachState);
 
     private void OnCargoShipHarborArrived(
       CargoShip cargoShip) => HandleCargoState(
-        cargoShip, configData.GeneralEvents.CargoShip.DockState);
+      cargoShip, configData.GeneralEvents.CargoShip.DockState);
 
     private void OnCargoShipHarborLeave(
       CargoShip cargoShip) => HandleCargoState(
-        cargoShip, configData.GeneralEvents.CargoShip.DepartState);
+      cargoShip, configData.GeneralEvents.CargoShip.DepartState);
 
     #endregion CargoShip Event
 
@@ -1344,14 +1477,554 @@ namespace Oxide.Plugins
 
     #region Monument Event
 
+    #region Automatic Geometry
+
+    private static bool IsCustomPreventBuildingPrefab(string name) =>
+      name is "assets/bundled/prefabs/modding/volumes_and_triggers/prevent_building_cube.prefab"
+        or "assets/bundled/prefabs/modding/volumes_and_triggers/prevent_building_sphere.prefab";
+
+    // return Prevent Building collider that engulfs the given location, or null
+    //  if none found
+    // this only works for custom monuments, as vanilla ones hide their volumes
+    //  within their monument transform/component trees
+    // credit: WhiteThunder (Monument Finder)
+    private Collider GetPreventBuildingCollider(Vector3 position)
+    {
+      var position2D = position.XZ2D();
+      var count = Physics.OverlapSphereNonAlloc(
+        position, 1, _colliderBuffer, Rust.Layers.Mask.Prevent_Building,
+        QueryTriggerInteraction.Ignore);
+
+      // scan discovered colliders (if any) and choose in decreasing priority
+      //  order: closest, largest, first
+      var mDist = float.MaxValue;
+      var mSize = 0.0f;
+      var mIndex = -1;
+      for (var i = 0; i < count; ++i)
+      {
+        var collider = _colliderBuffer[i];
+        // skip non-box/sphere colliders
+        if (collider is not BoxCollider && collider is not SphereCollider)
+        {
+          continue;
+        }
+        // skip non-modding PB prefabs
+        if (!IsCustomPreventBuildingPrefab(collider.name)) continue;
+        // check 2D distance from reference position
+        var center2D = GetCenter(collider).XZ2D();
+        var dist = Vector2.Distance(position2D, center2D);
+        var size = GetSize(collider);
+        // choose closer colliders
+        if (dist < mDist)
+        {
+          mDist = dist;
+          mSize = size;
+          mIndex = i;
+          continue;
+        }
+        // skip more distance colliders
+        if (dist > mDist) continue;
+        // skip smaller or equal-but-later colliders
+        if (size <= mSize) continue;
+        // choose larger colliders
+        mDist = dist;
+        mSize = size;
+        mIndex = i;
+      }
+
+      return mIndex >= 0 ? _colliderBuffer[mIndex] : null;
+    }
+
+    // get center of box or sphere collider, or collider's transform position if
+    //  something else
+    private static Vector3 GetCenter(Collider collider)
+    {
+      return collider switch
+      {
+        BoxCollider b => collider.transform.TransformPoint(b.center),
+        SphereCollider s => collider.transform.TransformPoint(s.center),
+        _ => collider.transform.position
+      };
+    }
+
+    // get size of box or sphere collider, or zero if something else
+    private static float GetSize(Collider collider)
+    {
+      return collider switch
+      {
+        BoxCollider b => b.size.magnitude,
+        SphereCollider s => s.radius,
+        _ => 0f
+      };
+    }
+
+    // return most suitable Prevent Building collider that is attached somewhere
+    //  under the given transform's child tree, or null if none found
+    // this only works for vanilla monuments, as custom ones are global
+    private static Collider GetPreventBuildingCollider(Transform transform)
+    {
+      if (!transform) return null;
+
+      var list = Pool.Get<List<Collider>>();
+      // prefer monument marker oriented bounds if available
+      if (transform.TryGetComponent<MonumentInfo>(out var monumentInfo))
+      {
+        Vis.Colliders(
+          monumentInfo.obbBounds, list, Rust.Layers.Mask.Prevent_Building);
+      }
+      else
+      {
+        // fall back to transform world bounds
+        var tSize = transform.GetBounds().size.Max();
+        if (tSize <= 0.0f)
+        {
+          // use a default hard-coded size (this seems to not trigger)
+          tSize = 5.0f;
+        }
+        Vis.Colliders(
+          transform.position, tSize, list, Rust.Layers.Mask.Prevent_Building);
+      }
+      // scan the list for optimal collider
+      Collider mCollider = null;
+      var mSize = 0.0f;
+      var mDist = float.MaxValue;
+      foreach (var collider in list)
+      {
+        // ignore if not under the main transform's child tree
+        if (!collider.transform.IsChildOf(transform)) continue;
+        var cSize = GetSize(collider);
+        // ignore if unknown shape or zero size
+        if (cSize <= 0) continue;
+        // record if no previous candidate, or larger than previous candidate
+        if (!mCollider || cSize > mSize)
+        {
+          mCollider = collider;
+          mSize = cSize;
+          mDist = Vector3.Distance(transform.position, GetCenter(collider));
+          continue;
+        }
+        // ignore if smaller than largest found so far
+        if (cSize < mSize) continue;
+        // same size - choose the one closer to main transform
+        var cCenter = GetCenter(collider);
+        var cDist = Vector3.Distance(transform.position, cCenter);
+        if (cDist >= mDist) continue;
+        mCollider = collider;
+        mSize = cSize;
+        mDist = cDist;
+      }
+      Pool.FreeUnmanaged(ref list);
+
+      return mCollider;
+    }
+
+    // return the largest Prevent Building collider found for the given monument
+	  //  transform and type, or null if none found
+    private Collider GetPreventBuildingCollider(
+      Transform transform, bool customMonument)
+    {
+      if (!transform) return null;
+
+      return customMonument ?
+        GetPreventBuildingCollider(transform.position) :
+        GetPreventBuildingCollider(transform);
+    }
+
+    // apply Collider data to the given DynamicPVP zone parameters
+    // used by GetPreventBuildingParams() to apply values before returning
+    private static (Vector3 size, float rotation, Vector3 offset)
+      ApplyColliderData(
+        Collider collider, Vector3 size, float rotation, Vector3 offset)
+    {
+      if (!collider) return (Vector3.zero, 0.0f, Vector3.zero);
+      switch (collider)
+      {
+        case BoxCollider b:
+        {
+          size.Scale(b.size);
+          offset += b.center;
+          break;
+        }
+        case SphereCollider s:
+        {
+          size *= s.radius;
+          offset += s.center;
+          break;
+        }
+        default:
+        {
+          return (Vector3.zero, 0.0f, Vector3.zero);
+        }
+      }
+      return (size, rotation, offset);
+    }
+
+    // get cumulative size, rotation, offset of prevent building volume relative
+    //  to given monument transform
+    // if attached=true, monument rotation is subtracted from volume rotation
+    //  prior to normalizing (NOTE: custom monuments have global PB colliders,
+    //  while vanilla ones attach them to their transform hierarchies)
+    // returns all zeroes if something went wrong
+    private static (Vector3 size, float rotation, Vector3 offset)
+      GetPreventBuildingParams(Collider collider, Transform tMonument)
+    {
+      if (!collider || !tMonument)
+      {
+        return (Vector3.zero, 0.0f, Vector3.zero);
+      }
+
+      // if the collider's transform is parented to the root of its hierarchy,
+      //  then it's a global collider - probably for a custom map monument
+      var global = collider.transform.root == collider.transform.parent;
+      // collect the parent transform hierarchy into a list
+      // for global colliders this will only collect the parent, but for all
+      //  others it will collect everything below the root of the hierarchy
+      var tList = Pool.Get<List<Transform>>();
+      for (var transform = collider.transform;
+           transform && transform != tMonument;
+           transform = transform.parent)
+      {
+        tList.Add(transform);
+        if (global) break;
+      }
+      // now walk the list backwards, accumulating offset+rotation+size values
+      var offset = Vector3.zero;
+      var rotation = Quaternion.identity;
+      var size = Vector3.one;
+      for (var i = tList.Count - 1; i >= 0; --i)
+      {
+        var transform = tList[i];
+        offset += rotation * transform.localPosition;
+        rotation *= transform.localRotation;
+        size.Scale(transform.localScale);
+      }
+      Pool.FreeUnmanaged(ref tList);
+
+      if (global)
+      {
+        // we actually calculated the world position/rotation for a global PB
+        //  volume, so calculate the offset from the custom monument transform
+        offset -= tMonument.position;
+      }
+
+      // apply collider's non-transform size and offset values and return that
+      return ApplyColliderData(collider, size, rotation.eulerAngles.y, offset);
+
+/* TODO: Is it worth cleaning up excessive rotations?
+      // normalize rotation to range [0, 90)
+      // confine to [0, 180) by flipping +/- 180 degrees as needed
+      while (rotation >= 180.0f) rotation -= 180.0f;
+      while (rotation < 0) rotation += 180.0f;
+      if (rotation >= 90.0f)
+      {
+        // confine to [0, 90) by swapping x and y
+        rotation -= 90.0f;
+        (size.x, size.z) = (size.z, size.x);
+      }
+*/
+    }
+
+    // get DynamicPVP event zone geometry (radius/size, rotation, offset) for
+    //  given monument info, or all zeroes if not found
+    // only one of radius or size can be nonzero, depending on whether a sphere
+    //  or box volume was found, respectively
+    private (float radius, Vector3 size, float rotation, Vector3 offset)
+      GetPreventBuildingParams(Transform monumentTransform, bool customMonument)
+    {
+      var pbCollider = GetPreventBuildingCollider(
+        monumentTransform, customMonument);
+      if (!pbCollider) return (0.0f, Vector3.zero, 0.0f, Vector3.zero);
+      var (size, rotation, offset) =
+        GetPreventBuildingParams(pbCollider, monumentTransform);
+      if (Vector3.zero == size)
+      {
+        return (0.0f, Vector3.zero, 0.0f, Vector3.zero);
+      }
+      return pbCollider switch
+      {
+        BoxCollider => (0.0f, size, rotation, offset),
+        SphereCollider => (size.Max(), Vector3.zero, rotation, offset),
+        _ => (0.0f, Vector3.zero, 0.0f, Vector3.zero)
+      };
+    }
+
+    // get DynamicPVP monument event zone geometry parameters for an Underwater
+    //  Labs related transform
+    // returns a volume encompassing all Underwater Labs PB volumes, with offset
+    //  from the given transform
+    private (float radius, Vector3 size, float rotation, Vector3 offset)
+      GetLabLinkParams(Transform transform)
+    {
+      DungeonBaseInfo dungeonBaseInfo = TerrainMeta.Path.FindClosest(
+        TerrainMeta.Path.DungeonBaseEntrances, transform.position);
+
+      Bounds bounds = new();
+      var first = true;
+      foreach (GameObject linkI in dungeonBaseInfo.Links)
+      {
+        // ignore entries that are too far from the landmark; this seems to
+        //  happen on custom maps where the creator has scrambled things up
+        var linkDist = Vector3.Distance(
+          dungeonBaseInfo.transform.position, linkI.transform.position);
+        if (linkDist >= 300.0f)
+        {
+          if (!_brokenLabs)
+          {
+            PrintWarning("Corrupt Underwater Lab linkage(s) detected. Related monument events may not work as expected. This is a map/RustEdit issue, not a DynamicPVP issue.");
+            _brokenLabs = true;
+          }
+          continue;
+        }
+
+        if (!linkI.HasComponent<DungeonBaseLink>()) continue;
+        var collider = GetPreventBuildingCollider(linkI.transform, false);
+        if (!collider) continue;
+
+        // Collider.bounds returns a world-space bounding box around the
+        //  collider, which is exactly what we want
+        var cBounds = collider.bounds;
+
+        if (first)
+        {
+          // center global bounds on first collider bounds
+          bounds.center = cBounds.center;
+          first = false;
+        }
+        bounds.Encapsulate(cBounds);
+      }
+
+      return (0.0f, bounds.size, 0.0f, bounds.center - transform.position);
+    }
+
+    // return whether the given GameObject is a Train Tunnel pedestrian surface
+    //  entrance to station linkage section of the desired type (stairwell=true
+    //  => main stairwell, stairwell=false => dwellings corridor)
+    private bool IsApplicableTunnelLink(
+      DungeonGridInfo dungeon, GameObject link, bool stairwell)
+    {
+      // ignore entries whose prefab names indicate they're not intermediate
+      //  links; this usually means monument/bunker entrances and stations
+      // on vanilla maps we could simply skip the first and last entries, but
+      //  I've found custom maps that violate this pattern for some reason
+      if (!link.name.StartsWith(
+            "assets/bundled/prefabs/autospawn/tunnel-link/link-"))
+      {
+        return false;
+      }
+      // ignore entries that are too far from the landmark; this seems to happen
+      //  on custom maps where the creator has scrambled things up
+      var linkDist =
+        Vector3.Distance(dungeon.transform.position, link.transform.position);
+      if (linkDist >= 300.0f)
+      {
+        if (!_brokenTunnels)
+        {
+          PrintWarning("Corrupt Train Tunnel stairwell/dwelling linkage(s) detected. Related monument events may not work as expected. This is a map/RustEdit issue, not a DynamicPVP issue.");
+          _brokenTunnels = true;
+        }
+        return false;
+      }
+      // check DungeonGridLink for upward connection type, which determines
+      //  whether it's a stairwell versus a corridor
+      if (!link.TryGetComponent<DungeonGridLink>(out var dungeonGridLink))
+      {
+        return false;
+      }
+      var isStairwell = DungeonGridLinkType.Elevator == dungeonGridLink.UpType;
+      return isStairwell == stairwell;
+    }
+
+    // get DynamicPVP monument event zone geometry parameters for a transform
+    //  belonging to a Train Tunnels entrance linkage system
+    // stairwell=true => transform is the entrance link; return volume
+    //  encompassing all stairwell sections
+    // stairwell=false => transform is central dwellings link; return volume
+    //  encompassing all dwelling sections
+    private (float radius, Vector3 size, float rotation, Vector3 offset)
+      GetTunnelLinkParams(Transform linkTransform, bool stairwell)
+    {
+      DungeonGridInfo dungeonGridInfo = TerrainMeta.Path.FindClosest(
+        TerrainMeta.Path.DungeonGridEntrances, linkTransform.position);
+      if (!dungeonGridInfo) return (0.0f, Vector3.zero, 0.0f, Vector3.zero);
+
+      Bounds bounds = new();
+      var first = true;
+      foreach (GameObject link in dungeonGridInfo.Links)
+      {
+        if (!IsApplicableTunnelLink(dungeonGridInfo, link, stairwell))
+        {
+          continue;
+        }
+        var collider = GetPreventBuildingCollider(link.transform, false);
+        if (!collider)
+        {
+          continue;
+        }
+        var cBounds = collider.bounds;
+        if (first)
+        {
+          bounds = cBounds;
+          first = false;
+          continue;
+        }
+        bounds.Encapsulate(cBounds);
+      }
+
+      return (0.0f, bounds.size, 0.0f, bounds.center - linkTransform.position);
+    }
+
+    // try to automatically derive a reasonable set of DynamicPVP monument event
+    //  zone geometry parameters (radius/size, rotation, offset) for the given
+    //  transform
+    private (float radius, Vector3 size, float rotation, Vector3 offset)
+      GetMonumentGeometry(Transform monumentTransform, MonumentEventType type)
+    {
+      switch (type)
+      {
+        case MonumentEventType.Default:
+          return GetPreventBuildingParams(monumentTransform, false);
+        case MonumentEventType.Custom:
+          return GetPreventBuildingParams(monumentTransform, true);
+        case MonumentEventType.TunnelEntrance:
+          return GetTunnelLinkParams(monumentTransform, true);
+        case MonumentEventType.TunnelLink:
+          return GetTunnelLinkParams(monumentTransform, false);
+        case MonumentEventType.TunnelSection:
+          return GetPreventBuildingParams(monumentTransform, false);
+        case MonumentEventType.UnderwaterLabs:
+          return GetLabLinkParams(monumentTransform);
+      }
+      throw new ArgumentOutOfRangeException(nameof(type), type, null);
+    }
+
+    // return whether a geometry check should occur for the given monument event
+    private static bool ShouldCheckGeometry(MonumentEvent monumentEvent) =>
+      monumentEvent.DynamicZone.DoAutoGeo;
+
+    // update monument event geometry parameters with given data if appropriate
+    private static void UpdateGeometry(
+      MonumentEvent monumentEvent, bool first, float newRadius, Vector3 newSize,
+      float newRotation, Vector3 newOffset)
+    {
+      var updateRadius = newRadius > monumentEvent.DynamicZone.Radius;
+      var updateSizeX = newSize.x > monumentEvent.DynamicZone.Size.x;
+      var updateSizeY = newSize.y > monumentEvent.DynamicZone.Size.y;
+      var updateSizeZ = newSize.z > monumentEvent.DynamicZone.Size.z;
+      if (!first && !updateRadius && !updateSizeX && !updateSizeY &&
+          !updateSizeZ)
+      {
+        return;
+      }
+
+      if (updateRadius) monumentEvent.DynamicZone.Radius = newRadius;
+      var tempSize = monumentEvent.DynamicZone.Size;
+      if (updateSizeX) tempSize.x = newSize.x;
+      if (updateSizeY) tempSize.y = newSize.y;
+      if (updateSizeZ) tempSize.z = newSize.z;
+      monumentEvent.DynamicZone.Size = tempSize;
+      monumentEvent.DynamicZone.Rotation = newRotation;
+      monumentEvent.TransformPosition = newOffset;
+    }
+
+    // handle monument geometry checking for the given monument event
+    private void CheckMonumentGeometry(
+      string monumentName, Transform transform,
+      MonumentEventType monumentEventType, bool first,
+      MonumentEvent monumentEvent)
+    {
+      // if this is the first time checking this event type, record config
+      //  values in dictionary and then reset them, so that we can start
+      //  accumulating calculated values
+      if (first)
+      {
+        _originalMonumentGeometries.TryAdd(monumentName,
+          new OriginalMonumentGeometry
+          {
+            Radius = monumentEvent.DynamicZone.Radius,
+            Rotation = monumentEvent.DynamicZone.Rotation,
+            Size = monumentEvent.DynamicZone.Size,
+            FixedRotation = monumentEvent.DynamicZone.FixedRotation,
+            TransformPosition = monumentEvent.TransformPosition
+          });
+
+        monumentEvent.DynamicZone.Radius = 0.0f;
+        monumentEvent.DynamicZone.Rotation = 0.0f;
+        monumentEvent.DynamicZone.Size = Vector3.zero;
+        monumentEvent.DynamicZone.FixedRotation = monumentEventType switch
+        {
+          MonumentEventType.Default => false,
+          MonumentEventType.Custom => true,
+          MonumentEventType.TunnelEntrance => true,
+          MonumentEventType.TunnelLink => true,
+          MonumentEventType.TunnelSection => false,
+          MonumentEventType.UnderwaterLabs => true,
+          _ => false
+        };
+        monumentEvent.TransformPosition = Vector3.zero;
+      }
+
+      // calculate geometry for current monument instance
+      var (radius, size, rotation, offset) =
+        GetMonumentGeometry(transform, monumentEventType);
+
+      // record any updated parameters
+      UpdateGeometry(monumentEvent, first, radius, size, rotation, offset);
+    }
+
+    // compare saved-off original monument geometry config data to auto-geo
+    //  outputs, and report whether anything actually changed
+    private bool ShouldSaveGeometry()
+    {
+      // NOTE: don't break early, because we need to set all AutoGeoOnNextLoad
+      //  flags to false
+      var changed = false;
+      foreach (var (name, oGeo) in _originalMonumentGeometries)
+      {
+        if (!configData.MonumentEvents.TryGetValue(name, out var monumentEvent))
+        {
+          // pathological: cached original geometry for a monument event that
+          //  doesn't exist
+          continue;
+        }
+        if (changed || oGeo.HasSameData(monumentEvent)) continue;
+        // geometry data changed from original config values; request save
+        PrintDebug($"Geometry changed for monument event {name}; subsequent changes may not be reported");
+        changed = true;
+      }
+      _originalMonumentGeometries.Clear();
+      return changed;
+    }
+
+    private struct OriginalMonumentGeometry
+    {
+      public float Radius = 0f;
+      public float Rotation = 0f;
+      public Vector3 Size = Vector3.zero;
+      public bool FixedRotation = false;
+      public Vector3 TransformPosition = Vector3.zero;
+
+      public OriginalMonumentGeometry()
+      {
+      }
+
+      public bool HasSameData(MonumentEvent monumentEvent) =>
+        Mathf.Approximately(Radius, monumentEvent.DynamicZone.Radius) &&
+        Mathf.Approximately(Rotation, monumentEvent.DynamicZone.Rotation) &&
+        Size == monumentEvent.DynamicZone.Size &&
+        FixedRotation == monumentEvent.DynamicZone.FixedRotation &&
+        TransformPosition == monumentEvent.TransformPosition;
+    }
+
+    #endregion Automatic Geometry
+
     // add and/or start (create) the given monument event name
-    // records via list modification whether it was added and/or created
+    // records via collection modification whether it was added and/or created
     // NOTE: monument events currently default to disabled, but the code is
     //  structured to support auto-starting new events in case there is ever a
     //  desire to support this
     private IEnumerator CreateMonumentEvent(
-      string monumentName, Transform transform,
-      List<string> addedEvents, List<string> createdEvents)
+      string monumentName, Transform transform, MonumentEventType type,
+      HashSet<string> addedEvents, List<string> createdEvents)
     {
       if (!configData.MonumentEvents.TryGetValue(
             monumentName, out var monumentEvent))
@@ -1360,42 +2033,73 @@ namespace Oxide.Plugins
         configData.MonumentEvents.Add(monumentName, monumentEvent);
         addedEvents.Add(monumentName);
       }
-      if (monumentEvent.Enabled && HandleMonumentEvent(
-            monumentName, transform, monumentEvent))
+
+      if (monumentEvent.Enabled)
       {
-        createdEvents.Add(monumentName);
+        if (ShouldCheckGeometry(monumentEvent))
+        {
+          PrintDebug($"Calculating geometry for monument event {monumentName} with type {type}");
+          CheckMonumentGeometry(
+            monumentName, transform, type,
+            !createdEvents.Contains(monumentName), monumentEvent);
+        }
+        if (HandleMonumentEvent(monumentName, transform, monumentEvent))
+        {
+          createdEvents.Add(monumentName);
+        }
       }
-      yield return CoroutineEx.waitForFixedUpdate;
+
+      yield return DynamicYield();
+    }
+
+    private static (string monumentName, bool custom) GetLandmarkName(
+      LandmarkInfo landmarkInfo)
+    {
+      var monumentName = landmarkInfo.displayPhrase.english.Trim();
+      return
+        string.IsNullOrEmpty(monumentName) &&
+        landmarkInfo.name.Contains("monument_marker.prefab") ?
+          (landmarkInfo.transform.root.name, true) :
+          (monumentName, false);
     }
 
     // sub-coroutine to create (vanilla and custom map) map marker based
     //  monument events
     private IEnumerator CreateLandmarkMonumentEvents(
-      List<string> addedEvents, List<string> createdEvents)
+      HashSet<string> addedEvents, List<string> createdEvents)
     {
       foreach (LandmarkInfo landmarkInfo in TerrainMeta.Path.Landmarks)
       {
-        // only process map-visible landmarks
-        if (!landmarkInfo.shouldDisplayOnMap)
+        // skip train tunnel stairwells/dwellings and underwater labs sections,
+        //  as they are handled in other ways
+        if (landmarkInfo is DungeonGridInfo or DungeonBaseLandmarkInfo)
         {
           continue;
         }
-        var monumentName = landmarkInfo.displayPhrase.english.Trim();
-        if (string.IsNullOrEmpty(monumentName))
+
+        var (monumentName, custom) = GetLandmarkName(landmarkInfo);
+        if (string.IsNullOrEmpty(monumentName) &&
+            landmarkInfo.shouldDisplayOnMap)
         {
-          // not a vanilla map monument; see if it's a custom one
-          if (landmarkInfo.name.Contains("monument_marker.prefab"))
-          {
-            monumentName = landmarkInfo.transform.root.name;
-          }
-          if (string.IsNullOrEmpty(monumentName))
-          {
-            // TODO: this seems to trigger for moonpool modules at Underwater
-            //  Labs - do we maybe want to support these as a special case?
-            PrintDebug($"Skipping visible landmark because it has no map title: {landmarkInfo}");
-            continue;
-          }
+          PrintDebug($"Skipping visible landmark because it has no map title: {landmarkInfo}");
+          continue;
         }
+
+        if (landmarkInfo is MonumentInfo && "Train Tunnel" == monumentName)
+        {
+          // Train Tunnel bunker entrances are MonumentInfo objects that aren't
+          //  map-visible, because they connect to DungeonGridInfo landmarks
+          //  with the same name; promote this to a first-class monument by
+          //  giving it a map visibility exception, but tweak the name to
+          //  disambiguate from the other flavor
+          monumentName = "Train Tunnel Bunker";
+        }
+        else if (!landmarkInfo.shouldDisplayOnMap)
+        {
+          // all other landmarks must have map markers/labels for now
+          continue;
+        }
+
         switch (landmarkInfo.name)
         {
           case "assets/bundled/prefabs/autospawn/monument/harbor/harbor_1.prefab":
@@ -1411,11 +2115,17 @@ namespace Oxide.Plugins
             _oilRigPosition = landmarkInfo.transform.position;
             break;
         }
+
+        var type =
+          custom ? MonumentEventType.Custom :
+          "Underwater Lab" == monumentName ? MonumentEventType.UnderwaterLabs :
+          MonumentEventType.Default;
         yield return CreateMonumentEvent(
-          monumentName, landmarkInfo.transform, addedEvents, createdEvents);
+          monumentName, landmarkInfo.transform, type,
+          addedEvents, createdEvents);
       }
-      // wait for logging to catch up
-      yield return CoroutineEx.waitForSeconds(0.5f);
+
+      yield return DynamicYield(true);
     }
 
     // derive a user-friendly event name from a Train Tunnel section prefab name
@@ -1507,117 +2217,128 @@ namespace Oxide.Plugins
 
     // sub-coroutine to create Train Tunnel section based monument events
     private IEnumerator CreateTunnelSectionMonumentEvents(
-      List<string> addedEvents, List<string> createdEvents)
+      HashSet<string> addedEvents, List<string> createdEvents)
     {
       foreach (DungeonGridCell cell in TerrainMeta.Path.DungeonGridCells)
       {
         var eventName = ToTunnelSectionEventName(cell.name);
         if (string.IsNullOrEmpty(eventName)) continue;
         yield return CreateMonumentEvent(
-          eventName, cell.transform, addedEvents, createdEvents);
+          eventName, cell.transform, MonumentEventType.TunnelSection,
+          addedEvents, createdEvents);
       }
-      // wait for logging to catch up
-      yield return CoroutineEx.waitForSeconds(0.5f);
+
+      yield return DynamicYield(true);
     }
 
-    // get index of centermost section in Train Tunnel Dwelling area
+    // get index of center-most section in Train Tunnel (stairwell=true) or
+    //  Train Tunnel Dwelling (stairwell=false) portion of entrance links
     // returns negative number on failure
-    private int GetTunnelDwellingCenterIndex(string name, List<GameObject> links)
+    private int GetUpperTunnelCenterIndex(
+      DungeonGridInfo dungeonGridInfo, bool stairwell = false)
     {
-      if (links.Count <= 0)
+      if (dungeonGridInfo.Links.Count <= 0)
       {
-        PrintDebug($"Skipping DungeonGridInfo type with empty Links list: {name}");
+        PrintDebug($"Skipping DungeonGridInfo with empty Links list: {dungeonGridInfo.name}");
         return -1;
       }
+      // scan the list once, to create a bounding box around the transform
+      //  positions of all applicable links
       Bounds linkBounds = new(Vector3.zero, Vector3.zero);
-      foreach (GameObject link in links)
+      var first = true;
+      foreach (GameObject link in dungeonGridInfo.Links)
       {
-        if (!link.name.StartsWith("assets/bundled/prefabs/autospawn/tunnel-link/"))
+        if (!IsApplicableTunnelLink(dungeonGridInfo, link, stairwell)) continue;
+        if (first)
         {
-          // skip silently because this isn't a problem - we want to skip
-          //  surface entrances and stations because they're endpoints that
-          //  are covered by other zone types
+          // this is the first valid entry; record its position
+          linkBounds.center = link.transform.position;
+          first = false;
           continue;
         }
-        if (Vector3.zero == linkBounds.center &&
-            Vector3.zero == linkBounds.size)
-        {
-          // this is the first valid entry; record its position and extents
-          linkBounds.center = link.transform.position;
-          linkBounds.extents = link.transform.GetBounds().extents;
-        }
-        else
-        {
-          // get link's bounds, but use world coordinate center
-          var tempBounds = link.transform.GetBounds();
-          tempBounds.center = link.transform.position;
-          linkBounds.Encapsulate(tempBounds);
-        }
+        linkBounds.Encapsulate(link.transform.position);
       }
-      if (linkBounds.size == Vector3.zero)
+      // scan the list again, so find the closest link to bounding box center
+      if (Vector3.zero == linkBounds.size)
       {
-        PrintDebug($"Skipping DungeonGridInfo type with empty bounds: {name}");
+        PrintDebug($"Skipping DungeonGridInfo with unknown bounds: {dungeonGridInfo.name}@{dungeonGridInfo.transform.position}");
         return -2;
       }
       // find the link closest to the center of the bounding box
-      // this is done in 2D, because most of the links are at the bottom of
-      //  the volume, and we want to pick one of those for consistency
-      var boundsCenter = linkBounds.center.XZ2D();
-      int transformIndex = -3;
-      float transformDistance = 0.0f;
-      for (int i = 0; i < links.Count; ++i)
+      var transformIndex = -3;
+      var minDistance = -1.0f;
+      for (var i = 0; i < dungeonGridInfo.Links.Count; ++i)
       {
-        var link = links[i];
-        // list includes the surface entrance and station section, so skip those
-        if (!link.name.StartsWith("assets/bundled/prefabs/autospawn/tunnel-link/"))
+        GameObject linkI = dungeonGridInfo.Links[i];
+        if (!IsApplicableTunnelLink(dungeonGridInfo, linkI, stairwell))
         {
           continue;
         }
         var distance =
-          Vector3.Distance(boundsCenter, link.transform.position.XZ2D());
-        if (transformIndex >= 0 && distance > transformDistance) continue;
+          Vector3.Distance(linkBounds.center, linkI.transform.position);
+        if (minDistance > 0 && distance > minDistance) continue;
         transformIndex = i;
-        transformDistance = distance;
+        minDistance = distance;
       }
       return transformIndex;
     }
 
-    // sub-coroutine to create Train Tunnel dweller area monument events
-    private IEnumerator CreateTunnelDwellingMonumentEvents(
-      List<string> addedEvents, List<string> createdEvents)
+    // sub-coroutine to create Train Tunnel stairwell and dweller area monument
+    //  events
+    private IEnumerator CreateUpperTunnelMonumentEvents(
+      HashSet<string> addedEvents, List<string> createdEvents)
     {
-      foreach (DungeonGridInfo entrance in TerrainMeta.Path.DungeonGridEntrances)
+      foreach (
+        DungeonGridInfo entrance in TerrainMeta.Path.DungeonGridEntrances)
       {
-        var transformIndex = GetTunnelDwellingCenterIndex(
-          entrance.name, entrance.Links);
-        if (transformIndex < 0) continue;
-        // NOTE: the name is meant to avoid confusion with "Train Tunnel Link",
-        //  which is used for linkages between above and below ground rail lines
+        if (entrance.Links.Count <= 0) continue;
+
+        // create Train Tunnel stairwell monument event
+        var (landmarkName, _) = GetLandmarkName(entrance);
         yield return CreateMonumentEvent(
-          "Train Tunnel Dwelling", entrance.Links[transformIndex].transform,
+          landmarkName, entrance.transform, MonumentEventType.TunnelEntrance,
+          addedEvents, createdEvents);
+
+        // create Train Tunnel Dwelling monument event
+        var transformIndex =
+          GetUpperTunnelCenterIndex(entrance);
+        if (transformIndex < 0) continue;
+        yield return CreateMonumentEvent(
+          landmarkName + " Dwelling", entrance.Links[transformIndex].transform,
+          MonumentEventType.TunnelLink,
           addedEvents, createdEvents);
       }
-      // wait for logging to catch up
-      yield return CoroutineEx.waitForSeconds(0.5f);
+
+      yield return DynamicYield(true);
     }
 
-    // coroutine to orchestrate creation of all mounment event types
+    // coroutine to orchestrate creation of all monument event types
     private IEnumerator CreateMonumentEvents()
     {
-      var addedEvents = Pool.Get<List<string>>();
+      var save = false;
+      var addedEvents = Pool.Get<HashSet<string>>();
       var createdEvents = Pool.Get<List<string>>();
 
+      Puts("Creating Landmark Monument Events");
       yield return CreateLandmarkMonumentEvents(addedEvents, createdEvents);
+      Puts("Creating Train Tunnel Section Monument Events");
       yield return CreateTunnelSectionMonumentEvents(
         addedEvents, createdEvents);
-      yield return CreateTunnelDwellingMonumentEvents(
-        addedEvents, createdEvents);
+      Puts("Creating Train Tunnel Entrance Monument Events");
+      yield return CreateUpperTunnelMonumentEvents(addedEvents, createdEvents);
 
       if (addedEvents.Count > 0)
       {
         PrintDebug($"{addedEvents.Count} new monument event(s) added to config: {string.Join(", ", addedEvents)}");
-        SaveConfig();
+        save = true;
       }
+      if (ShouldSaveGeometry())
+      {
+        PrintDebug("Recording geometry change(s) to config file");
+        save = true;
+      }
+      if (save) SaveConfig();
+
       if (createdEvents.Count > 0)
       {
         PrintDebug($"{createdEvents.Count} monument event(s) successfully created: {string.Join(", ", createdEvents)}");
@@ -1626,7 +2347,7 @@ namespace Oxide.Plugins
       Pool.FreeUnmanaged(ref addedEvents);
       Pool.FreeUnmanaged(ref createdEvents);
 
-      yield return null;
+      yield return DynamicYield(true);
     }
 
     #endregion Monument Event
@@ -1647,7 +2368,7 @@ namespace Oxide.Plugins
           continue;
         }
         createdEvents.Add(entry.Key);
-        yield return CoroutineEx.waitForFixedUpdate;
+        yield return DynamicYield();
       }
       if (createdEvents.Count > 0)
       {
@@ -1656,10 +2377,12 @@ namespace Oxide.Plugins
 
       Pool.FreeUnmanaged(ref createdEvents);
 
-      yield return null;
+      yield return DynamicYield(true);
     }
 
     #endregion Auto Event
+
+    #endregion Events
 
     #region Chat/Console Command Handler
 
@@ -1730,8 +2453,6 @@ namespace Oxide.Plugins
 
     #endregion Chat/Console Command Handler
 
-    #endregion Events
-
     #region DynamicZone Handler
 
     // create a zone that is parented to an entity, such that they move together
@@ -1762,7 +2483,7 @@ namespace Oxide.Plugins
       if (!parentOnCreate)
       {
         var groundY = TerrainMeta.HeightMap.GetHeight(zonePosition);
-        if (Math.Abs(zonePosition.y - groundY) < 10.0f)
+        if (Mathf.Abs(zonePosition.y - groundY) < 10.0f)
         {
           // entity is already near the ground; force enable immediate parenting
           // this catches the case that e.g. a Supply Drop landed during the
@@ -1795,7 +2516,9 @@ namespace Oxide.Plugins
     {
       var position = monumentEvent.TransformPosition == Vector3.zero ?
         transform.position :
-        transform.TransformPoint(monumentEvent.TransformPosition);
+        monumentEvent.DynamicZone.FixedRotation ?
+          transform.position + monumentEvent.TransformPosition :
+          transform.TransformPoint(monumentEvent.TransformPosition);
       return CreateDynamicZone(
         eventName, position, monumentEvent.ZoneId,
         monumentEvent.GetDynamicZone().ZoneSettings(transform));
@@ -1875,7 +2598,7 @@ namespace Oxide.Plugins
       var dynamicZone = baseEvent.GetDynamicZone();
       zoneSettings ??= dynamicZone.ZoneSettings();
 
-      PrintDebug($"Trying to create zoneId={zoneId} for eventName={eventName} at position={position}{(dynamicZone is ISphereZone zone ? $", radius={zone.Radius}m" : null)}{(dynamicZone is ICubeZone cubeZone ? $", size={cubeZone.Size}" : null)}{(dynamicZone is IParentZone parentZone ? $", center={parentZone.Center}" : null)}, duration={duration}s.");
+      PrintDebug($"Trying to create zoneId={zoneId} for eventName={eventName} at position={position}{(dynamicZone is ISphereZone zone ? $", radius={zone.Radius}m" : null)}{(dynamicZone is ICubeZone cubeZone ? $", size={cubeZone.Size}" : null)}{(dynamicZone is IParentZone parentZone ? $", center={parentZone.Center}" : null)}{(dynamicZone is IRotateZone rotateZone ? $", rotation={rotateZone.Rotation}, fixedRotation={rotateZone.FixedRotation}" : null)}, duration={duration}s.");
       var zoneRadius = dynamicZone is ISphereZone sz ? sz.Radius : 0;
       var zoneSize = dynamicZone is ICubeZone cz ? cz.Size.magnitude : 0;
       if (zoneRadius <= 0 && zoneSize <= 0)
@@ -1958,7 +2681,7 @@ namespace Oxide.Plugins
       if (string.IsNullOrEmpty(zoneId) ||
           !_activeDynamicZones.TryGetValue(zoneId, out var eventName))
       {
-        // this isn't an error, because sometimes a delete is requested "just in
+        // this isn't an error, because sometimes deletion is requested "just in
         //  case", and/or because multiple delete stimuli occurred
         PrintDebug($"HandleDeleteDynamicZone(): Skipping delete for unknown zoneId={zoneId}.");
         return;
@@ -1980,7 +2703,7 @@ namespace Oxide.Plugins
           // untether zone from parent entity
           ZM_GetZoneByID(zoneId)?.transform.SetParent(null, true);
           // also untether any domes
-          ParentDome(zoneId, Vector3.zero, null);
+          ParentDome(zoneId, Vector3.zero);
         }
         _eventTimers.Add(zoneId, timer.Once(
           baseEvent.EventStopDelay, () => DeleteDynamicZone(zoneId)));
@@ -1996,7 +2719,7 @@ namespace Oxide.Plugins
       if (string.IsNullOrEmpty(zoneId) ||
           !_activeDynamicZones.TryGetValue(zoneId, out var eventName))
       {
-        // this isn't an error, because sometimes a delete is requested "just in
+        // this isn't an error, because sometimes deletion is requested "just in
         //  case", and/or because multiple delete stimuli occurred
         PrintDebug($"DeleteDynamicZone(): Skipping delete for unknown zoneId={zoneId}.");
         return false;
@@ -2363,8 +3086,8 @@ namespace Oxide.Plugins
     }
 
     private bool ZM_CreateOrUpdateZone(
-      string zoneId, string[] zoneArgs, Vector3 location) =>
-      Convert.ToBoolean(ZoneManager.Call("CreateOrUpdateZone", zoneId, zoneArgs, location));
+      string zoneId, string[] zoneArgs, Vector3 location) => Convert.ToBoolean(
+        ZoneManager.Call("CreateOrUpdateZone", zoneId, zoneArgs, location));
 
     private bool ZM_EraseZone(string zoneId, string eventName = "")
     {
@@ -2379,7 +3102,8 @@ namespace Oxide.Plugins
       }
     }
 
-    private string[] ZM_GetZoneIDs() => ZoneManager.Call("GetZoneIDs") as string[];
+    private string[] ZM_GetZoneIDs() =>
+      ZoneManager.Call("GetZoneIDs") as string[];
 
     private string ZM_GetZoneName(string zoneId) =>
       Convert.ToString(ZoneManager.Call("GetZoneName", zoneId));
@@ -2785,62 +3509,48 @@ namespace Oxide.Plugins
         return;
       }
 
-      Print(player, Lang("Showing", player.UserIDString, configData.Chat.ShowDuration));
+      Print(player, Lang("ShowingZones", player.UserIDString, configData.Chat.ShowDistance, configData.Chat.ShowDuration));
 
+      var playerPosition2D = player.transform.position.XZ2D();
       foreach (var activeEvent in _activeDynamicZones)
       {
         var zoneData = ZM_GetZoneByID(activeEvent.Key);
-        if (null == zoneData) continue;
-        var zonePosition = zoneData.transform.position;
-        var baseZone = GetBaseEvent(activeEvent.Value)?.GetDynamicZone();
-        var zoneColor = Color.red;
-        switch (baseZone)
+        if (!zoneData) continue;
+        var position = zoneData.transform.position;
+        if (Vector2.Distance(playerPosition2D, position.XZ2D()) >
+            configData.Chat.ShowDistance)
         {
-          case SphereCubeDynamicZone scdZone:
-          {
-            zoneColor = Color.yellow;
-            var rotation = scdZone.Rotation;
-            if (!scdZone.FixedRotation)
-            {
-              rotation += zoneData.transform.eulerAngles.y;
-            }
-            if (scdZone.Radius > 0)
-            {
-              DrawSphere(
-                player, configData.Chat.ShowDuration,zoneColor,
-                zonePosition, scdZone.Radius, rotation);
-            }
-            else if (scdZone.Size.sqrMagnitude > 0)
-            {
-              DrawCube(
-                player, configData.Chat.ShowDuration, zoneColor,
-                zonePosition, scdZone.Size, rotation);
-            }
-            break;
-          }
-
-          case SphereCubeParentDynamicZone scpdZone:
-          {
-            zoneColor = Color.blue;
-            var rotation = zoneData.transform.eulerAngles.y;
-            if (scpdZone.Radius > 0)
-            {
-              DrawSphere(
-                player, configData.Chat.ShowDuration,zoneColor,
-                zonePosition, scpdZone.Radius, rotation);
-            }
-            else if (scpdZone.Size.sqrMagnitude > 0)
-            {
-              DrawCube(
-                player, configData.Chat.ShowDuration, zoneColor,
-                zonePosition, scpdZone.Size, rotation);
-            }
-            break;
-          }
+          continue;
         }
+        var baseZone = GetBaseEvent(activeEvent.Value)?.GetDynamicZone();
+        var zoneColor = baseZone switch
+        {
+          SphereCubeDynamicZone => Color.yellow,
+          SphereCubeParentDynamicZone => Color.blue,
+          _ => Color.red
+        };
+
+        switch (zoneData.collider)
+        {
+          case BoxCollider b:
+            DrawCube(
+              player, configData.Chat.ShowDuration, zoneColor,
+              zoneData.transform.position, b.size,
+              zoneData.transform.eulerAngles.y);
+            break;
+
+          case SphereCollider s:
+            DrawSphere(
+              player, configData.Chat.ShowDuration, zoneColor,
+              zoneData.transform.position, s.radius,
+              zoneData.transform.eulerAngles.y);
+            break;
+        }
+
         player.SendConsoleCommand(
           "ddraw.text", configData.Chat.ShowDuration, zoneColor,
-          zonePosition, $"{activeEvent.Key}\n{activeEvent.Value}");
+          zoneData.transform.position,
+          $"{activeEvent.Key}\n{activeEvent.Value}");
       }
     }
 
@@ -3043,8 +3753,11 @@ namespace Oxide.Plugins
       [JsonProperty(PropertyName = "Chat SteamID Icon")]
       public ulong SteamIdIcon { get; set; }
 
+      [JsonProperty(PropertyName = "Zone Show Distance")]
+      public float ShowDistance { get; set; } = 1000.0f;
+
       [JsonProperty(PropertyName = "Zone Show Duration (in seconds)")]
-      public float ShowDuration { get; set; } = 15f;
+      public float ShowDuration { get; set; } = 15.0f;
     }
 
     private sealed class GeneralEventSettings
@@ -3065,7 +3778,7 @@ namespace Oxide.Plugins
       public HackableCrateEvent HackableCrate { get; set; } = new();
 
       [JsonProperty(PropertyName = "Excavator Ignition Event")]
-      public MonumentEvent ExcavatorIgnition { get; set; } = new();
+      public IgnitionEvent ExcavatorIgnition { get; set; } = new();
 
       [JsonProperty(PropertyName = "Cargo Ship Event")]
       public CargoShipEvent CargoShip { get; set; } = new();
@@ -3073,6 +3786,7 @@ namespace Oxide.Plugins
 
     #region Event
 
+    // base class for ALL DynamicPVP events
     // NOTE: reserve order 1-19
     public abstract class BaseEvent
     {
@@ -3109,7 +3823,8 @@ namespace Oxide.Plugins
       public abstract BaseDynamicZone GetDynamicZone();
     }
 
-    // NOTE: reserve order 20-29
+    // dome features
+    // NOTE: reserve order 20-24
     public abstract class DomeEvent : BaseEvent
     {
       [JsonProperty(PropertyName = "Enable Domes", Order = 20)]
@@ -3119,21 +3834,40 @@ namespace Oxide.Plugins
       public int DomesDarkness { get; set; } = 8;
     }
 
-    // NOTE: reserve order 30-39
+    // bot features
+    // NOTE: reserve order 25-29
     public abstract class BotDomeEvent : DomeEvent
     {
-      [JsonProperty(PropertyName = "Enable Bots (Need BotSpawn Plugin)", Order = 30)]
+      [JsonProperty(PropertyName = "Enable Bots (Need BotSpawn Plugin)", Order = 25)]
       public bool BotsEnabled { get; set; }
 
-      [JsonProperty(PropertyName = "BotSpawn Profile Name", Order = 31)]
+      [JsonProperty(PropertyName = "BotSpawn Profile Name", Order = 26)]
       public string BotProfileName { get; set; } = string.Empty;
     }
 
+    // Excavator Ignition general event (split off from MonumentEvent because it
+    //  doesn't support auto-geo)
+    // NOTE: reserve order 30-39
+    public class IgnitionEvent : DomeEvent
+    {
+      [JsonProperty(PropertyName = "Dynamic PVP Zone Settings", Order = 30)]
+      public SphereCubeDynamicZone DynamicZone { get; set; } = new();
+
+      [JsonProperty(PropertyName = "Zone ID", Order = 31)]
+      public string ZoneId { get; set; } = string.Empty;
+
+      [JsonProperty(PropertyName = "Transform Position", Order = 32)]
+      public Vector3 TransformPosition { get; set; }
+
+      public override BaseDynamicZone GetDynamicZone() => DynamicZone;
+    }
+
     // NOTE: reserve order 40-49
+    // Monument event
     public class MonumentEvent : DomeEvent
     {
       [JsonProperty(PropertyName = "Dynamic PVP Zone Settings", Order = 40)]
-      public SphereCubeDynamicZone DynamicZone { get; set; } = new();
+      public SphereCubeAutoGeoDynamicZone DynamicZone { get; set; } = new();
 
       [JsonProperty(PropertyName = "Zone ID", Order = 41)]
       public string ZoneId { get; set; } = string.Empty;
@@ -3141,12 +3875,10 @@ namespace Oxide.Plugins
       [JsonProperty(PropertyName = "Transform Position", Order = 42)]
       public Vector3 TransformPosition { get; set; }
 
-      public override BaseDynamicZone GetDynamicZone()
-      {
-        return DynamicZone;
-      }
+      public override BaseDynamicZone GetDynamicZone() => DynamicZone;
     }
 
+    // user-defined "auto" event
     // NOTE: reserve order 50-59
     public class AutoEvent : BotDomeEvent
     {
@@ -3162,12 +3894,10 @@ namespace Oxide.Plugins
       [JsonProperty(PropertyName = "Position", Order = 53)]
       public Vector3 Position { get; set; }
 
-      public override BaseDynamicZone GetDynamicZone()
-      {
-        return DynamicZone;
-      }
+      public override BaseDynamicZone GetDynamicZone() => DynamicZone;
     }
 
+    // base class for events that support a duration
     // NOTE: reserve order 60-64
     public abstract class BaseTimedEvent : BotDomeEvent
     {
@@ -3175,18 +3905,17 @@ namespace Oxide.Plugins
       public float Duration { get; set; } = 600f;
     }
 
+    // Bradley / Patrol Helecopter general events & user-defined "timed" event
     // NOTE: reserve order 65-69
     public class TimedEvent : BaseTimedEvent
     {
       [JsonProperty(PropertyName = "Dynamic PVP Zone Settings", Order = 65)]
       public SphereCubeDynamicZone DynamicZone { get; set; } = new();
 
-      public override BaseDynamicZone GetDynamicZone()
-      {
-        return DynamicZone;
-      }
+      public override BaseDynamicZone GetDynamicZone() => DynamicZone;
     }
 
+    // Hackable Crate general event
     // NOTE: reserve order 70-79
     public class HackableCrateEvent : BaseTimedEvent, ITimedDisable
     {
@@ -3222,6 +3951,7 @@ namespace Oxide.Plugins
       }
     }
 
+    // Supply Signal / Timed Supply general event
     // NOTE: reserve order 80-89
     public class SupplyDropEvent : BaseTimedEvent, ITimedDisable
     {
@@ -3248,6 +3978,7 @@ namespace Oxide.Plugins
       }
     }
 
+    // Cargo Ship general event
     // NOTE: reserve order 90-99
     public class CargoShipEvent : DomeEvent
     {
@@ -3289,7 +4020,7 @@ namespace Oxide.Plugins
 
     #region Zone
 
-    // NOTE: reserve order 100-119
+    // NOTE: reserve order 100-199
     public abstract class BaseDynamicZone
     {
       [JsonProperty(PropertyName = "Zone Comfort", Order = 100)]
@@ -3341,7 +4072,7 @@ namespace Oxide.Plugins
           zoneSettings.Add("radiation");
           zoneSettings.Add(Radiation.ToString(CultureInfo.InvariantCulture));
         }
-        if (Math.Abs(Temperature) < 1e-8f)
+        if (Mathf.Abs(Temperature) < 1e-8f)
         {
           zoneSettings.Add("temperature");
           zoneSettings.Add(Temperature.ToString(CultureInfo.InvariantCulture));
@@ -3387,19 +4118,19 @@ namespace Oxide.Plugins
       protected abstract string[] GetZoneSettings(Transform transform = null);
     }
 
-    // NOTE: reserve order 140-149
+    // NOTE: reserve order 200-299
     public class SphereCubeDynamicZone : BaseDynamicZone, ISphereZone, ICubeZone, IRotateZone
     {
-      [JsonProperty(PropertyName = "Zone Radius", Order = 140)]
+      [JsonProperty(PropertyName = "Zone Radius", Order = 200)]
       public float Radius { get; set; }
 
-      [JsonProperty(PropertyName = "Zone Size", Order = 141)]
+      [JsonProperty(PropertyName = "Zone Size", Order = 201)]
       public Vector3 Size { get; set; }
 
-      [JsonProperty(PropertyName = "Zone Rotation", Order = 142)]
+      [JsonProperty(PropertyName = "Zone Rotation", Order = 202)]
       public float Rotation { get; set; }
 
-      [JsonProperty(PropertyName = "Fixed Rotation", Order = 143)]
+      [JsonProperty(PropertyName = "Fixed Rotation", Order = 203)]
       public bool FixedRotation { get; set; }
 
       public override string[] ZoneSettings(Transform transform = null) =>
@@ -3430,16 +4161,17 @@ namespace Oxide.Plugins
       }
     }
 
-    // NOTE: EXPERIMENTAL order 200-249
-    public class SphereCubeParentDynamicZone : BaseDynamicZone, ISphereZone, ICubeZone, IParentZone
+    // NOTE: reserve order 300-399
+    public class SphereCubeParentDynamicZone
+      : BaseDynamicZone, ISphereZone, ICubeZone, IParentZone
     {
-      [JsonProperty(PropertyName = "Zone Radius", Order = 200)]
+      [JsonProperty(PropertyName = "Zone Radius", Order = 300)]
       public float Radius { get; set; }
 
-      [JsonProperty(PropertyName = "Zone Size", Order = 201)]
+      [JsonProperty(PropertyName = "Zone Size", Order = 301)]
       public Vector3 Size { get; set; }
 
-      [JsonProperty(PropertyName = "Transform Position", Order = 202)]
+      [JsonProperty(PropertyName = "Transform Position", Order = 302)]
       public Vector3 Center { get; set; }
 
       public override string[] ZoneSettings(Transform transform = null) =>
@@ -3461,6 +4193,14 @@ namespace Oxide.Plugins
         GetBaseZoneSettings(zoneSettings);
         return zoneSettings.ToArray();
       }
+    }
+
+    // NOTE: reserve order 400-499
+    public class SphereCubeAutoGeoDynamicZone
+      : SphereCubeDynamicZone
+    {
+      [JsonProperty(PropertyName = "Auto-calculate zone geometry (overwrites existing values)", Order = 400)]
+      public bool DoAutoGeo { get; set; }
     }
 
     #region Interface
@@ -3530,6 +4270,8 @@ namespace Oxide.Plugins
 
     private void UpdateConfigValues()
     {
+      // handle plugin version updates
+      // ...unless config file indicates no version change
       if (configData.Version >= Version) return;
 
       if (configData.Version <= new VersionNumber(4, 2, 0))
@@ -3700,7 +4442,7 @@ namespace Oxide.Plugins
         ["EventStarted"] = "'{0}' event started successfully",
         ["EventStopped"] = "'{0}' event stopped successfully",
         ["Holster"] = "Ready your weapons!",
-        ["Showing"] = "Showing active zones for {0} second(s)",
+        ["ShowingZones"] = "Showing active zones within range {0} for {1} second(s)",
 
         ["AutoEventAutoStart"] = "'{0}' event auto start is {1}",
         ["AutoEventMove"] = "'{0}' event moves to your current location",
@@ -3733,7 +4475,7 @@ namespace Oxide.Plugins
         ["EventStarted"] = "'{0}' 事件成功开启",
         ["EventStopped"] = "'{0}' 事件成功停止",
         ["Holster"] = "准备好武器!",
-        ["Showing"] = "显示活动区域 {0} 秒",
+        ["ShowingZones"] = "显示 {0} 范围内的活动区域，持续 {1} 秒",
 
         ["AutoEventAutoStart"] = "'{0}' 事件自动开启状态为 {1}",
         ["AutoEventMove"] = "'{0}' 事件移到了您的当前位置",
