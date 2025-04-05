@@ -5,7 +5,9 @@ using Newtonsoft.Json;
 using Oxide.Core;
 using Oxide.Core.Plugins;
 using System;
+using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
 using UnityEngine;
 
 namespace Oxide.Plugins
@@ -16,7 +18,7 @@ namespace Oxide.Plugins
   {
     #region Fields
 
-    [PluginReference] private readonly Plugin TruePVE;
+    [PluginReference] private readonly Plugin _truePve;
 
     // user-defined plugin config data
     private ConfigData _configData = new();
@@ -62,8 +64,14 @@ namespace Oxide.Plugins
     //  false if CanEntityTakeDamage() hook handler should be used
     private bool _useExcludePlayer;
 
+    private Coroutine _createDataCoroutine;
+    private readonly YieldInstruction _fastYield = null;
+    private readonly YieldInstruction _throttleYield =
+      CoroutineEx.waitForSeconds(0.1f);
+    private float _targetFps = -1.0f;
+
     // ZoneManager zone ID prefix
-    private const string _zoneIdPrefix = "PlayerBasePVP:";
+    private const string ZoneIdPrefix = "PlayerBasePVP:";
 
     #endregion Fields
 
@@ -76,7 +84,8 @@ namespace Oxide.Plugins
       //  total building radius
       var buildingBounds = new Bounds(
         toolCupboard.CenterPoint(),
-        Vector3.one * _configData.building.minimumBuildingRadius / (float)Math.Sqrt(3));
+        Vector3.one *
+          _configData.Building.MinimumBuildingRadius / Mathf.Sqrt(3f));
 
       // get building, aborting if not found
       var building = toolCupboard.GetBuilding();
@@ -84,11 +93,11 @@ namespace Oxide.Plugins
 
       // precalculate extents for a cube whose space diagonal is the radius
       var minimumBlockExtents =
-        Vector3.one * _configData.building.minimumBlockRadius / (float)Math.Sqrt(3);
+        Vector3.one * _configData.Building.MinimumBlockRadius / Mathf.Sqrt(3f);
       // precalculate square of minimum block magnitude for comparison purposes
       var minimumBlockSqrMagnitude =
-        _configData.building.minimumBlockRadius *
-        _configData.building.minimumBlockRadius;
+        _configData.Building.MinimumBlockRadius *
+        _configData.Building.MinimumBlockRadius;
 
       // grow buildingBounds volume to contain all building blocks
       foreach (var entity in building.buildingBlocks)
@@ -100,7 +109,7 @@ namespace Oxide.Plugins
         //  the squared magnitude
         // this will probably always return true, unless minimumBlockRadius is
         //  set to a very small value
-        if (entityBounds.extents.Max() < _configData.building.minimumBlockRadius
+        if (entityBounds.extents.Max() < _configData.Building.MinimumBlockRadius
             && entityBounds.extents.sqrMagnitude < minimumBlockSqrMagnitude)
         {
           // block is smaller than the minimum, so substitute in the minimum
@@ -121,12 +130,9 @@ namespace Oxide.Plugins
     private static bool CancelDictionaryTimer<T>(
       ref Dictionary<T, Timer> dictionary, T key)
     {
-      if (dictionary.Remove(key, out var cTimer))
-      {
-        cTimer.Destroy();
-        return true;
-      }
-      return false;
+      if (!dictionary.Remove(key, out var cTimer)) return false;
+      cTimer.Destroy();
+      return true;
     }
 
     // BuildingBlock wrapper for GetToolCupboard()
@@ -153,12 +159,10 @@ namespace Oxide.Plugins
       //  physically attached (credit: Kulltero for this more efficient method)
       foreach (var toolCupboard in building.buildingPrivileges)
       {
-        if (building.decayEntities.Contains(toolCupboard))
-        {
-          // only one TC can be connected, so return it, unless it's not
-          //  player-owned
-          return IsPlayerOwned(toolCupboard) ? toolCupboard : null;
-        }
+        if (!building.decayEntities.Contains(toolCupboard)) continue;
+        // only one TC can be connected, so return it - or null if it's not
+        //  player-owned
+        return IsPlayerOwned(toolCupboard) ? toolCupboard : null;
       }
 
       // no attached player-owned TC found
@@ -180,6 +184,12 @@ namespace Oxide.Plugins
 
     private static ulong? GetOwnerID(EntityPrivilege legacyShelter)
     {
+      if (!legacyShelter) return null;
+      // OwnerID is zero for shelters for some reason, so find the first
+      //  authorized player (if any)
+      // only one player can normally auth to a shelter, but we also want to
+      //  account for the possibility of plugin-spawned shelters that are authed
+      //  to non-player(s)
       foreach (var playerNameID in legacyShelter.authorizedPlayers)
       {
         if (playerNameID.userid.IsSteamId()) return playerNameID.userid;
@@ -197,54 +207,50 @@ namespace Oxide.Plugins
     }
 
     // OwnerID is zero for shelters for some reason, so check auth list
-    private static bool IsPlayerOwned(EntityPrivilege legacyShelter)
-    {
-      if (null == legacyShelter) return false;
-      foreach (var playerNameID in legacyShelter.authorizedPlayers)
-      {
-        if (playerNameID.userid.IsSteamId()) return true;
-      }
-      return false;
-    }
+    private static bool IsPlayerOwned(EntityPrivilege legacyShelter) =>
+      null != GetOwnerID(legacyShelter);
 
     private static bool IsPlayerOwned(DecayEntity decayEntity) =>
-      null != decayEntity && decayEntity.OwnerID.IsSteamId();
+      decayEntity && decayEntity.OwnerID.IsSteamId();
 
     private static bool IsValid(BaseNetworkable baseNetworkable) =>
-      null != baseNetworkable &&
+      baseNetworkable &&
       !baseNetworkable.IsDestroyed &&
       null != baseNetworkable.net &&
-      null != baseNetworkable.transform;
+      baseNetworkable.transform;
 
     private void NotifyOwnerAbort(ulong ownerID)
     {
       var player = BasePlayer.FindByID(ownerID);
-      if (null == player || !player.userID.IsSteamId()) return;
+      if (!player || !player.userID.IsSteamId()) return;
       var message = lang.GetMessage(
         "NotifyOwnerAbort", this, player.UserIDString);
-      SendReply(player, string.Format(message, _configData.prefixNotify));
+      SendReply(player, string.Format(message, _configData.PrefixNotify));
     }
 
     private void NotifyOwnerCreate(ulong ownerID)
     {
       var player = BasePlayer.FindByID(ownerID);
-      if (null == player || !player.userID.IsSteamId()) return;
+      if (!player || !player.userID.IsSteamId()) return;
       var message = lang.GetMessage(
         "NotifyOwnerCreate", this, player.UserIDString);
-      SendReply(player, string.Format(message, _configData.prefixNotify, _configData.createDelaySeconds));
+      SendReply(player, string.Format(
+        message, _configData.PrefixNotify, _configData.CreateDelaySeconds));
     }
 
     private void NotifyZoneDelete(NetworkableId baseID)
     {
-      var playersInZone = ZM_GetPlayersInZone(GetZoneID(baseID));
-      if (null == playersInZone) return;
+      var playersInZone = Pool.Get<List<BasePlayer>>();
+      ZM_GetPlayersInZone(GetZoneID(baseID), playersInZone);
       foreach (var player in playersInZone)
       {
-        if (null == player || !player.userID.IsSteamId()) continue;
+        if (!player || !player.userID.IsSteamId()) continue;
         var message = lang.GetMessage(
           "NotifyZoneDelete", this, player.UserIDString);
-        SendReply(player, string.Format(message, _configData.prefixNotify, _configData.deleteDelaySeconds));
+        SendReply(player, string.Format(
+          message, _configData.PrefixNotify, _configData.DeleteDelaySeconds));
       }
+      Pool.FreeUnmanaged(ref playersInZone);
     }
 
     // detect and handle any updates to physical footprint of given TC ID's
@@ -265,14 +271,14 @@ namespace Oxide.Plugins
       // NOTE: lacking a TC reference is pathological, as it should only occur
       //  when a building is pending deletion, which we've already checked
       if (!_buildingData.TryGetValue(toolCupboardID, out var buildingData) ||
-          null == buildingData.ToolCupboard ||
+          null == buildingData ||
           !IsValid(buildingData.ToolCupboard))
       {
         return;
       }
 
       // get cached TC
-      BuildingPrivlidge toolCupboard = buildingData.ToolCupboard;
+      var toolCupboard = buildingData.ToolCupboard;
 
       // get building record, aborting if not found
       var building = toolCupboard.GetBuilding();
@@ -284,7 +290,7 @@ namespace Oxide.Plugins
 
       // abort if footprint basically unchanged
       if (buildingData.Location == buildingBounds.center &&
-          Math.Abs(buildingData.Radius - radius) <= float.Epsilon)
+          Mathf.Approximately(buildingData.Radius, radius))
       {
         return;
       }
@@ -338,7 +344,8 @@ namespace Oxide.Plugins
     }
 
     // delete building record + zone for given TC ID
-    private void DeleteBuildingData(NetworkableId toolCupboardID)
+    private void DeleteBuildingData(
+      NetworkableId toolCupboardID, List<string> bulkDeleteList = null)
     {
       // clean up any deletion timer that may have invoked this
       CancelDictionaryTimer(ref _buildingDeleteTimers, toolCupboardID);
@@ -350,7 +357,16 @@ namespace Oxide.Plugins
       Pool.Free(ref buildingData);
 
       // destroy building zone
-      ZM_EraseZone(toolCupboardID);
+      if (null == bulkDeleteList)
+      {
+        // ...immediately
+        ZM_EraseZone(toolCupboardID);
+      }
+      else
+      {
+        // ...by adding to given bulk delete list
+        bulkDeleteList.Add(GetZoneID(toolCupboardID));
+      }
 
       // destroy mapping
       TP_RemoveMapping(toolCupboardID);
@@ -374,7 +390,7 @@ namespace Oxide.Plugins
 
       // schedule call
       _buildingCheckTimers.Add(toolCupboardID, timer.Once(
-        _configData.building.checkDelaySeconds,
+        _configData.Building.CheckDelaySeconds,
         () => CheckBuildingData(toolCupboardID)));
     }
 
@@ -397,14 +413,11 @@ namespace Oxide.Plugins
 
       // schedule call
       _buildingCreateTimers.Add(toolCupboardID, timer.Once(
-        _configData.createDelaySeconds,
+        _configData.CreateDelaySeconds,
         () => CreateBuildingData(toolCupboard)));
 
       // notify player
-      if (_configData.createNotify)
-      {
-        NotifyOwnerCreate(toolCupboard.OwnerID);
-      }
+      if (_configData.CreateNotify) NotifyOwnerCreate(toolCupboard.OwnerID);
     }
 
     // schedule a delayed building deletion
@@ -413,11 +426,11 @@ namespace Oxide.Plugins
     private void ScheduleDeleteBuildingData(
       NetworkableId toolCupboardID, ulong ownerID)
     {
-      bool notifyZone = _configData.deleteNotify;
+      var notifyZone = _configData.DeleteNotify;
 
       // notify owner if this was pending creation
       if (CancelDictionaryTimer(ref _buildingCreateTimers, toolCupboardID) &&
-          _configData.createNotify)
+          _configData.CreateNotify)
       {
         NotifyOwnerAbort(ownerID);
         // suppress zone notify because there isn't one yet
@@ -436,7 +449,7 @@ namespace Oxide.Plugins
 
       // schedule call
       _buildingDeleteTimers.Add(toolCupboardID, timer.Once(
-        _configData.deleteDelaySeconds,
+        _configData.DeleteDelaySeconds,
         () => DeleteBuildingData(toolCupboardID)));
 
       // notify players
@@ -464,7 +477,7 @@ namespace Oxide.Plugins
         PrintError("CreateShelterData(): Failed to allocate ShelterData from pool");
         return;
       }
-      shelterData.Init(legacyShelter, _configData.shelter.radius);
+      shelterData.Init(legacyShelter, _configData.Shelter.Radius);
       _shelterData.Add(legacyShelterID, shelterData);
 
       // create zone
@@ -476,7 +489,8 @@ namespace Oxide.Plugins
     }
 
     // delete shelter record + zone for given LS ID
-    private void DeleteShelterData(NetworkableId legacyShelterID)
+    private void DeleteShelterData(
+      NetworkableId legacyShelterID, List<string> bulkDeleteList = null)
     {
       // clean up any deletion timer that may have invoked this
       CancelDictionaryTimer(ref _shelterDeleteTimers, legacyShelterID);
@@ -488,7 +502,16 @@ namespace Oxide.Plugins
       Pool.Free(ref shelterData);
 
       // destroy shelter zone
-      ZM_EraseZone(legacyShelterID);
+      if (null == bulkDeleteList)
+      {
+        // ...immediately
+        ZM_EraseZone(legacyShelterID);
+      }
+      else
+      {
+        // ...by adding to given bulk delete list
+        bulkDeleteList.Add(GetZoneID(legacyShelterID));
+      }
 
       // destroy mapping
       TP_RemoveMapping(legacyShelterID);
@@ -511,15 +534,13 @@ namespace Oxide.Plugins
 
       // schedule call
       _shelterCreateTimers.Add(legacyShelterID, timer.Once(
-        _configData.createDelaySeconds,
+        _configData.CreateDelaySeconds,
         () => CreateShelterData(legacyShelter)));
 
       // notify players
-      if (_configData.createNotify)
-      {
-        var ownerID = GetOwnerID(legacyShelter);
-        if (ownerID != null) NotifyOwnerCreate((ulong)ownerID);
-      }
+      if (!_configData.CreateNotify) return;
+      var ownerID = GetOwnerID(legacyShelter);
+      if (null != ownerID) NotifyOwnerCreate((ulong)ownerID);
     }
 
     // schedule a delayed shelter deletion
@@ -528,11 +549,11 @@ namespace Oxide.Plugins
     private void ScheduleDeleteShelterData(
       NetworkableId legacyShelterID, ulong? ownerID)
     {
-      bool notifyZone = _configData.deleteNotify;
+      var notifyZone = _configData.DeleteNotify;
 
       // notify owner if this was pending creation
       if (CancelDictionaryTimer(ref _shelterCreateTimers, legacyShelterID) &&
-          _configData.createNotify)
+          _configData.CreateNotify)
       {
         if (null != ownerID) NotifyOwnerAbort((ulong)ownerID);
         // suppress zone notify because there isn't one yet
@@ -548,7 +569,7 @@ namespace Oxide.Plugins
 
       // schedule call
       _shelterDeleteTimers.Add(legacyShelterID, timer.Once(
-        _configData.deleteDelaySeconds,
+        _configData.DeleteDelaySeconds,
         () => DeleteShelterData(legacyShelterID)));
 
       // notify players in zone
@@ -574,8 +595,8 @@ namespace Oxide.Plugins
         return;
       }
       tugboatData.Init(
-        tugboat, _configData.tugboat.radius,
-        _configData.tugboat.forceNetworking, _configData.tugboat.forceBuoyancy);
+        tugboat, _configData.Tugboat.Radius,
+        _configData.Tugboat.ForceNetworking, _configData.Tugboat.ForceBuoyancy);
       _tugboatData.Add(tugboatID, tugboatData);
 
       // create zone
@@ -587,7 +608,8 @@ namespace Oxide.Plugins
     }
 
     // delete tugboat record + zone for given tugboat ID
-    private void DeleteTugboatData(NetworkableId tugboatID)
+    private void DeleteTugboatData(
+      NetworkableId tugboatID, List<string> bulkDeleteList = null)
     {
       // clean up any deletion timer that may have invoked this
       CancelDictionaryTimer(ref _tugboatDeleteTimers, tugboatID);
@@ -599,7 +621,16 @@ namespace Oxide.Plugins
       Pool.Free(ref tugboatData);
 
       // destroy tugboat zone
-      ZM_EraseZone(tugboatID);
+      if (null == bulkDeleteList)
+      {
+        // ...immediately
+        ZM_EraseZone(tugboatID);
+      }
+      else
+      {
+        // ...by adding to given bulk delete list
+        bulkDeleteList.Add(GetZoneID(tugboatID));
+      }
 
       // destroy mapping
       TP_RemoveMapping(tugboatID);
@@ -619,34 +650,34 @@ namespace Oxide.Plugins
 
       // schedule call
       _tugboatDeleteTimers.Add(tugboatID, timer.Once(
-        _configData.deleteDelaySeconds, () => DeleteTugboatData(tugboatID)));
+        _configData.DeleteDelaySeconds, () => DeleteTugboatData(tugboatID)));
 
       // notify players in zone
-      if (_configData.deleteNotify) NotifyZoneDelete(tugboatID);
+      if (_configData.DeleteNotify) NotifyZoneDelete(tugboatID);
     }
 
     // activate/restart PvP delay for given player and send notification
     // does nothing if no PvP delay configured
     // notifies if delay not already active
     // restarts delay if already active
-    // if zoneID changes with an already-active delay, sends stop notification
-    //  for old zoneID, plus start notification for new one
+    // sends stop notification for old zoneID, plus start notification for new
+    //  one, if zoneID changes with an already-active delay
     private void PlayerBasePvpDelayStart(ulong playerID, string zoneID)
     {
       // abort if no delay configured
-      if (_configData.pvpDelaySeconds <= 0.0f) return;
+      if (_configData.PvpDelaySeconds <= 0.0f) return;
 
       if (_pvpDelayTimers.TryGetValue(playerID, out var delayData))
       {
         // delay already active - reset timer
-        delayData.Item1.Reset(_configData.pvpDelaySeconds);
+        delayData.Item1.Reset(_configData.PvpDelaySeconds);
 
         // handle zone change
         if (zoneID != delayData.Item2)
         {
           // fire notification hook for old zone
-          Interface.CallHook(
-            "OnPlayerBasePvpDelayStop", playerID, delayData.Item2);
+          Interface.CallHook("OnPlayerBasePvpDelayStop",
+            playerID, delayData.Item2);
 
           // record new zone
           delayData.Item2 = zoneID;
@@ -656,7 +687,7 @@ namespace Oxide.Plugins
       {
         // no delay active - start+record one
         _pvpDelayTimers.Add(playerID, (timer.Once(
-          _configData.pvpDelaySeconds, () => PlayerBasePvpDelayStop(
+          _configData.PvpDelaySeconds, () => PlayerBasePvpDelayStop(
             playerID)), zoneID));
       }
 
@@ -666,8 +697,8 @@ namespace Oxide.Plugins
       // also notify TruePVE if we're doing that
       if (_useExcludePlayer)
       {
-        Interface.CallHook(
-          "ExcludePlayer", playerID, _configData.pvpDelaySeconds, this);
+        Interface.CallHook("ExcludePlayer",
+          playerID, _configData.PvpDelaySeconds, this);
       }
     }
 
@@ -695,23 +726,101 @@ namespace Oxide.Plugins
     //  wouldn't hurt
     private void PurgeOldZones()
     {
-      var zoneIds = ZM_GetZoneIDs();
-      if (null == zoneIds) return;
+      // get list of all active Zone Manager zone IDs
+      var zoneIds = Pool.Get<List<string>>();
+      ZM_GetZoneIDs(zoneIds);
+      if (zoneIds.Count <= 0)
+      {
+        Pool.FreeUnmanaged(ref zoneIds);
+        return;
+      }
 
-      uint zoneCount = 0;
-      uint mappingCount = 0;
-
+      var mappingCount = 0U;
+      var eraseList = Pool.Get<List<string>>();
       foreach (var zoneId in zoneIds)
       {
-        if (!zoneId.Contains(_zoneIdPrefix)) continue;
-        // this is one of ours - delete it
-        if (ZM_EraseZone(zoneId)) ++zoneCount;
-        // ...and any corresponding mapping
+        if (!zoneId.Contains(ZoneIdPrefix)) continue;
+        // this is one of ours - add to delete request list
+        eraseList.Add(zoneId);
+        // ...and delete TruePVE mapping
         if (TP_RemoveMapping(zoneId)) ++mappingCount;
       }
+      Pool.FreeUnmanaged(ref zoneIds);
+      // bulk delete zones
+      var eraseResults = Pool.Get<List<bool>>();
+      ZM_EraseZones(eraseList, eraseResults);
+      Pool.FreeUnmanaged(ref eraseList);
+      // count how many zones actually got deleted
+      var zoneCount = 0U;
+      foreach (var result in eraseResults) if (result) ++zoneCount;
+      Pool.FreeUnmanaged(ref eraseResults);
 
       Puts($"OnServerInitialized():  Deleted {zoneCount} dangling zone(s)...");
       Puts($"OnServerInitialized():  Deleted {mappingCount} dangling mapping(s)...");
+    }
+
+    // utility method to return an appropriate yield instruction based on
+    //  whether this is a long pause for debug logging to catch up, whether
+    //  current server framerate is too low, etc.
+    private YieldInstruction DynamicYield()
+    {
+      // perform one-time caching of target FPS
+      if (_targetFps <= 0) _targetFps = Mathf.Min(ConVar.FPS.limit, 30);
+
+      return
+        Performance.report.frameRate >= _targetFps ? _fastYield :
+        _throttleYield;
+    }
+
+    // coroutine method to asynchronously create zones for all existing bases
+    private IEnumerator CreateData()
+    {
+      var startTime = DateTime.UtcNow;
+
+      Puts("CreateData(): Starting zone creation...");
+
+      // create zones for all existing player-owned bases
+      foreach (var (_, building) in BuildingManager.server.buildingDictionary)
+      {
+        var toolCupboard = GetToolCupboard(building);
+        if (!IsValid(toolCupboard) || !IsPlayerOwned(toolCupboard)) continue;
+        CreateBuildingData(toolCupboard);
+        yield return DynamicYield();
+      }
+      Puts($"CreateData():  Created {_buildingData.Count} building zones...");
+
+      // create zones for all existing player-owned legacy shelters
+      foreach (var (_, shelterList) in LegacyShelter.SheltersPerPlayer)
+      {
+        foreach (var shelter in shelterList)
+        {
+          if (!IsValid(shelter) ||
+              !shelter.entityPrivilege.TryGet(true, out var legacyShelter) ||
+              !IsPlayerOwned(legacyShelter))
+          {
+            continue;
+          }
+          CreateShelterData(legacyShelter);
+          yield return DynamicYield();
+        }
+      }
+      Puts($"CreateData():  Created {_shelterData.Count} shelter zones...");
+
+      // create zones for all existing tugboats
+      foreach (var serverEntity in BaseNetworkable.serverEntities)
+      {
+        if (serverEntity is not VehiclePrivilege tugboat || !IsValid(tugboat))
+        {
+          continue;
+        }
+        CreateTugboatData(tugboat);
+        yield return DynamicYield();
+      }
+      Puts($"CreateData():  Created {_tugboatData.Count} tugboat zones...");
+
+      Puts($"CreateData(): ...Startup completed in {(DateTime.UtcNow - startTime).TotalSeconds} seconds.");
+
+      _createDataCoroutine = null;
     }
 
     #endregion Core Methods
@@ -720,7 +829,7 @@ namespace Oxide.Plugins
 
     protected override void LoadDefaultMessages()
     {
-      lang.RegisterMessages(new()
+      lang.RegisterMessages(new Dictionary<string, string>
       {
         ["NotifyOwnerAbort"] =
           "{0}Player Base PvP Zone creation canceled",
@@ -738,15 +847,13 @@ namespace Oxide.Plugins
     private void Init()
     {
       if (null == _configData) return;
-      BaseData.SphereDarkness = _configData.sphereDarkness;
+      BaseData.SphereDarkness = _configData.SphereDarkness;
     }
 
     private void OnServerInitialized()
     {
-      Puts("OnServerInitialized(): Starting up...");
-
       _useExcludePlayer =
-        null != TruePVE && TruePVE.Version >= new VersionNumber(2, 2, 3);
+        null != _truePve && _truePve.Version >= new VersionNumber(2, 2, 3);
       if (_useExcludePlayer)
       {
         Puts("OnServerInitialized(): TruePVE 2.2.3+ detected! TruePVE PVP delays will be used");
@@ -756,47 +863,16 @@ namespace Oxide.Plugins
       // purge any dangling zones
       PurgeOldZones();
 
-      // create zones immediately for all existing player-owned bases
-      foreach (var (_, building) in BuildingManager.server.buildingDictionary)
+      NextTick(() =>
       {
-        var toolCupboard = GetToolCupboard(building);
-        if (IsValid(toolCupboard) && IsPlayerOwned(toolCupboard))
-        {
-          CreateBuildingData(toolCupboard);
-        }
-      }
-      Puts($"OnServerInitialized():  Created {_buildingData.Count} building zones...");
-
-      // create zones immediately for all existing player-owned legacy shelters
-      foreach (var (_, shelterList) in LegacyShelter.SheltersPerPlayer)
-      {
-        foreach (var shelter in shelterList)
-        {
-          if (IsValid(shelter) &&
-              shelter.entityPrivilege.TryGet(true, out var legacyShelter) &&
-              IsPlayerOwned(legacyShelter))
-          {
-            CreateShelterData(legacyShelter);
-          }
-        }
-      }
-      Puts($"OnServerInitialized():  Created {_shelterData.Count} shelter zones...");
-
-      // create zones immediately for all existing tugboats
-      foreach (var serverEntity in BaseNetworkable.serverEntities)
-      {
-        if (serverEntity is VehiclePrivilege tugboat && IsValid(tugboat))
-        {
-          CreateTugboatData(tugboat);
-        }
-      }
-      Puts($"OnServerInitialized():  Created {_tugboatData.Count} tugboat zones...");
-
-      Puts("OnServerInitialized(): ...Startup complete.");
+        _createDataCoroutine = ServerMgr.Instance.StartCoroutine(CreateData());
+      });
     }
 
     private static void DestroyBaseDataDictionary<T>(
-      ref Dictionary<NetworkableId, T> dict, Action<NetworkableId> deleter)
+      ref Dictionary<NetworkableId, T> dict,
+      Action<NetworkableId, List<string>> deleter,
+      List<string> bulkDeleteList)
     {
       var networkableIds = Pool.Get<List<NetworkableId>>();
       foreach (var (networkableId, _) in dict)
@@ -805,7 +881,7 @@ namespace Oxide.Plugins
       }
       foreach(var networkableId in networkableIds)
       {
-        deleter(networkableId);
+        deleter(networkableId, bulkDeleteList);
       }
       dict.Clear();
       Pool.FreeUnmanaged(ref networkableIds);
@@ -821,15 +897,42 @@ namespace Oxide.Plugins
 
     private void Unload()
     {
+      if (null != _createDataCoroutine)
+      {
+        ServerMgr.Instance.StopCoroutine(_createDataCoroutine);
+        _createDataCoroutine = null;
+      }
+
       Puts("Unload(): Cleaning up...");
+      // cleanup base zones
+      var bulkDeleteList = Pool.Get<List<string>>();
       if (_buildingData.Count > 0)
       {
         Puts($"Unload():  Destroying {_buildingData.Count} building zone records...");
-        DestroyBaseDataDictionary(ref _buildingData, DeleteBuildingData);
+        DestroyBaseDataDictionary(
+          ref _buildingData, DeleteBuildingData, bulkDeleteList);
       }
       DestroyTimerDictionary(ref _buildingCheckTimers, "building check");
       DestroyTimerDictionary(ref _buildingCreateTimers, "building creation");
       DestroyTimerDictionary(ref _buildingDeleteTimers, "building deletion");
+      if (_shelterData.Count > 0)
+      {
+        Puts($"Unload():  Destroying {_shelterData.Count} shelter zone records...");
+        DestroyBaseDataDictionary(
+          ref _shelterData, DeleteShelterData, bulkDeleteList);
+      }
+      DestroyTimerDictionary(ref _shelterCreateTimers, "shelter creation");
+      DestroyTimerDictionary(ref _shelterDeleteTimers, "shelter deletion");
+      if (_tugboatData.Count > 0)
+      {
+        Puts($"Unload():  Destroying {_tugboatData.Count} tugboat zone records...");
+        DestroyBaseDataDictionary(
+          ref _tugboatData, DeleteTugboatData, bulkDeleteList);
+      }
+      DestroyTimerDictionary(ref _tugboatDeleteTimers, "tugboat deletion");
+      if (bulkDeleteList.Count > 0) ZM_EraseZones(bulkDeleteList);
+      Pool.FreeUnmanaged(ref bulkDeleteList);
+      // cleanup player records
       if (_playerZones.Count > 0)
       {
         Puts($"Unload():  Destroying {_playerZones.Count} player-in-zones records...");
@@ -844,23 +947,12 @@ namespace Oxide.Plugins
       if (_pvpDelayTimers.Count > 0)
       {
         Puts($"Unload():  Destroying {_pvpDelayTimers.Count} player PvP delay timers...");
-        foreach (var (_, timerData) in _pvpDelayTimers) timerData.Item1.Destroy();
+        foreach (var (_, timerData) in _pvpDelayTimers)
+        {
+          timerData.Item1.Destroy();
+        }
         _buildingDeleteTimers.Clear();
       }
-      if (_shelterData.Count > 0)
-      {
-        Puts($"Unload():  Destroying {_shelterData.Count} shelter zone records...");
-        DestroyBaseDataDictionary(ref _shelterData, DeleteShelterData);
-      }
-      DestroyTimerDictionary(ref _shelterCreateTimers, "shelter creation");
-      DestroyTimerDictionary(ref _shelterDeleteTimers, "shelter deletion");
-      if (_tugboatData.Count > 0)
-      {
-        Puts($"Unload():  Destroying {_tugboatData.Count} tugboat zone records...");
-        DestroyBaseDataDictionary(ref _tugboatData, DeleteTugboatData);
-      }
-      DestroyTimerDictionary(ref _tugboatDeleteTimers, "tugboat deletion");
-
       Puts("Unload(): ...Cleanup complete.");
     }
 
@@ -877,30 +969,30 @@ namespace Oxide.Plugins
       try
       {
         _configData = Config.ReadObject<ConfigData>();
-        if (_configData == null)
+        if (null == _configData)
         {
           LoadDefaultConfig();
         }
         else
         {
-          ClampToZero(ref _configData.createDelaySeconds, "createDelaySeconds");
-          ClampToZero(ref _configData.deleteDelaySeconds, "deleteDelaySeconds");
-          ClampToZero(ref _configData.pvpDelaySeconds, "pvpDelaySeconds");
-          if (_configData.sphereDarkness > 10)
+          ClampToZero(ref _configData.CreateDelaySeconds, "createDelaySeconds");
+          ClampToZero(ref _configData.DeleteDelaySeconds, "deleteDelaySeconds");
+          ClampToZero(ref _configData.PvpDelaySeconds, "pvpDelaySeconds");
+          if (_configData.SphereDarkness > 10)
           {
-            PrintWarning($"Illegal sphereDarkness={_configData.sphereDarkness} value; clamping to 10");
-            _configData.sphereDarkness = 10;
+            PrintWarning($"Illegal sphereDarkness={_configData.SphereDarkness} value; clamping to 10");
+            _configData.SphereDarkness = 10;
           }
-          if (string.IsNullOrEmpty(_configData.rulesetName))
+          if (string.IsNullOrEmpty(_configData.RulesetName))
           {
-            PrintWarning($"Illegal truePveRuleset={_configData.rulesetName} value; resetting to \"exclude\"");
-            _configData.rulesetName = "exclude";
+            PrintWarning($"Illegal truePveRuleset={_configData.RulesetName} value; resetting to \"exclude\"");
+            _configData.RulesetName = "exclude";
           }
-          ClampToZero(ref _configData.building.checkDelaySeconds, "building.checkDelaySeconds");
-          ClampToZero(ref _configData.building.minimumBuildingRadius, "building.minimumBuildingRadius");
-          ClampToZero(ref _configData.building.minimumBlockRadius, "building.minimumBlockRadius");
-          ClampToZero(ref _configData.shelter.radius, "shelter.radius");
-          ClampToZero(ref _configData.tugboat.radius, "tugboat.radius");
+          ClampToZero(ref _configData.Building.CheckDelaySeconds, "building.checkDelaySeconds");
+          ClampToZero(ref _configData.Building.MinimumBuildingRadius, "building.minimumBuildingRadius");
+          ClampToZero(ref _configData.Building.MinimumBlockRadius, "building.minimumBlockRadius");
+          ClampToZero(ref _configData.Shelter.Radius, "shelter.radius");
+          ClampToZero(ref _configData.Tugboat.Radius, "tugboat.radius");
         }
       }
       catch (Exception ex)
@@ -925,7 +1017,7 @@ namespace Oxide.Plugins
     {
       // cache tugboat ID
       var tugboatPrivilege = GetVehiclePrivilege(tugboat);
-      if (null == tugboatPrivilege) return;
+      if (!tugboatPrivilege) return;
       var tugboatID = GetNetworkableID(tugboatPrivilege);
 
       // if we have a record on this tugboat, clear its entity reference ASAP to
@@ -941,11 +1033,8 @@ namespace Oxide.Plugins
       // also untether ZoneManager zone if present, so that it doesn't disappear
       UntetherZone(GetZoneID(tugboatID), tugboat);
 
-      NextTick(() =>
-      {
-        // schedule deletion of the dropped base
-        ScheduleDeleteTugboatData(tugboatID);
-      });
+      // schedule deletion of the dropped base
+      NextTick(() => ScheduleDeleteTugboatData(tugboatID));
     }
 
     // called when a building block is destroyed
@@ -958,16 +1047,13 @@ namespace Oxide.Plugins
       var toolCupboard = GetToolCupboard(buildingBlock);
 
       // abort if no TC found, since there's nothing we can do without one
-      if (null == toolCupboard) return;
+      if (!toolCupboard) return;
 
       // cache TC ID
       var toolCupboardID = GetNetworkableID(toolCupboard);
 
-      NextTick(() =>
-      {
-        // schedule a check of the updated player base
-        ScheduleCheckBuildingData(toolCupboardID);
-      });
+      // schedule a check of the updated player base
+      NextTick(() => ScheduleCheckBuildingData(toolCupboardID));
     }
 
     // called when a TC is destroyed
@@ -991,11 +1077,8 @@ namespace Oxide.Plugins
         buildingData.ClearEntity();
       }
 
-      NextTick(() =>
-      {
-        // schedule deletion of the dropped base
-        ScheduleDeleteBuildingData(toolCupboardID, ownerID);
-      });
+      // schedule deletion of the dropped base
+      NextTick(() => ScheduleDeleteBuildingData(toolCupboardID, ownerID));
     }
 
     // called when a legacy shelter is destroyed
@@ -1019,11 +1102,8 @@ namespace Oxide.Plugins
         shelterData.ClearEntity();
       }
 
-      NextTick(() =>
-      {
-        // schedule deletion of the dropped base
-        ScheduleDeleteShelterData(legacyShelterID, ownerID);
-      });
+      // schedule deletion of the dropped base
+      NextTick(() => ScheduleDeleteShelterData(legacyShelterID, ownerID));
     }
 
     // called when a tugboat despawns
@@ -1047,11 +1127,8 @@ namespace Oxide.Plugins
       // abort if this isn't a player-owned TC
       if (!IsPlayerOwned(toolCupboard)) return;
 
-      NextTick(() =>
-      {
-        // schedule creation of new player base record + zone
-        ScheduleCreateBuildingData(toolCupboard);
-      });
+      // schedule creation of new player base record + zone
+      NextTick(() => ScheduleCreateBuildingData(toolCupboard));
     }
 
     // called when a legacy shelter is spawned
@@ -1077,13 +1154,10 @@ namespace Oxide.Plugins
     //  with player owner set
     private void OnEntitySpawned(VehiclePrivilege tugboat)
     {
-      NextTick(() =>
-      {
-        // immediately create new player base record + zone
-        // (tugboats have no creation delay because players can't normally
-        //  (de)spawn them at will)
-        CreateTugboatData(tugboat);
-      });
+      // immediately create new player base record + zone
+      // (tugboats have no creation delay because players can't normally
+      //  (de)spawn them at will)
+      NextTick(() => CreateTugboatData(tugboat));
     }
 
     // custom hook defined by this plugin to return originating zoneID if player
@@ -1103,52 +1177,40 @@ namespace Oxide.Plugins
     // return NetworkableId from a given ZoneManager zoneID string, or null if
     //  not found
     private static NetworkableId? GetNetworkableID(string zoneID) =>
-      zoneID.StartsWith(_zoneIdPrefix) && ulong.TryParse(
-        zoneID.Substring(_zoneIdPrefix.Length), out var value) ?
+      zoneID.StartsWith(ZoneIdPrefix) && ulong.TryParse(
+        zoneID.Substring(ZoneIdPrefix.Length), out var value) ?
           new NetworkableId(value) : null;
 
     // synthesize ZoneManager zoneID string from networkableID
     private static string GetZoneID(NetworkableId networkableID) =>
-      _zoneIdPrefix + networkableID.ToString();
+      ZoneIdPrefix + networkableID.ToString();
 
     // get options array for ZoneManager zone creation
     private string[] GetZoneOptions(string zoneName, float radius) =>
-      _configData.zoneMessages ?
+      _configData.ZoneMessages ?
         new[]
         {
           "name", zoneName,
-          "radius", radius.ToString(),
+          "radius", radius.ToString(CultureInfo.InvariantCulture),
           "enter_message", lang.GetMessage("MessageZoneEnter", this),
           "leave_message", lang.GetMessage("MessageZoneExit", this)
         } :
-        new[] { "radius", radius.ToString() };
+        new[] { "radius", radius.ToString(CultureInfo.InvariantCulture) };
 
     // tether a ZoneManager zone to a transform
     // credit: CatMeat & Arainrr for examples via DynamicPVP
     private static void TetherZone(string zoneID, Transform parentTransform)
     {
       var zoneTransform = ZM_GetZoneByID(zoneID)?.transform;
-      if (null == zoneTransform) return;
+      if (!zoneTransform) return;
       zoneTransform.SetParent(parentTransform);
       zoneTransform.rotation = parentTransform.rotation;
       zoneTransform.position = parentTransform.position;
     }
 
     // untether a ZoneManager zone from its parent transform (if any)
-    private static void UntetherZone(string zoneID, BaseEntity parentEntity)
-    {
-      var zone = ZM_GetZoneByID(zoneID);
-      var zoneTransform = zone?.transform;
-      var parentTransform = parentEntity.transform;
-      var position = parentTransform.position;
-      // abort if we didn't find the zone, or it's not parented
-      if (null == zone || null == zoneTransform ||
-          null == zoneTransform.parent || null == position)
-      {
-        return;
-      }
-      zoneTransform.parent = null;
-    }
+    private static void UntetherZone(string zoneID, BaseEntity parentEntity) =>
+      ZM_GetZoneByID(zoneID)?.transform.SetParent(null, true);
 
     // create or update a ZoneManager zone
     private static bool ZM_CreateOrUpdateZone(
@@ -1161,14 +1223,14 @@ namespace Oxide.Plugins
     private bool ZM_CreateOrUpdateZone(
       BuildingData buildingData, NetworkableId? toolCupboardID = null)
     {
-      if (null == toolCupboardID && null != buildingData.ToolCupboard)
+      if (null == toolCupboardID && buildingData.ToolCupboard)
       {
         toolCupboardID = GetNetworkableID(buildingData.ToolCupboard);
       }
       if (null == toolCupboardID) return false;
       return ZM_CreateOrUpdateZone(
         GetZoneID((NetworkableId)toolCupboardID),
-        GetZoneOptions(_zoneIdPrefix + "building", buildingData.Radius),
+        GetZoneOptions(ZoneIdPrefix + "building", buildingData.Radius),
         buildingData.Location);
     }
 
@@ -1177,14 +1239,14 @@ namespace Oxide.Plugins
     private bool ZM_CreateOrUpdateZone(
       ShelterData shelterData, NetworkableId? legacyShelterID = null)
     {
-      if (null == legacyShelterID && null != shelterData.LegacyShelter)
+      if (null == legacyShelterID && shelterData.LegacyShelter)
       {
         legacyShelterID = GetNetworkableID(shelterData.LegacyShelter);
       }
       if (null == legacyShelterID) return false;
       return ZM_CreateOrUpdateZone(
         GetZoneID((NetworkableId)legacyShelterID),
-        GetZoneOptions(_zoneIdPrefix + "shelter", shelterData.Radius),
+        GetZoneOptions(ZoneIdPrefix + "shelter", shelterData.Radius),
         shelterData.Location);
     }
 
@@ -1193,7 +1255,7 @@ namespace Oxide.Plugins
     private bool ZM_CreateOrUpdateZone(
       TugboatData tugboatData, NetworkableId? tugboatID = null)
     {
-      if (null == tugboatID && null != tugboatData.Tugboat)
+      if (null == tugboatID && tugboatData.Tugboat)
       {
         tugboatID = GetNetworkableID(tugboatData.Tugboat);
       }
@@ -1201,7 +1263,7 @@ namespace Oxide.Plugins
       var zoneID = GetZoneID((NetworkableId)tugboatID);
       if (!ZM_CreateOrUpdateZone(
         zoneID,
-        GetZoneOptions(_zoneIdPrefix + "tugboat", tugboatData.Radius),
+        GetZoneOptions(ZoneIdPrefix + "tugboat", tugboatData.Radius),
         tugboatData.Location))
       {
         return false;
@@ -1209,7 +1271,7 @@ namespace Oxide.Plugins
 
       // tether ZoneManager zone to tugboat
       var tugboatTransform = tugboatData.Tugboat?.GetParentEntity()?.transform;
-      if (null != tugboatTransform) TetherZone(zoneID, tugboatTransform);
+      if (tugboatTransform) TetherZone(zoneID, tugboatTransform);
 
       return true;
     }
@@ -1218,21 +1280,28 @@ namespace Oxide.Plugins
     private static bool ZM_EraseZone(string zoneID) =>
       Convert.ToBoolean(Interface.CallHook("EraseZone", zoneID));
 
+    // delete a batch of ZoneManager zones by Zone ID
+    private static void ZM_EraseZones(
+      List<string> zoneIDs, List<bool> results = null) =>
+      Interface.CallHook("EraseZones", zoneIDs, results);
+
     // delete a ZoneManager zone by networkable ID
     private static void ZM_EraseZone(NetworkableId networkableId) =>
       ZM_EraseZone(GetZoneID(networkableId));
 
     // get list of players in the given ZoneManager zone, if any
-    private static List<BasePlayer> ZM_GetPlayersInZone(string zoneID) =>
-      Interface.CallHook("GetPlayersInZone", zoneID) as List<BasePlayer>;
+    private static void ZM_GetPlayersInZone(
+      string zoneID, List<BasePlayer> list) =>
+      Interface.CallHook("GetPlayersInZoneNoAlloc", zoneID, list);
 
     // get ZoneManager's actual data object for a given zoneID
     // credit: CatMeat & Arainrr for examples via DynamicPVP
     private static ZoneManager.Zone ZM_GetZoneByID(string zoneID) =>
       Interface.CallHook("GetZoneByID", zoneID) as ZoneManager.Zone;
 
-    private static string[] ZM_GetZoneIDs() =>
-      Interface.CallHook("GetZoneIDs") as string[];
+    // get the list of all active ZoneManager zone IDs
+    private static void ZM_GetZoneIDs(List<string> list) =>
+      Interface.CallHook("GetZoneIDSNoAlloc", list);
 
     #endregion ZoneManager Helpers
 
@@ -1308,7 +1377,7 @@ namespace Oxide.Plugins
     // helper method to determine whether a player ID has PvP status
     // returns true iff player is in a base zone or has PvP delay
     // assumes playerID is valid
-    bool IsPvpPlayer(ulong playerID) =>
+    private bool IsPvpPlayer(ulong playerID) =>
       _pvpDelayTimers.ContainsKey(playerID) ||
       (_playerZones.TryGetValue(playerID, out var zones) && zones?.Count > 0);
 
@@ -1325,7 +1394,7 @@ namespace Oxide.Plugins
       }
 
       // return unknown if either attacker or target is null / not a player
-      if (null == entity || null == hitInfo.InitiatorPlayer) return null;
+      if (!entity || !hitInfo.InitiatorPlayer) return null;
 
       var attackerID = hitInfo.InitiatorPlayer.userID.Get();
       var targetID = entity.userID.Get();
@@ -1338,14 +1407,13 @@ namespace Oxide.Plugins
     }
 
     // map a ZoneManager zone ID to a TruePVE ruleset (i.e. marks it as PVP)
-    private static bool TP_AddOrUpdateMapping(
-      string zoneID, string ruleset) =>
-      Convert.ToBoolean(Interface.CallHook(
-        "AddOrUpdateMapping", zoneID, ruleset));
+    private static bool TP_AddOrUpdateMapping(string zoneID, string ruleset) =>
+      Convert.ToBoolean(
+        Interface.CallHook("AddOrUpdateMapping", zoneID, ruleset));
 
     // create mapping for networkable ID to configured ruleset
     private void TP_AddOrUpdateMapping(NetworkableId networkableID) =>
-      TP_AddOrUpdateMapping(GetZoneID(networkableID), _configData.rulesetName);
+      TP_AddOrUpdateMapping(GetZoneID(networkableID), _configData.RulesetName);
 
     // delete TruePVE mapping for given ZoneManager zone ID
     private static bool TP_RemoveMapping(string zoneID) =>
@@ -1372,7 +1440,7 @@ namespace Oxide.Plugins
       public float Radius { get; private set; }
 
       // spheres/domes associated with base
-      protected List<SphereEntity> _sphereList;
+      protected List<SphereEntity> SphereList;
 
       protected virtual void Init(Vector3 location, float radius = 1.0f)
       {
@@ -1387,29 +1455,29 @@ namespace Oxide.Plugins
 
       private void CreateSpheres()
       {
-        if (null == _sphereList) return;
+        if (null == SphereList) return;
         for (var i = 0; i < SphereDarkness; ++i)
         {
           var sphere = GameManager.server.CreateEntity(
             "assets/prefabs/visualization/sphere.prefab") as SphereEntity;
-          if (null == sphere) continue;
+          if (!sphere) continue;
           sphere.enableSaving = false;
           sphere.Spawn();
           sphere.LerpRadiusTo(Radius * 2.0f, Radius / 2.0f);
           sphere.ServerPosition = Location;
-          _sphereList.Add(sphere);
+          SphereList.Add(sphere);
         }
       }
 
       private void DestroySpheres()
       {
-        if (null == _sphereList) return;
-        foreach (var sphere in _sphereList)
+        if (null == SphereList) return;
+        foreach (var sphere in SphereList)
         {
           if (!IsValid(sphere)) continue;
           sphere.KillMessage();
         }
-        _sphereList.Clear();
+        SphereList.Clear();
       }
 
       // called automatically when Pool.Free() is called
@@ -1418,10 +1486,10 @@ namespace Oxide.Plugins
       {
         ClearEntity(true);
         DestroySpheres();
-        if (null != _sphereList)
+        if (null != SphereList)
         {
-          Pool.FreeUnmanaged(ref _sphereList);
-          _sphereList = null;
+          Pool.FreeUnmanaged(ref SphereList);
+          SphereList = null;
         }
         Location = Vector3.zero;
         Radius = 0.0f;
@@ -1431,24 +1499,24 @@ namespace Oxide.Plugins
       // needs to initialize instances for use
       public void LeavePool()
       {
-        if (null == _sphereList && SphereDarkness > 0)
+        if (null == SphereList && SphereDarkness > 0)
         {
-           _sphereList = Pool.Get<List<SphereEntity>>();
+           SphereList = Pool.Get<List<SphereEntity>>();
         }
       }
 
       // set/update base location and/or radius
       // either option can be omitted; this is for efficiency since it may need
       //  to iterate over a list of spheres
-      public virtual void Update(Vector3? location = null, float? radius = null)
+      public void Update(Vector3? location = null, float? radius = null)
       {
         if (null == location && null == radius) return;
 
         if (null != location) Location = (Vector3)location;
         if (null != radius) Radius = (float)radius;
 
-        if (null == _sphereList) return;
-        foreach (var sphere in _sphereList)
+        if (null == SphereList) return;
+        foreach (var sphere in SphereList)
         {
           if (!IsValid(sphere)) continue;
           if (null != location) sphere.ServerPosition = Location;
@@ -1511,7 +1579,7 @@ namespace Oxide.Plugins
         Init(tugboat.GetParentEntity().CenterPoint(), radius);
         Tugboat = tugboat;
         var tugboatParent = tugboat.GetParentEntity();
-        if (null == tugboatParent) return;
+        if (!tugboatParent) return;
         if (null != forceNetworking && SphereDarkness > 0)
         {
           // this keeps the spheres from disappearing by also keeping the
@@ -1520,19 +1588,17 @@ namespace Oxide.Plugins
           // ...and this keeps the tugboats from sinking and popping back up
           // (credit: bmgjet for idea + code)
           // NOTE: Ryan says this may not be needed anymore?
-          if (forceBuoyancy)
+          if (forceBuoyancy &&
+              tugboatParent.TryGetComponent<Buoyancy>(out var buoyancy) &&
+              buoyancy)
           {
-            var buoyancy = tugboatParent.GetComponent<Buoyancy>();
-            if (buoyancy != null)
-            {
-              buoyancy.CancelInvoke(nameof(Buoyancy.CheckSleepState));
-              buoyancy.Invoke(buoyancy.Wake, 0f); //Force Awake
-            }
+            buoyancy.CancelInvoke(buoyancy.CheckSleepState);
+            buoyancy.Invoke(buoyancy.Wake, 0f); //Force Awake
           }
         }
         // parent spheres to the tugboat
-        if (null == _sphereList) return;
-        foreach (var sphere in _sphereList)
+        if (null == SphereList) return;
+        foreach (var sphere in SphereList)
         {
           sphere.ServerPosition = Vector3.zero;
           sphere.SetParent(tugboatParent);
@@ -1556,9 +1622,9 @@ namespace Oxide.Plugins
 
         Tugboat = null;
 
-        if (null == _sphereList) return;
+        if (null == SphereList) return;
         // un-tether any spheres from the tugboat
-        foreach (var sphere in _sphereList)
+        foreach (var sphere in SphereList)
         {
           sphere.SetParent(null, true, true);
           sphere.ServerPosition = Location;
@@ -1570,70 +1636,70 @@ namespace Oxide.Plugins
     private sealed class ConfigData
     {
       [JsonProperty(PropertyName = "Zone creation delay in seconds (excludes tugboat)")]
-      public float createDelaySeconds = 60.0f;
+      public float CreateDelaySeconds = 60.0f;
 
       [JsonProperty(PropertyName = "Zone creation delay notifications (owner only, excludes tugboat)")]
-      public bool createNotify = true;
+      public bool CreateNotify = true;
 
       [JsonProperty(PropertyName = "Zone deletion delay in seconds")]
-      public float deleteDelaySeconds = 300.0f;
+      public float DeleteDelaySeconds = 300.0f;
 
       [JsonProperty(PropertyName = "Zone deletion delay notifications (all players in zone)")]
-      public bool deleteNotify = true;
+      public bool DeleteNotify = true;
 
       [JsonProperty(PropertyName = "Zone creation/deletion notification prefix")]
-      public string prefixNotify = "[PBPZ] ";
+      public string PrefixNotify = "[PBPZ] ";
 
       [JsonProperty(PropertyName = "Zone exit PvP delay in seconds (0 for none)")]
-      public float pvpDelaySeconds = 5.0f;
+      public float PvpDelaySeconds = 5.0f;
 
       [JsonProperty(PropertyName = "Zone sphere darkness (0 to disable, maximum 10)")]
-      public uint sphereDarkness;
+      public uint SphereDarkness;
 
       [JsonProperty(PropertyName = "Zone entry/exit ZoneManager messages")]
-      public bool zoneMessages = true;
+      public bool ZoneMessages = true;
 
       [JsonProperty(PropertyName = "Zone TruePVE mappings ruleset name")]
-      public string rulesetName = "exclude";
+      public string RulesetName = "exclude";
 
       [JsonProperty(PropertyName = "Building settings")]
-      public BuildingConfigData building = new();
+      public BuildingConfigData Building = new();
 
       [JsonProperty(PropertyName = "Shelter settings")]
-      public ShelterConfigData shelter = new();
+      public ShelterConfigData Shelter = new();
 
       [JsonProperty(PropertyName = "Tugboat settings")]
-      public TugboatConfigData tugboat = new();
+      public TugboatConfigData Tugboat = new();
     }
 
     private sealed class BuildingConfigData
     {
       [JsonProperty(PropertyName = "Building update check delay in seconds")]
-      public float checkDelaySeconds = 5.0f;
+      public float CheckDelaySeconds = 5.0f;
 
       [JsonProperty(PropertyName = "Building zone overall minimum radius")]
-      public float minimumBuildingRadius = 16.0f;
+      public float MinimumBuildingRadius = 16.0f;
 
       [JsonProperty(PropertyName = "Building zone per-block minimum radius")]
-      public float minimumBlockRadius = 16.0f;
+      public float MinimumBlockRadius = 16.0f;
     }
 
     private sealed class ShelterConfigData
     {
       [JsonProperty(PropertyName = "Shelter zone radius")]
-      public float radius = 8.0f;
+      public float Radius = 8.0f;
     }
 
     private sealed class TugboatConfigData
     {
       [JsonProperty(PropertyName = "Tugboat force global rendering on/off when spheres enabled (null=skip)")]
-      public bool? forceNetworking;
+      public bool? ForceNetworking;
 
       [JsonProperty(PropertyName = "Tugboat force enable buoyancy when forcing global rendering")]
-      public bool forceBuoyancy;
+      public bool ForceBuoyancy;
 
       [JsonProperty(PropertyName = "Tugboat zone radius")]
-      public float radius = 32.0f;
+      public float Radius = 32.0f;
     }
   }
 
