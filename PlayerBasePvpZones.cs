@@ -12,13 +12,13 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-  [Info("Player Base PvP Zones", "HunterZ", "1.1.0")]
+  [Info("Player Base PvP Zones", "HunterZ", "1.2.0")]
   [Description("Maintains Zone Manager / TruePVE exclusion zones around player bases")]
   public class PlayerBasePvpZones : RustPlugin
   {
     #region Fields
 
-    [PluginReference] private readonly Plugin _truePve;
+    [PluginReference] private readonly Plugin TruePVE;
 
     // user-defined plugin config data
     private ConfigData _configData = new();
@@ -840,7 +840,7 @@ namespace Oxide.Plugins
         ["MessageZoneEnter"] =
           "WARNING: Entering Player Base PVP Zone",
         ["MessageZoneExit"] =
-          "Leaving Player Base PVP Zone",
+          "Leaving Player Base PVP Zone"
       }, this);
     }
 
@@ -853,7 +853,7 @@ namespace Oxide.Plugins
     private void OnServerInitialized()
     {
       _useExcludePlayer =
-        null != _truePve && _truePve.Version >= new VersionNumber(2, 2, 3);
+        null != TruePVE && TruePVE.Version >= new VersionNumber(2, 2, 3);
       if (_useExcludePlayer)
       {
         Puts("OnServerInitialized(): TruePVE 2.2.3+ detected! TruePVE PVP delays will be used");
@@ -1183,7 +1183,7 @@ namespace Oxide.Plugins
 
     // synthesize ZoneManager zoneID string from networkableID
     private static string GetZoneID(NetworkableId networkableID) =>
-      ZoneIdPrefix + networkableID.ToString();
+      ZoneIdPrefix + networkableID;
 
     // get options array for ZoneManager zone creation
     private string[] GetZoneOptions(string zoneName, float radius) =>
@@ -1442,7 +1442,7 @@ namespace Oxide.Plugins
       // spheres/domes associated with base
       protected List<SphereEntity> SphereList;
 
-      protected virtual void Init(Vector3 location, float radius = 1.0f)
+      protected void Init(Vector3 location, float radius = 1.0f)
       {
         Location = location;
         Radius = radius;
