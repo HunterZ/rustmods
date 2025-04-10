@@ -13,7 +13,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-  [Info("Super PVx Info", "HunterZ", "1.6.0")]
+  [Info("Super PVx Info", "HunterZ", "1.7.0")]
   [Description("Displays PvE/PvP/etc. status on player's HUD")]
   public class SuperPVxInfo : RustPlugin
   {
@@ -41,7 +41,8 @@ namespace Oxide.Plugins
       CargoTrainEvent = 1 << 0,
       // Adem plugins
       Caravan         = 1 << 1,
-      Convoy          = 1 << 2
+      Convoy          = 1 << 2,
+      Sputnik         = 1 << 3
     }
 
     // PVP events that are managed via listening to start/stop hooks that
@@ -98,14 +99,14 @@ namespace Oxide.Plugins
 
     private StoredData _storedData;
 
-    private const string _uiName = "SuperPVxInfoUI";
+    private const string UIName = "SuperPVxInfoUI";
 
     #endregion Plugin Data
 
     #region Utility Methods
 
     private static bool IsValidPlayer(BasePlayer player, bool checkConnected) =>
-      null != player &&
+      player &&
       !player.IsNpc &&
       player.userID.IsSteamId() &&
       (!checkConnected || player.IsConnected);
@@ -117,7 +118,7 @@ namespace Oxide.Plugins
     {
       if (null == _configData ||
           !_configData.NotifySettings.Enabled.TryGetValue(
-            key, out bool enabled) ||
+            key, out var enabled) ||
           !enabled)
       {
         return;
@@ -161,7 +162,7 @@ namespace Oxide.Plugins
 
       // timers-by-plugin is empty - remove PVP delay status
       var player = BasePlayer.FindByID(userid);
-      if (null != player)
+      if (player)
       {
         SetPvpDelay(player, PvpDelayType.TruePve, false);
       }
@@ -178,44 +179,60 @@ namespace Oxide.Plugins
     {
       LoadData();
       PlayerWatcher.AllowForceUpdate =
-        null == _configData || _configData.forceUpdates;
+        null == _configData || _configData.ForceUpdates;
       PlayerWatcher.Instance = this;
-      PlayerWatcher.PvpAboveHeight = _configData?.pvpAboveHeight ?? 1000.0f;
-      PlayerWatcher.PvpBelowHeight = _configData?.pvpBelowHeight ?? -50.0f;
+      PlayerWatcher.PvpAboveHeight = _configData?.PvpAboveHeight ?? 1000.0f;
+      PlayerWatcher.PvpBelowHeight = _configData?.PvpBelowHeight ?? -500.0f;
       PlayerWatcher.UpdateIntervalSeconds =
-        _configData?.updateIntervalSeconds ?? 1.0f;
+        _configData?.UpdateIntervalSeconds ?? 1.0f;
       if (null != _configData &&
-          !string.IsNullOrEmpty(_configData.toggleCommand))
+          !string.IsNullOrEmpty(_configData.ToggleCommand))
       {
-        AddCovalenceCommand(_configData.toggleCommand, nameof(ToggleUI));
+        AddCovalenceCommand(_configData.ToggleCommand, nameof(ToggleUI));
       }
     }
 
     private void OnServerInitialized()
     {
-      if(null != TruePVE && null != PlayerBasePvpZones &&
-         TruePVE.Version >= new VersionNumber(2, 2, 3) &&
-         PlayerBasePvpZones.Version >= new VersionNumber(1, 1, 0))
+      if (Convert.ToBoolean(DynamicPVP?.Call("IsUsingExcludePlayer")))
       {
-        Puts("OnServerInitialized(): TruePVE 2.2.3+ & PlayerBasePvpZones 1.1.0+ detected! TruePVE PVP delays will be used");
+        Puts("OnServerInitialized(): Detected DynamicPVP support for TruePVE PVP delays");
+        Unsubscribe(nameof(OnPlayerAddedToPVPDelay));
+        Unsubscribe(nameof(OnPlayerRemovedFromPVPDelay));
+      }
+      if (Convert.ToBoolean(PlayerBasePvpZones?.Call("IsUsingExcludePlayer")))
+      {
+        Puts("OnServerInitialized(): Detected PlayerBasePvpZones support for TruePVE PVP delays");
         Unsubscribe(nameof(OnPlayerBasePvpDelayStart));
         Unsubscribe(nameof(OnPlayerBasePvpDelayStop));
+      }
+
+      if (null == ZoneManager ||
+          ZoneManager.Version < new VersionNumber(3, 1, 8))
+      {
+        PrintWarning("ZoneManager is outdated or not running; this plugin may not work properly");
       }
 
       if (null != _storedData)
       {
         // purge any mappings that Zone Manager doesn't recognize
+        var activeZoneIds = Pool.Get<List<string>>();
+        ZM_GetZoneIDsNoAlloc(activeZoneIds);
         var deadZoneIds = Pool.Get<List<string>>();
         foreach (var (zoneId, _) in _storedData.Mappings)
         {
-          if (!ZM_CheckZoneID(zoneId)) deadZoneIds.Add(zoneId);
+          if (!activeZoneIds.Contains(zoneId)) deadZoneIds.Add(zoneId);
         }
+        Pool.FreeUnmanaged(ref activeZoneIds);
         foreach (var deadZoneId in deadZoneIds)
         {
-          PrintWarning($"Purging unknown/obsolete zoneId={deadZoneId} from database");
           _storedData.Mappings.Remove(deadZoneId);
         }
-        if (deadZoneIds.Count > 0) SaveData();
+        if (deadZoneIds.Count > 0)
+        {
+          PrintWarning($"Purging {deadZoneIds.Count} unknown/obsolete zoneId(s) from database");
+          SaveData();
+        }
         Pool.FreeUnmanaged(ref deadZoneIds);
       }
 
@@ -252,7 +269,7 @@ namespace Oxide.Plugins
       // destroy GUIs for all active players
       foreach (var player in BasePlayer.activePlayerList)
       {
-        OnPlayerDisconnected(player, _uiName);
+        OnPlayerDisconnected(player, UIName);
       }
       PlayerWatcher.Instance = null;
       // if save timer active, destroy and force write
@@ -268,7 +285,7 @@ namespace Oxide.Plugins
       //  causes it to catch a watcher that is still in the process of being
       //  destroyed
       var watcher = player.GetComponent<PlayerWatcher>();
-      if (watcher != null && watcher.isActiveAndEnabled) return;
+      if (watcher && watcher.isActiveAndEnabled) return;
 
       watcher = player.gameObject.AddComponent<PlayerWatcher>();
       watcher.Init(
@@ -291,7 +308,7 @@ namespace Oxide.Plugins
       {
         if (!IsValidPlayer(player, true)) return;
         var watcher = GetPlayerWatcher(player);
-        if (null == watcher) return;
+        if (!watcher) return;
 
         // check everything because the player could be anywhere now
         if (watcher.InBaseType != null) watcher.SetCheckBase(true);
@@ -368,7 +385,7 @@ namespace Oxide.Plugins
         // (just create an empty timers-by-plugin sub-dictionary)
         if (null == excludeTimers)
         {
-          excludeTimers = new();
+          excludeTimers = new Dictionary<string, Timer>();
           _excludedPlayers.Add(userid, excludeTimers);
         }
 
@@ -378,7 +395,7 @@ namespace Oxide.Plugins
           maxDelayLength, () => { ExcludePlayerRemove(userid, pluginName); }));
 
         var player = BasePlayer.FindByID(userid);
-        if (null != player)
+        if (player)
         {
           SetPvpDelay(player, PvpDelayType.TruePve, true);
         }
@@ -391,12 +408,12 @@ namespace Oxide.Plugins
 
     #region ZoneManager Utilities
 
-    bool ZM_CheckZoneID(string zoneId) =>
-      ZoneManager?.Call("CheckZoneID", zoneId) is string;
+    private void ZM_GetZoneIDsNoAlloc(List<string> list) =>
+      ZoneManager?.Call("GetZoneIDsNoAlloc", list);
 
-    private string[] ZM_GetPlayerZoneIDs(BasePlayer player) =>
-      ZoneManager?.Call("GetPlayerZoneIDs", player) is string[] s ?
-        s : Array.Empty<string>();
+    private void ZM_GetPlayerZoneIDsNoAlloc(
+      BasePlayer player, List<string> list) =>
+      ZoneManager?.Call("GetPlayerZoneIDsNoAlloc", player, list);
 
     // if player is in a zone, return its type if possible, else return null
     public PVxType? GetPlayerZoneType(BasePlayer player)
@@ -436,14 +453,11 @@ namespace Oxide.Plugins
         // check Zone Manager flags
         if (ZM_GetZoneFlag(zoneId, "pvpgod"))
         {
-          if (ZM_GetZoneFlag(zoneId, "pvegod"))
-          {
+          return ZM_GetZoneFlag(zoneId, "pvegod") ?
             // no-PvP *and* no-PvE => treat as safe zone
-            return PVxType.SafeZone;
-          }
-
-          // no-PvP only => treat as PvE zone
-          return PVxType.PVE;
+            PVxType.SafeZone :
+            // no-PvP only => treat as PvE zone
+            PVxType.PVE;
         }
       }
 
@@ -454,10 +468,11 @@ namespace Oxide.Plugins
     private (string, string) GetSmallestZoneIdAndName(BasePlayer player)
     {
       if (ZoneManager == null) return (null, null);
-      float smallestRadius = float.MaxValue;
+      var smallestRadius = float.MaxValue;
       string smallestId = null;
       string smallestName = null;
-      var zoneIDs = ZM_GetPlayerZoneIDs(player);
+      var zoneIDs = Pool.Get<List<string>>();
+      ZM_GetPlayerZoneIDsNoAlloc(player, zoneIDs);
       foreach (var zoneId in zoneIDs)
       {
         if (string.IsNullOrEmpty(zoneId)) continue;
@@ -465,17 +480,16 @@ namespace Oxide.Plugins
 
         // get whichever of 2D zone size or radius is greater than zero
         var zoneMagnitude2D = ZM_GetZoneSize(zoneId).Magnitude2D();
-        float zoneRadius = zoneMagnitude2D < float.Epsilon ?
+        var zoneRadius = zoneMagnitude2D < float.Epsilon ?
             ZM_GetZoneRadius(zoneId) : zoneMagnitude2D;
         if (zoneRadius < float.Epsilon) continue;
-        // if zone is the smallest we've seen, record it as such
-        if (zoneRadius < smallestRadius)
-        {
-          smallestRadius = zoneRadius;
-          smallestId = zoneId;
-          smallestName = zoneName;
-        }
+        if (zoneRadius >= smallestRadius) continue;
+        // zone is the smallest we've seen; record it as such
+        smallestRadius = zoneRadius;
+        smallestId = zoneId;
+        smallestName = zoneName;
       }
+      Pool.FreeUnmanaged(ref zoneIDs);
 
       return (smallestId, smallestName);
     }
@@ -496,7 +510,7 @@ namespace Oxide.Plugins
     private bool IsExcludeZone(string zoneId) =>
       null != _storedData &&
       null != _configData &&
-      _storedData.Mappings.TryGetValue(zoneId, out string ruleset) &&
+      _storedData.Mappings.TryGetValue(zoneId, out var ruleset) &&
       _configData.PveExclusionNames.Any(
         x => ruleset.Contains(x, CompareOptions.IgnoreCase));
 
@@ -506,7 +520,7 @@ namespace Oxide.Plugins
       {
         if (!IsValidPlayer(player, true)) return;
         var watcher = GetPlayerWatcher(player);
-        if (null == watcher) return;
+        if (!watcher) return;
         watcher.SetCheckZone(true);
         watcher.Force();
       });
@@ -542,7 +556,7 @@ namespace Oxide.Plugins
       }
       else
       {
-        _storedData.PvpEvents.Add(type, new(location, radius));
+        _storedData.PvpEvents.Add(type, new PvpEventData(location, radius));
       }
       SaveData();
     }
@@ -561,12 +575,12 @@ namespace Oxide.Plugins
     private PVxType? IsPlayerInBase(BasePlayer player)
     {
       // get list of all active Raidable Bases
-      if (RaidableBases != null && RaidableBases.Call("GetAllEvents") is
-          List<(Vector3 pos, int mode, bool allowPVP, string a, float b,
-          float c, float loadTime, ulong ownerId, BasePlayer owner,
-          List<BasePlayer> raiders, List<BasePlayer> intruders,
-          List<BaseEntity> entities, string baseName, DateTime spawnDateTime,
-          DateTime despawnDateTime, float radius, int lootRemaining)> rbEvents
+      if (RaidableBases?.Call("GetAllEvents") is List<(Vector3 pos, int mode,
+            bool allowPVP, string a, float b, float c, float loadTime,
+            ulong ownerId, BasePlayer owner, List<BasePlayer> raiders,
+            List<BasePlayer> intruders, List<BaseEntity> entities,
+            string baseName, DateTime spawnDateTime, DateTime despawnDateTime,
+            float radius, int lootRemaining)> rbEvents
           // && rbEvents.Exists(x => x.intruders.Contains(player))
       )
       {
@@ -658,7 +672,7 @@ namespace Oxide.Plugins
     {
       if (!IsValidPlayer(player, true)) return;
       var watcher = GetPlayerWatcher(player);
-      if (null == watcher) return;
+      if (!watcher) return;
       watcher.BaseLocation = baseLocation;
       watcher.BaseRadius = baseRadius;
       watcher.InBaseType = baseType;
@@ -671,7 +685,7 @@ namespace Oxide.Plugins
     {
       if (checkPlayerValid && !IsValidPlayer(player, true)) return;
       var watcher = GetPlayerWatcher(player);
-      if (null == watcher) return;
+      if (!watcher) return;
       watcher.SetCheckZone(true);
       watcher.InBaseType = null;
       watcher.Force();
@@ -683,7 +697,7 @@ namespace Oxide.Plugins
     {
       if (!IsValidPlayer(player, true)) return;
       var watcher = GetPlayerWatcher(player);
-      if (null == watcher) return;
+      if (!watcher) return;
       var oldState = watcher.InPvpBubbleTypes;
       if (state)
       {
@@ -907,6 +921,12 @@ namespace Oxide.Plugins
     private void OnConvoyStop() =>
       NextTick(() => EndPvpBubble(PvpBubbleTypes.Convoy));
 
+    private void OnPlayerEnterSputnik(BasePlayer player) =>
+      NextTick(() => SetPvpBubble(player, PvpBubbleTypes.Sputnik, true));
+
+    private void OnPlayerExitSputnik(BasePlayer player) =>
+      NextTick(() => SetPvpBubble(player, PvpBubbleTypes.Sputnik, false));
+
     #endregion Adem Hook Handlers
 
     #endregion PVP Bubble Hook Handlers
@@ -1056,7 +1076,7 @@ namespace Oxide.Plugins
       }
       else
       {
-        OnPlayerDisconnected(player, _uiName);
+        OnPlayerDisconnected(player, UIName);
       }
     }
 
@@ -1086,7 +1106,7 @@ namespace Oxide.Plugins
       // clear old status (if there was one)
       if (null != oldType)
       {
-        SimpleStatus.CallHook(
+        SimpleStatus.Call(
           "SetStatus", player.UserIDString, oldType.ToString(), 0);
       }
 
@@ -1094,15 +1114,14 @@ namespace Oxide.Plugins
       if (_configData.SimpleStatusPVxSettings.TryGetValue(type, out var ssSettings)
           && ssSettings.Enabled)
       {
-        SimpleStatus.CallHook(
-          "SetStatus", player.UserIDString, type.ToString());
+        SimpleStatus.Call("SetStatus", player.UserIDString, type.ToString());
       }
     }
 
     // forcefully destroy any active UIs for the given player
     private void DestroyUI(BasePlayer player)
     {
-      CuiHelper.DestroyUi(player, _uiName);
+      CuiHelper.DestroyUi(player, UIName);
       SS_HideAllStatuses(player);
     }
 
@@ -1114,8 +1133,8 @@ namespace Oxide.Plugins
       if (null == SimpleStatus || null == _configData) return;
       foreach (var (type, ssData) in _configData.SimpleStatusPVxSettings)
       {
-        if (null == ssData || !ssData.Enabled) continue;
-        SimpleStatus.CallHook(
+        if (ssData is not { Enabled: true }) continue;
+        SimpleStatus.Call(
           "SetStatus", player.UserIDString, type.ToString(), 0);
       }
     }
@@ -1127,9 +1146,9 @@ namespace Oxide.Plugins
       if (null == SimpleStatus || null == _configData) return;
       foreach (var (type, ssData) in _configData.SimpleStatusPVxSettings)
       {
-        if (null == ssData || !ssData.Enabled) continue;
-        SimpleStatus.CallHook(
-          "CreateStatus", this, type.ToString(), ssData.ToDict());
+        if (ssData is not { Enabled: true }) continue;
+        SimpleStatus.Call("CreateStatus",
+          this, type.ToString(), ssData.ToDict());
       }
     }
 
@@ -1220,7 +1239,7 @@ namespace Oxide.Plugins
                   CursorEnabled = false,
                   FadeOut = FadeOut,
                 },
-                Layer, _uiName, _uiName
+                Layer, UIName, UIName
               },
               {
                 new CuiLabel
@@ -1237,7 +1256,7 @@ namespace Oxide.Plugins
                   },
                   FadeOut = FadeOut,
                 },
-                _uiName, CuiHelper.GetGuid()
+                UIName, CuiHelper.GetGuid()
               }
             }.ToJson();
           }
@@ -1301,43 +1320,34 @@ namespace Oxide.Plugins
     {
       [JsonConverter(typeof(StringEnumConverter))]
       [JsonProperty(PropertyName = "Server Default PVx (PVP or PVE)")]
-      public PVxType defaultType = PVxType.PVE;
+      public PVxType DefaultType = PVxType.PVE;
 
       [JsonProperty(PropertyName = "Assume PVP Below Height")]
-      public float pvpBelowHeight = -50.0f;
+      public float PvpBelowHeight = -500.0f;
 
       [JsonProperty(PropertyName = "Assume PVP Above Height")]
-      public float pvpAboveHeight = 1000.0f;
+      public float PvpAboveHeight = 1000.0f;
 
       [JsonProperty(PropertyName = "Toggle UI Command (empty string to disable)")]
-      public string toggleCommand = "pvxui";
+      public string ToggleCommand = "pvxui";
 
       [JsonProperty(PropertyName = "Seconds Between Updates")]
-      public float updateIntervalSeconds = 1.0f;
+      public float UpdateIntervalSeconds = 1.0f;
 
       [JsonProperty(PropertyName = "Force Updates On State Change")]
-      public bool forceUpdates = true;
+      public bool ForceUpdates = true;
 
       [JsonProperty(PropertyName = "Minimum Seconds Data File Saves")]
-      public float saveIntervalSeconds = 5.0f;
+      public float SaveIntervalSeconds = 5.0f;
 
       [JsonProperty(PropertyName = "PVE Exclusion Mapping Names (case insensitive substrings / none to disable)")]
-      public HashSet<string> PveExclusionNames { get; set; } = new()
-      {
-        "exclude"
-      };
+      public HashSet<string> PveExclusionNames { get; set; } = new();
 
       [JsonProperty(PropertyName = "PVE Zone Names (case insensitive substrings / none to disable)")]
-      public HashSet<string> PveZoneManagerNames { get; set; } = new()
-      {
-        "PVE"
-      };
+      public HashSet<string> PveZoneManagerNames { get; set; } = new();
 
       [JsonProperty(PropertyName = "PVP Zone Names (case insensitive substrings / none to disable)")]
-      public HashSet<string> PvpZoneManagerNames { get; set; } = new()
-      {
-        "PVP"
-      };
+      public HashSet<string> PvpZoneManagerNames { get; set; } = new();
 
       [JsonProperty(PropertyName = "Notification Settings")]
       public NotificationSettings NotifySettings { get; set; } = new();
@@ -1443,11 +1453,11 @@ namespace Oxide.Plugins
         else
         {
           // only PVE and PVP are allowed as the default server PVx types
-          if (PVxType.PVE != _configData.defaultType &&
-              PVxType.PVP != _configData.defaultType)
+          if (PVxType.PVE != _configData.DefaultType &&
+              PVxType.PVP != _configData.DefaultType)
           {
-            PrintWarning($"Forcing nonsensical configured default type {_configData.defaultType} to PVE");
-            _configData.defaultType = PVxType.PVE;
+            PrintWarning($"Forcing nonsensical configured default type {_configData.DefaultType} to PVE");
+            _configData.DefaultType = PVxType.PVE;
           }
           // add default toggle states for any missing notifications
           foreach (var msgKey in _notifyMessages.Select(x => x.Key).Where(
@@ -1549,7 +1559,7 @@ namespace Oxide.Plugins
       if (null != _saveDataTimer) return;
       // start a save timer
       _saveDataTimer = timer.Once(
-        _configData?.saveIntervalSeconds ?? 5.0f,
+        _configData?.SaveIntervalSeconds ?? 5.0f,
         WriteData);
     }
 
@@ -1813,7 +1823,7 @@ namespace Oxide.Plugins
         if (true == _inTutorial)                      return PVxType.PVE;
         if (PVxType.PVE == _inZoneType)               return PVxType.PVE;
         // defer to default state (or PVE if somehow not defined)
-        return Instance?._configData?.defaultType ?? PVxType.PVE;
+        return Instance?._configData?.DefaultType ?? PVxType.PVE;
       }
 
       // send message with the given key to watcher's player if appropriate
