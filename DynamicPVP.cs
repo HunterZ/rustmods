@@ -16,7 +16,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-  [Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "4.6.0", ResourceId = 2728)]
+  [Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "4.6.1", ResourceId = 2728)]
   [Description("Creates temporary PvP zones on certain actions/events")]
   public class DynamicPVP : RustPlugin
   {
@@ -920,6 +920,17 @@ namespace Oxide.Plugins
       }
 
       var zoneId = hackableLockedCrate.net.ID.ToString();
+      if (!_activeDynamicZones.ContainsKey(zoneId))
+      {
+        // no active zone for this hackable locked crate
+        return;
+      }
+
+      // untether everything that we may have parented to the
+      //  HackableLockedCrate so that they don't get killed along with it
+      ZM_GetZoneByID(zoneId)?.transform.SetParent(null, true);
+      ParentDome(zoneId, Vector3.zero);
+
       //When the timer starts, don't stop the event immediately
       if (_eventTimers.ContainsKey(zoneId))
       {
@@ -1170,6 +1181,7 @@ namespace Oxide.Plugins
     {
       if (!supplyDrop || null == supplyDrop.net)
       {
+        PrintDebug("ERROR: OnEntityKill(SupplyDrop): Drop or Net is null", DebugLevel.Error);
         return;
       }
 
@@ -1180,6 +1192,11 @@ namespace Oxide.Plugins
         return;
       }
 
+      // untether everything that we may have parented to the SupplyDrop so that
+      //  they don't get killed along with it
+      ZM_GetZoneByID(zoneId)?.transform.SetParent(null, true);
+      ParentDome(zoneId, Vector3.zero);
+
       var eventConfig = eventName switch
       {
         nameof(GeneralEventType.SupplySignal) =>
@@ -1188,23 +1205,21 @@ namespace Oxide.Plugins
           configData.GeneralEvents.TimedSupply,
         _ => null
       };
-      if (null == eventConfig)
-      {
-        // pathological
-        PrintDebug($"Unknown SupplyDrop eventName={eventName} for zoneId={zoneId}", DebugLevel.Warning);
-        return;
-      }
-
-      if (!eventConfig.Enabled || !eventConfig.StopWhenKilled)
+      if (eventConfig is not { Enabled: true } || !eventConfig.StopWhenKilled)
       {
         return;
       }
 
       //When the timer starts, don't stop the event immediately
-      if (!_eventTimers.ContainsKey(zoneId))
+      if (_eventTimers.ContainsKey(zoneId))
       {
-        HandleDeleteDynamicZone(zoneId);
+        PrintDebug(
+          $"OnEntityKill(SupplyDrop): Ignoring due to event timer already active for zoneId={zoneId}");
+        return;
       }
+
+      PrintDebug($"OnEntityKill(SupplyDrop): Scheduling delete of zoneId={zoneId}");
+      HandleDeleteDynamicZone(zoneId);
     }
 
     private static string GetSupplyDropStateName(bool isLanded) =>
@@ -2855,17 +2870,17 @@ namespace Oxide.Plugins
       }
       foreach (var sphereEntity in sphereEntities)
       {
-        if (!parentEntity)
-        {
-          // un-tethering dome from parent entity
-          sphereEntity.SetParent(null, true);
-        }
-        else
+        if (parentEntity)
         {
           // tethering dome to parent entity
           sphereEntity.SetParent(parentEntity);
           sphereEntity.transform.position = position;
           sphereEntity.EnableGlobalBroadcast(parentEntity.globalBroadcast);
+        }
+        else
+        {
+          // un-tethering dome from parent entity
+          sphereEntity.SetParent(null, true);
         }
       }
     }
