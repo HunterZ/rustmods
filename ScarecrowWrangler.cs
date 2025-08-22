@@ -10,7 +10,7 @@ namespace Oxide.Plugins
       (int)TerrainTopology.Enum.Ocean |
       (int)TerrainTopology.Enum.Tier0;
 
-    private static HashSet<Vector3> _validLocations = new();
+    private static readonly HashSet<Vector3> _validLocations = new();
 
     #region Plugin API
 
@@ -50,11 +50,6 @@ namespace Oxide.Plugins
 
     #region Hook Handlers
 
-    // NOTE: no need to do this because the game automatically destroys
-    //  components for a killed entity
-    // private void OnEntityKill(ScarecrowNPC scarecrow) =>
-    //   scarecrow.GetComponent<ScarecrowWatcher>()?.OnDestroy();
-
     private void OnEntitySpawned(ScarecrowNPC scarecrow)
     {
       if (null == scarecrow || scarecrow.IsDestroyed || scarecrow.IsDead())
@@ -62,39 +57,28 @@ namespace Oxide.Plugins
         return;
       }
 
-      var topologies = GetTopologies(TerrainMeta.TopologyMap.GetTopology(
-        scarecrow.transform.position));
-      string ts = "";
-      foreach (var t in topologies)
-      {
-        if (!string.IsNullOrEmpty(ts))
-        {
-          ts += ", ";
-        }
-        ts += t.ToString();
-      }
-      Puts($"Processing new scarecrow {scarecrow.net.ID} at location {scarecrow.transform.position}/{GetGrid(scarecrow.transform.position)} with topologies: {ts}");
-
       // ignore scarecrows that look like they're in portal dungeons, because we
       //  don't want to do any of the following:
       // - teleport them out of dungeons
       // - waste resources tracking them
       // - teleport other zombies into dungeons or empty space
+      // this is done up-front because it's cheap to detect
       if (IsInDungeon(scarecrow.transform.position))
       {
         Puts($"Ignoring scarecrow at location {scarecrow.transform.position} because it's probably in a portal dungeon");
         return;
       }
-      if (IsForbidden(scarecrow.transform.position))
+      if (IsInForbiddenLocation(scarecrow))
       {
         // abort if scarecrow was destroyed
         if (!Wrangle(scarecrow)) return;
       }
       else
       {
-        // scarecrow is in a good spot; record it for reuse
+        // scarecrow spawned in a good spot; record it for reuse
         _validLocations.Add(scarecrow.transform.position);
       }
+      // keep an eye on this scarecrow as it wanders the map
       NextTick(() => CreateWatcher(scarecrow));
     }
 
@@ -102,7 +86,7 @@ namespace Oxide.Plugins
 
     #region Utilities
 
-    private void CreateWatcher(ScarecrowNPC scarecrow)
+    private static void CreateWatcher(ScarecrowNPC scarecrow)
     {
       if (!scarecrow.TryGetComponent(out ScarecrowWatcher watcher))
       {
@@ -112,65 +96,20 @@ namespace Oxide.Plugins
       watcher.StartWatching();
     }
 
-    private void DestroyWatcher(ScarecrowNPC scarecrow) =>
+    private static void DestroyWatcher(ScarecrowNPC scarecrow) =>
       scarecrow.GetComponent<ScarecrowWatcher>()?.OnDestroy();
-
-    private static bool IsForbidden(Vector3 location) =>
-      0 != (TerrainMeta.TopologyMap.GetTopology(location) & Mask);
-
-    private static bool IsInDungeon(Vector3 location) => location.y > 1000.0f;
 
     // Credit: Lorenzo - https://umod.org/community/rust/4861-calculate-current-coordinate-of-player?page=1#post-3
     private static string GetGrid(Vector3 pos) =>
-      PhoneController.PositionToGridCoord(pos);
-/*
-    private static string GetNearestMonumentName(Vector3 pos)
-    {
-      string name = "UNKNOWN";
-      float minDist = -1f;
-      foreach (var monument in TerrainMeta.Path.Monuments)
-      {
-        var dist = Vector3.Distance(pos, monument.transform.position);
-        if (minDist < 0 || dist < minDist)
-        {
-          minDist = dist;
-          name = monument.displayPhrase.english;
-          if (string.IsNullOrEmpty(name))
-          {
-            name = monument.transform.root.name;
-          }
-        }
-      }
-      return name.Replace("\n", "");
-    }
-*/
+      MapHelper.PositionToString(pos);
 
-    private static HashSet<TerrainTopology.Enum> GetTopologies(int topologies)
-    {
-      HashSet<TerrainTopology.Enum> h = new();
-      foreach (TerrainTopology.Enum e in System.Enum.GetValues(typeof(
-        TerrainTopology.Enum)))
-      {
-        if (0 != (topologies & (int)e))
-        {
-          h.Add(e);
-        }
-      }
-      return h;
-    }
+    private static bool IsInDungeon(Vector3 location) => location.y > 1000.0f;
 
-/*
-    private static void RandomizeLocation(ref Vector3 location)
-    {
-      location.x = Random.Range(
-        -TerrainMeta.Size.x / 2, TerrainMeta.Size.x / 2);
-      location.y = 0;
-      location.z = Random.Range(
-        -TerrainMeta.Size.z / 2, TerrainMeta.Size.z / 2);
+    private static bool IsInForbiddenLocation(ScarecrowNPC scarecrow) =>
+      0 != (TerrainMeta.TopologyMap.GetTopology(
+        scarecrow.transform.position) & Mask) ||
+      scarecrow.InSafeZone();
 
-      location.y = TerrainMeta.HeightMap.GetHeight(location);
-    }
-*/
     private void Relocate(
       ScarecrowNPC scarecrow, Vector3 newPosition, bool quiet)
     {
@@ -192,35 +131,33 @@ namespace Oxide.Plugins
       });
     }
 
-    private void ResetBrain(ScarecrowNPC scarecrow, bool movementTick)
+    private static void ResetBrain(ScarecrowNPC scarecrow, bool movementTick)
     {
       if (null == scarecrow) return;
       scarecrow.StopAttacking();
       var brain = scarecrow.Brain;
       if (null == brain) return;
       if (!movementTick) brain.StopMovementTick();
-      // scarecrow.Brain?.SwitchToState(AIState.Idle);
-      // scarecrow.Brain?.CurrentState?.Reset();
       var defaultStateContainer = brain.AIDesign?.GetDefaultStateContainer();
       if (null != defaultStateContainer)
       {
         brain.SwitchToState(
           defaultStateContainer.State, defaultStateContainer.ID);
       }
-      // brain.CurrentState?.Reset();
       if (movementTick) brain.StartMovementTick();
     }
 
     private bool Wrangle(ScarecrowNPC scarecrow, bool quiet = true)
     {
-      if (!IsForbidden(scarecrow.transform.position)) return true;
-
-      // Puts($"Scarecrow {scarecrow.net.ID} current AI state: {scarecrow.Brain?.CurrentState}");
+      // abort if scarecrow is in a valid location
+      if (!IsInForbiddenLocation(scarecrow)) return true;
 
       // kill if no known-good positions available
+      // NOTE: this should only happen during initial plugin load, and more
+      //  scarecrows will eventually spawn to recover things
       if (_validLocations.Count <= 0)
       {
-        PrintWarning($"Killing scarecrow {scarecrow.net.ID} at forbidden location {GetGrid(scarecrow.transform.position)} due to failure to no known-good location(s) available");
+        PrintWarning($"Killing scarecrow {scarecrow.net.ID} at forbidden location {scarecrow.transform.position}/{GetGrid(scarecrow.transform.position)} due to failure to no known-good location(s) available");
         if (!quiet)
         {
           Effect.server.Run("assets/prefabs/npc/murderer/sound/death.prefab", scarecrow.transform.position);
@@ -230,15 +167,17 @@ namespace Oxide.Plugins
         return false;
       }
 
+      // pick a random known-good location and teleport the zombie to it
+      // TODO: consider taking into account player and/or other scarecrow
+      //  locations?
       var randomIndex = Random.Range(0, _validLocations.Count - 1);
       var i = 0;
       foreach (var location in _validLocations)
       {
         if (i == randomIndex)
         {
-          PrintWarning($"Relocating scarecrow {scarecrow.net.ID} from forbidden location {GetGrid(scarecrow.transform.position)} to known-good location {GetGrid(location)} at index {i}/{_validLocations.Count}");
+          PrintWarning($"Relocating scarecrow {scarecrow.net.ID} from forbidden location {scarecrow.transform.position}/{GetGrid(scarecrow.transform.position)} to known-good location {location}/{GetGrid(location)} at index {i}/{_validLocations.Count}");
           Relocate(scarecrow, location, quiet);
-          // Puts($"Scarecrow {scarecrow.net.ID} new AI state: {scarecrow.Brain?.CurrentState}");
           return true;
         }
         ++i;
@@ -258,17 +197,14 @@ namespace Oxide.Plugins
       public static ScarecrowWrangler Instance { get; set; }
 
       private ScarecrowNPC _scarecrow;
-      // private ulong _scarecrowID;
 
       public void Init(ScarecrowNPC scarecrow = null)
       {
         _scarecrow = scarecrow;
-        // _scarecrowID = null == scarecrow ? 0 : scarecrow.net.ID.Value;
       }
 
       public void OnDestroy()
       {
-        // Instance?.Puts($"Destroying watcher for scarecrow {_scarecrowID}");
         CancelInvoke();
         Init();
         Destroy(this);

@@ -16,7 +16,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-  [Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "4.6.1", ResourceId = 2728)]
+  [Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "4.6.2", ResourceId = 2728)]
   [Description("Creates temporary PvP zones on certain actions/events")]
   public class DynamicPVP : RustPlugin
   {
@@ -1770,29 +1770,31 @@ namespace Oxide.Plugins
     private (float radius, Vector3 size, float rotation, Vector3 offset)
       GetLabLinkParams(Transform transform)
     {
+      // get the Underwater Labs landmark at this location
       DungeonBaseInfo dungeonBaseInfo = TerrainMeta.Path.FindClosest(
         TerrainMeta.Path.DungeonBaseEntrances, transform.position);
-
+      // scan all Underwater Labs modules to find the ones near this landmark
       Bounds bounds = new();
       var first = true;
-      foreach (GameObject linkI in dungeonBaseInfo.Links)
+      foreach (DungeonBaseLink linkI in TerrainMeta.Path.DungeonBaseLinks)
       {
-        // ignore entries that are too far from the landmark; this seems to
-        //  happen on custom maps where the creator has scrambled things up
-        var linkDist = Vector3.Distance(
-          dungeonBaseInfo.transform.position, linkI.transform.position);
-        if (linkDist >= 300.0f)
-        {
-          if (!_brokenLabs)
-          {
-            PrintWarning("Corrupt Underwater Lab linkage(s) detected. Related monument events may not work as expected. This is a map/RustEdit issue, not a DynamicPVP issue.");
-            _brokenLabs = true;
-          }
-          continue;
-        }
+        // get the closest Underwater Labs landmark to this link
+        // this is used instead of dungeonLink.Dungeon in case this is a wacky
+        //  custom map with scrambled data
+        DungeonBaseInfo linkDungeon = TerrainMeta.Path.FindClosest(
+          TerrainMeta.Path.DungeonBaseEntrances, linkI.transform.position);
+        // ignore links that are closest to a different landmark (handles the
+        //  case of multiple Underwater Labs monuments on a custom map)
+        if (dungeonBaseInfo != linkDungeon) continue;
 
-        if (!linkI.HasComponent<DungeonBaseLink>()) continue;
-        var collider = GetPreventBuildingCollider(linkI.transform, false);
+        // apparently the PB colliders are attached to the links' children; it
+        //  seems like checking only the first child is sufficient
+        // fall back to the link if it has no children, even though it probably
+        //  won't work
+        var child0 = linkI.transform.childCount > 0 ?
+          linkI.transform.GetChild(0) : linkI.transform;
+
+        var collider = GetPreventBuildingCollider(child0, false);
         if (!collider) continue;
 
         // Collider.bounds returns a world-space bounding box around the
