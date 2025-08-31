@@ -16,7 +16,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-  [Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "4.6.2", ResourceId = 2728)]
+  [Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "4.7.0", ResourceId = 2728)]
   [Description("Creates temporary PvP zones on certain actions/events")]
   public class DynamicPVP : RustPlugin
   {
@@ -37,6 +37,9 @@ namespace Oxide.Plugins
     private readonly Dictionary<ulong, LeftZone> _pvpDelays = new();
     //ID -> EventName
     private readonly Dictionary<string, string> _activeDynamicZones = new();
+    // ZoneIDs of active DynamicPVP events with BypassLootDefenderLocks == true
+    // used for managing hook subscriptions and for faster lookups
+    private readonly HashSet<string> _activeLootDefenderBypassZones = new();
 
     private Vector3 _oilRigPosition = Vector3.zero;
     private Vector3 _largeOilRigPosition = Vector3.zero;
@@ -149,6 +152,7 @@ namespace Oxide.Plugins
       Unsubscribe(nameof(OnEntitySpawned));
       Unsubscribe(nameof(OnExitZone));
       Unsubscribe(nameof(OnLootEntity));
+      Unsubscribe(nameof(OnLootLockedEntity));
       Unsubscribe(nameof(OnPlayerCommand));
       Unsubscribe(nameof(OnServerCommand));
       Unsubscribe(nameof(OnSupplyDropLanded));
@@ -305,6 +309,8 @@ namespace Oxide.Plugins
       _debugStringBuilder = null;
 
       _originalMonumentGeometries.Clear();
+
+      _activeLootDefenderBypassZones.Clear();
     }
 
     private void OnServerSave() =>
@@ -447,8 +453,8 @@ namespace Oxide.Plugins
 
     private void CheckCommandHooks(bool added)
     {
-      // optimization: abort if adding a delayzone and already subscribed, or if
-      //  removing a delay/zone and already unsubscribed
+      // optimization: abort if adding a delay/zone and already subscribed, or
+      //  if removing a delay/zone and already unsubscribed
       if (added == _subscribedCommands)
       {
         return;
@@ -876,7 +882,7 @@ namespace Oxide.Plugins
       HandleDeleteDynamicZone(
         zoneId,
         configData.GeneralEvents.HackableCrate.Duration,
-        GeneralEventType.HackableCrate.ToString());
+        nameof(GeneralEventType.HackableCrate));
     }
 
     private void OnLootEntity(
@@ -901,7 +907,7 @@ namespace Oxide.Plugins
       HandleDeleteDynamicZone(
         zoneId,
         configData.GeneralEvents.HackableCrate.Duration,
-        GeneralEventType.HackableCrate.ToString());
+        nameof(GeneralEventType.HackableCrate));
     }
 
     private void OnEntityKill(HackableLockedCrate hackableLockedCrate)
@@ -966,7 +972,7 @@ namespace Oxide.Plugins
 
       // call this here, because otherwise it's difficult to ensure that we call
       //  it exactly once
-      var eventName = GeneralEventType.HackableCrate.ToString();
+      const string eventName = nameof(GeneralEventType.HackableCrate);
       if (!CanCreateDynamicPVP(eventName, hackableLockedCrate))
       {
         return;
@@ -1260,7 +1266,7 @@ namespace Oxide.Plugins
         activeSupplySignals.Remove(entry.Key);
         PrintDebug(
           $"Removing Supply signal from active list. Active supply signals remaining: {activeSupplySignals.Count}");
-        var eventNameSS = GeneralEventType.SupplySignal.ToString();
+        const string eventNameSS = nameof(GeneralEventType.SupplySignal);
         if (!CanCreateDynamicPVP(eventNameSS, supplyDrop))
         {
           return;
@@ -1284,7 +1290,7 @@ namespace Oxide.Plugins
         return;
       }
 
-      var eventNameSD = GeneralEventType.SupplyDrop.ToString();
+      const string eventNameSD = nameof(GeneralEventType.SupplyDrop);
       if (!CanCreateDynamicPVP(eventNameSD, supplyDrop))
       {
         return;
@@ -1405,7 +1411,7 @@ namespace Oxide.Plugins
           return;
         }
 
-        var eventName = GeneralEventType.CargoShip.ToString();
+        const string eventName = nameof(GeneralEventType.CargoShip);
         // call this here, because otherwise it's difficult to ensure that we
         //  call it exactly once
         if (!CanCreateDynamicPVP(eventName, cargoShip))
@@ -1444,7 +1450,7 @@ namespace Oxide.Plugins
         return;
       }
 
-      var eventName = GeneralEventType.CargoShip.ToString();
+      const string eventName = nameof(GeneralEventType.CargoShip);
       // call this here, because otherwise it's difficult to ensure that we call
       //  it exactly once
       if (!CanCreateDynamicPVP(eventName, cargoShip))
@@ -2433,16 +2439,15 @@ namespace Oxide.Plugins
       }
 
       var result = ZM_GetPlayerZoneIDs(player);
-      if (result == null ||
-          result.Length == 0 ||
-          (result.Length == 1 && string.IsNullOrEmpty(result[0])))
+      if (result == null || result.Length == 0)
       {
         return null;
       }
 
       foreach (var zoneId in result)
       {
-        if (!_activeDynamicZones.TryGetValue(zoneId, out var eventName))
+        if (string.IsNullOrEmpty(zoneId) ||
+            !_activeDynamicZones.TryGetValue(zoneId, out var eventName))
         {
           continue;
         }
@@ -2453,6 +2458,7 @@ namespace Oxide.Plugins
           return false;
         }
       }
+
       return null;
     }
 
@@ -2634,6 +2640,14 @@ namespace Oxide.Plugins
         CheckHooks(HookCheckReasons.ZoneAdded);
       }
 
+      if (baseEvent.BypassLootDefenderLocks &&
+          _activeLootDefenderBypassZones.Count == 0 &&
+          _activeLootDefenderBypassZones.Add(zoneId))
+      {
+        // added Loot Defender bypass zone to an empty set, so subscribe to hook
+        Subscribe(nameof(OnLootLockedEntity));
+      }
+
       var stringBuilder = Pool.Get<StringBuilder>();
       stringBuilder.Clear();
       if (baseEvent is DomeEvent domeEvent &&
@@ -2747,6 +2761,14 @@ namespace Oxide.Plugins
       if (baseEvent == null)
       {
         return false;
+      }
+
+      if (baseEvent.BypassLootDefenderLocks &&
+          _activeLootDefenderBypassZones.Remove(zoneId) &&
+          _activeLootDefenderBypassZones.Count == 0)
+      {
+        // removed only Loot Defender bypass zone, so unsubscribe from hook
+        Unsubscribe(nameof(OnLootLockedEntity));
       }
 
       var stringBuilder = Pool.Get<StringBuilder>();
@@ -2914,7 +2936,7 @@ namespace Oxide.Plugins
 
     #endregion ZoneDome Integration
 
-    #region TruePVE/NextGenPVE Integration
+    #region TruePVE Integration
 
     private object CanEntityTakeDamage(BasePlayer victim, HitInfo info)
     {
@@ -2969,7 +2991,7 @@ namespace Oxide.Plugins
     private static bool TP_RemoveMapping(string zoneId) =>
       Convert.ToBoolean(Interface.CallHook("RemoveMapping", zoneId));
 
-    #endregion TruePVE/NextGenPVE Integration
+    #endregion TruePVE Integration
 
     #region BotReSpawn/MonBots Integration
 
@@ -3175,6 +3197,39 @@ namespace Oxide.Plugins
     }
 
     #endregion ZoneManager Integration
+
+    #region LootDefender Integration
+
+    // return true to bypass Loot Defender locks if player is in a
+    //  bypass-enabled zone, else return null to take no action
+    private object OnLootLockedEntity(BasePlayer player, BaseEntity entity)
+    {
+      if (!player || !entity)
+      {
+        return null;
+      }
+
+      // don't bother checking PVP delay, since this is event bounds based
+
+      var result = ZM_GetPlayerZoneIDs(player);
+      if (result == null || result.Length == 0)
+      {
+        return null;
+      }
+
+      foreach (var zoneId in result)
+      {
+        if (!string.IsNullOrEmpty(zoneId) &&
+            _activeLootDefenderBypassZones.Contains(zoneId))
+        {
+          return true;
+        }
+      }
+
+      return null;
+    }
+
+    #endregion LootDefender Integration
 
     #region Debug
 
@@ -3836,6 +3891,9 @@ namespace Oxide.Plugins
 
       [JsonProperty(PropertyName = "Command List (If there is a '/' at the front, it is a chat command)", Order = 10)]
       public List<string> CommandList { get; set; } = new();
+
+      [JsonProperty(PropertyName = "Bypass Loot Defender locks", Order = 11)]
+      public bool BypassLootDefenderLocks { get; set; }
 
       public abstract BaseDynamicZone GetDynamicZone();
     }
