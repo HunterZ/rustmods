@@ -22,7 +22,8 @@ namespace Oxide.Plugins
   {
     #region Fields
 
-    [PluginReference] private readonly Plugin BotReSpawn, TruePVE, ZoneManager;
+    [PluginReference] private readonly Plugin
+      Backpacks, BotReSpawn, TruePVE, ZoneManager;
 
     private const string PermissionAdmin = "dynamicpvp.admin";
     private const string PrefabLargeOilRig =
@@ -35,19 +36,27 @@ namespace Oxide.Plugins
 
     private readonly Dictionary<string, Timer> _eventTimers = new();
     private readonly Dictionary<ulong, LeftZone> _pvpDelays = new();
+
     //ID -> EventName
     private readonly Dictionary<string, string> _activeDynamicZones = new();
-    // ZoneIDs of active DynamicPVP events with BypassLootDefenderLocks == true
-    // used for managing hook subscriptions and for faster lookups
-    private readonly HashSet<string> _activeLootDefenderBypassZones = new();
+
+    // plugin integration zone tracking - used for managing hook subscriptions
+    //  and for faster lookups
+
+    private enum PluginZoneCategory
+    {
+      BackpacksForce,
+      BackpacksPrevent,
+      LootDefender,
+      RestoreUponDeath
+    }
+
+    private readonly Dictionary<PluginZoneCategory, HashSet<string>>
+      _activePluginZones = new();
 
     private Vector3 _oilRigPosition = Vector3.zero;
     private Vector3 _largeOilRigPosition = Vector3.zero;
     private bool _useExcludePlayer;
-    private bool _subscribedCommands;
-    private bool _subscribedDamage;
-    private bool _subscribedZones;
-    private bool _brokenLabs;
     private bool _brokenTunnels;
     private bool _dataChanged;
     private Coroutine _createEventsCoroutine;
@@ -66,7 +75,7 @@ namespace Oxide.Plugins
       public string eventName;
       public Timer zoneTimer;
 
-      public void EnterPool()
+      private void Reset()
       {
         zoneId = null;
         eventName = null;
@@ -74,9 +83,9 @@ namespace Oxide.Plugins
         zoneTimer = null;
       }
 
-      public void LeavePool()
-      {
-      }
+      public void EnterPool() => Reset();
+
+      public void LeavePool() => Reset();
     }
 
     [Flags]
@@ -110,6 +119,43 @@ namespace Oxide.Plugins
       ZoneRemoved  = 1 << 3
     }
 
+    private enum HookCategory
+    {
+      Command,
+      PluginBackpacksForce,
+      PluginBackpacksPrevent,
+      PluginLootDefender,
+      PluginRestoreUponDeath,
+      PvpDelay,
+      Zone,
+    }
+
+    // hook names by hook category
+    private readonly Dictionary<HookCategory, List<string>> _hooksByCategory =
+      new()
+      {
+        { HookCategory.Command,                new List<string> {
+            nameof(OnPlayerCommand),
+            nameof(OnServerCommand) } },
+        { HookCategory.PluginBackpacksForce,   new List<string> {
+            nameof(OnPlayerDeath) } },
+        { HookCategory.PluginBackpacksPrevent, new List<string> {
+            nameof(CanDropBackpack) } },
+        { HookCategory.PluginLootDefender,     new List<string> {
+            nameof(OnLootLockedEntity) } },
+        { HookCategory.PluginRestoreUponDeath, new List<string> {
+            nameof(OnRestoreUponDeath) } },
+        { HookCategory.PvpDelay,               new List<string> {
+            nameof(CanEntityTakeDamage) } },
+        { HookCategory.Zone,                   new List<string> {
+            nameof(OnEnterZone),
+            nameof(OnExitZone) } }
+      };
+
+    // current hook subscription state by hook category
+    private readonly Dictionary<HookCategory, bool> _subscriptionsByCategory =
+      new();
+
     private readonly Collider[] _colliderBuffer = new Collider[8];
 
     private enum MonumentEventType
@@ -131,12 +177,20 @@ namespace Oxide.Plugins
 
     private void Init()
     {
-      _brokenLabs = _brokenTunnels = false;
+      foreach (
+        PluginZoneCategory pzCat in Enum.GetValues(typeof(PluginZoneCategory)))
+      {
+        _activePluginZones[pzCat] = new HashSet<string>();
+      }
+
+      _brokenTunnels = false;
 
       Instance = this;
       LoadData();
       permission.RegisterPermission(PermissionAdmin, this);
       AddCovalenceCommand(configData.Chat.Command, nameof(CmdDynamicPVP));
+
+      Unsubscribe(nameof(CanDropBackpack));
       Unsubscribe(nameof(CanEntityTakeDamage));
       Unsubscribe(nameof(OnCargoPlaneSignaled));
       Unsubscribe(nameof(OnCargoShipEgress));
@@ -154,8 +208,15 @@ namespace Oxide.Plugins
       Unsubscribe(nameof(OnLootEntity));
       Unsubscribe(nameof(OnLootLockedEntity));
       Unsubscribe(nameof(OnPlayerCommand));
+      Unsubscribe(nameof(OnPlayerDeath));
+      Unsubscribe(nameof(OnRestoreUponDeath));
       Unsubscribe(nameof(OnServerCommand));
       Unsubscribe(nameof(OnSupplyDropLanded));
+      foreach (var (category, _) in _hooksByCategory)
+      {
+        _subscriptionsByCategory[category] = false;
+      }
+
       if (configData.Global.LogToFile)
       {
         _debugStringBuilder = Pool.Get<StringBuilder>();
@@ -183,8 +244,6 @@ namespace Oxide.Plugins
           Puts("Some/all PVP delay flags NOT active, but TruePVE 2.2.3+ detected; please consider switching to TruePVE PVP Delay API in the config file for performance and cross-plugin support");
         }
       } // else ExcludePlayer is already enabled, or TruePVE 2.2.3+ not running
-
-      _subscribedCommands = _subscribedDamage = _subscribedZones = false;
     }
 
     private void OnServerInitialized()
@@ -310,7 +369,7 @@ namespace Oxide.Plugins
 
       _originalMonumentGeometries.Clear();
 
-      _activeLootDefenderBypassZones.Clear();
+      _activePluginZones.Clear();
     }
 
     private void OnServerSave() =>
@@ -329,6 +388,7 @@ namespace Oxide.Plugins
         PrintDebug("OnPlayerRespawned(): Ignoring respawn of null/NPC player");
         return;
       }
+
       TryRemovePVPDelay(player);
     }
 
@@ -345,7 +405,7 @@ namespace Oxide.Plugins
     }
 
     private LeftZone GetOrAddPVPDelay(
-      BasePlayer player, string zoneId, string eventName)
+      BasePlayer player, string zoneId, string eventName, BaseEvent baseEvent)
     {
       PrintDebug($"Adding {player.displayName} to pvp delay");
       var added = false;
@@ -364,7 +424,7 @@ namespace Oxide.Plugins
       leftZone.eventName = eventName;
       if (added)
       {
-        CheckHooks(HookCheckReasons.DelayAdded);
+        CheckHooks(HookCheckReasons.DelayAdded, baseEvent);
       }
 
       return leftZone;
@@ -377,8 +437,8 @@ namespace Oxide.Plugins
       if (!_pvpDelays.Remove(playerId, out var leftZone)) return false;
       Interface.CallHook("OnPlayerRemovedFromPVPDelay",
         playerId, leftZone.zoneId, player);
+      CheckHooks(HookCheckReasons.DelayRemoved, null); // baseEvent not needed
       Pool.Free(ref leftZone);
-      CheckHooks(HookCheckReasons.DelayRemoved);
       return true;
     }
 
@@ -391,6 +451,7 @@ namespace Oxide.Plugins
       {
         return true;
       }
+
       PrintDebug($"Skipping event creation because baseEntity={baseEntity} is owned by player={baseEntity.OwnerID}");
       return false;
     }
@@ -401,6 +462,7 @@ namespace Oxide.Plugins
       {
         return true;
       }
+
       PrintDebug($"Skipping event creation for eventName={eventName} due to OnCreateDynamicPVP hook result");
       return false;
     }
@@ -451,118 +513,82 @@ namespace Oxide.Plugins
       return false;
     }
 
+    /// toggle dynamic hook subscription(s) based on need
+    private void UpdateDynamicHook(
+      bool needSubscription, HookCategory hookCategory)
+    {
+      // abort if subscription tracking undefined, or subscription need already
+      //  met, or hooks not defined
+      if (!_subscriptionsByCategory.TryGetValue(
+            hookCategory, out var haveSubscription) ||
+          needSubscription == haveSubscription ||
+          !_hooksByCategory.TryGetValue(hookCategory, out var hooks))
+      {
+        return;
+      }
+
+      // (un)subscribe per subscription need
+      foreach (var hook in hooks)
+      {
+        if (needSubscription)
+        {
+          Subscribe(hook);
+        }
+        else
+        {
+          Unsubscribe(hook);
+        }
+      }
+
+      // record that we've achieved desired subscription state
+      _subscriptionsByCategory[hookCategory] = needSubscription;
+    }
+
     private void CheckCommandHooks(bool added)
     {
-      // optimization: abort if adding a delay/zone and already subscribed, or
-      //  if removing a delay/zone and already unsubscribed
-      if (added == _subscribedCommands)
+      // optimization: avoid calling HasCommands() if added + already subscribed
+      if (added &&
+          _subscriptionsByCategory.TryGetValue(
+            HookCategory.Command, out var subscribed) &&
+          subscribed)
       {
         return;
       }
 
-      // also return if subscription status already matches command status
-      if (HasCommands() == _subscribedCommands)
-      {
-        return;
-      }
-
-      // subscription status needs to change, so toggle things
-      if (_subscribedCommands)
-      {
-        Unsubscribe(nameof(OnPlayerCommand));
-        Unsubscribe(nameof(OnServerCommand));
-      }
-      else
-      {
-        Subscribe(nameof(OnPlayerCommand));
-        Subscribe(nameof(OnServerCommand));
-      }
-
-      _subscribedCommands = !_subscribedCommands;
+      UpdateDynamicHook(HasCommands(), HookCategory.Command);
     }
 
-    private void CheckPvpDelayHooks(bool added)
+    /// update plugin integration tracking/subscriptions as appropriate
+    private void CheckPluginHooks(BaseEvent baseEvent)
     {
-      // optimization: abort if using TruePVE's ExcludePlayer API
-      if (_useExcludePlayer)
+      // this currently only supports checks when baseEvent is provided
+      if (null == baseEvent) return;
+
+      foreach (
+        PluginZoneCategory pzCat in Enum.GetValues(typeof(PluginZoneCategory)))
       {
-        // ...ensure we're unsubscribed from damage hook, just in case
-        if (!_subscribedDamage) return;
-        Unsubscribe(nameof(CanEntityTakeDamage));
-        _subscribedDamage = false;
-        return;
+        if (HasPluginZoneCategory(baseEvent, pzCat))
+        {
+          UpdateDynamicHook(
+            _activePluginZones[pzCat].Count > 0, ToHookCategory(pzCat));
+        }
       }
-
-      // optimization: abort if adding a delay and already subscribed, or if
-      //  removing a delay and already unsubscribed
-      if (added == _subscribedDamage) return;
-
-      // also return if subscription status already matches delay status
-      if (_pvpDelays.Count > 0 == _subscribedDamage) return;
-
-      // subscription status needs to change, so toggle things
-      if (_subscribedDamage)
-      {
-        Unsubscribe(nameof(CanEntityTakeDamage));
-      }
-      else
-      {
-        Subscribe(nameof(CanEntityTakeDamage));
-      }
-
-      _subscribedDamage = !_subscribedDamage;
     }
 
-    private void CheckZoneHooks(bool added)
+    private void CheckPvpDelayHooks() =>
+      UpdateDynamicHook(
+        !_useExcludePlayer && _pvpDelays.Count > 0, HookCategory.PvpDelay);
+
+    private void CheckZoneHooks() =>
+      UpdateDynamicHook(_activeDynamicZones.Count > 0, HookCategory.Zone);
+
+    /// check whether hook subscription changes are warranted
+    //
+    // baseEvent is used as an optimization to only check plugin integration
+    //  hook subscriptions when relevant zones are added/removed
+    private void CheckHooks(HookCheckReasons reasons, BaseEvent baseEvent)
     {
-      // optimization: abort if adding a zone and already subscribed, or if
-      //  removing a zone and already unsubscribed
-      if (added == _subscribedZones)
-      {
-        return;
-      }
-
-      // also return if subscription status already matches zone status
-      if (_activeDynamicZones.Count > 0 == _subscribedZones)
-      {
-        return;
-      }
-
-      // subscription status needs to change, so toggle things
-      if (_subscribedZones)
-      {
-        Unsubscribe(nameof(OnEnterZone));
-        Unsubscribe(nameof(OnExitZone));
-      }
-      else
-      {
-        Subscribe(nameof(OnEnterZone));
-        Subscribe(nameof(OnExitZone));
-      }
-
-      _subscribedZones = !_subscribedZones;
-    }
-
-    private void CheckHooks(HookCheckReasons reasons)
-    {
-      if (reasons.HasFlag(HookCheckReasons.DelayAdded))
-      {
-        CheckPvpDelayHooks(true);
-      }
-      else if (reasons.HasFlag(HookCheckReasons.DelayRemoved))
-      {
-        CheckPvpDelayHooks(false);
-      }
-
-      if (reasons.HasFlag(HookCheckReasons.ZoneAdded))
-      {
-        CheckZoneHooks(true);
-      }
-      else if (reasons.HasFlag(HookCheckReasons.ZoneRemoved))
-      {
-        CheckZoneHooks(false);
-      }
-
+      // update command hooks based on PVP delay or zone changes
       if (reasons.HasFlag(HookCheckReasons.DelayAdded) ||
           reasons.HasFlag(HookCheckReasons.ZoneAdded))
       {
@@ -572,6 +598,21 @@ namespace Oxide.Plugins
                reasons.HasFlag(HookCheckReasons.ZoneRemoved))
       {
         CheckCommandHooks(false);
+      }
+
+      // update PVP delay hooks based on PVP delay changes
+      if (reasons.HasFlag(HookCheckReasons.DelayAdded) ||
+          reasons.HasFlag(HookCheckReasons.DelayRemoved))
+      {
+        CheckPvpDelayHooks();
+      }
+
+      // update plugin and zone hooks based on zone changes
+      if (reasons.HasFlag(HookCheckReasons.ZoneAdded) ||
+          reasons.HasFlag(HookCheckReasons.ZoneRemoved))
+      {
+        CheckPluginHooks(baseEvent);
+        CheckZoneHooks();
       }
     }
 
@@ -2078,7 +2119,7 @@ namespace Oxide.Plugins
     private static (string monumentName, bool custom) GetLandmarkName(
       LandmarkInfo landmarkInfo)
     {
-      var monumentName = landmarkInfo.displayPhrase.english.Trim();
+      var monumentName = landmarkInfo.displayPhrase?.english?.Trim();
       return
         string.IsNullOrEmpty(monumentName) &&
         landmarkInfo.name.Contains("monument_marker.prefab") ?
@@ -2318,6 +2359,11 @@ namespace Oxide.Plugins
 
         // create Train Tunnel stairwell monument event
         var (landmarkName, _) = GetLandmarkName(entrance);
+        if (string.IsNullOrEmpty(landmarkName))
+        {
+          PrintWarning($"Skipping Train Tunnels entrance {entrance}@{entrance.transform.position} because it has no landmark name");
+          continue;
+        }
         yield return CreateMonumentEvent(
           landmarkName, entrance.transform, MonumentEventType.TunnelEntrance,
           addedEvents, createdEvents);
@@ -2439,7 +2485,7 @@ namespace Oxide.Plugins
       }
 
       var result = ZM_GetPlayerZoneIDs(player);
-      if (result == null || result.Length == 0)
+      if (result == null)
       {
         return null;
       }
@@ -2478,7 +2524,8 @@ namespace Oxide.Plugins
 
     #region DynamicZone Handler
 
-    // create a zone that is parented to an entity, such that they move together
+    /// create a zone that is parented to an entity, so that they move together
+    //
     // NOTE: caller is responsible for calling CheckEntityOwner() and
     //  CanCreateDynamicPVP() first, because this method can't easily implement
     //  calling them exactly once
@@ -2637,15 +2684,8 @@ namespace Oxide.Plugins
 
       if (_activeDynamicZones.TryAdd(zoneId, eventName))
       {
-        CheckHooks(HookCheckReasons.ZoneAdded);
-      }
-
-      if (baseEvent.BypassLootDefenderLocks &&
-          _activeLootDefenderBypassZones.Count == 0 &&
-          _activeLootDefenderBypassZones.Add(zoneId))
-      {
-        // added Loot Defender bypass zone to an empty set, so subscribe to hook
-        Subscribe(nameof(OnLootLockedEntity));
+        UpdateActivePluginZones(added: true, zoneId, baseEvent);
+        CheckHooks(HookCheckReasons.ZoneAdded, baseEvent);
       }
 
       var stringBuilder = Pool.Get<StringBuilder>();
@@ -2763,14 +2803,6 @@ namespace Oxide.Plugins
         return false;
       }
 
-      if (baseEvent.BypassLootDefenderLocks &&
-          _activeLootDefenderBypassZones.Remove(zoneId) &&
-          _activeLootDefenderBypassZones.Count == 0)
-      {
-        // removed only Loot Defender bypass zone, so unsubscribe from hook
-        Unsubscribe(nameof(OnLootLockedEntity));
-      }
-
       var stringBuilder = Pool.Get<StringBuilder>();
       stringBuilder.Clear();
       if (DomeCreateAllowed(
@@ -2819,7 +2851,8 @@ namespace Oxide.Plugins
         }
         if (_activeDynamicZones.Remove(zoneId))
         {
-          CheckHooks(HookCheckReasons.ZoneRemoved);
+          UpdateActivePluginZones(added: false, zoneId, baseEvent);
+          CheckHooks(HookCheckReasons.ZoneRemoved, baseEvent);
         }
         PrintDebug($"Deleted zoneId={zoneId} with eventName={eventName} and properties: {stringBuilder.ToString().TrimEnd(',')}.");
         Interface.CallHook("OnDeletedDynamicPVP", zoneId, eventName);
@@ -3108,7 +3141,7 @@ namespace Oxide.Plugins
       Interface.CallHook("OnPlayerExitPVP",
         player, zoneId, baseEvent.PvpDelayTime);
 
-      var leftZone = GetOrAddPVPDelay(player, zoneId, eventName);
+      var leftZone = GetOrAddPVPDelay(player, zoneId, eventName, baseEvent);
       leftZone.zoneTimer = timer.Once(baseEvent.PvpDelayTime, () =>
       {
         TryRemovePVPDelay(player);
@@ -3198,38 +3231,143 @@ namespace Oxide.Plugins
 
     #endregion ZoneManager Integration
 
-    #region LootDefender Integration
+    #region Backpacks/LootDefender/RestoreUponDeath Integration
 
-    // return true to bypass Loot Defender locks if player is in a
-    //  bypass-enabled zone, else return null to take no action
-    private object OnLootLockedEntity(BasePlayer player, BaseEntity entity)
+    /// return whether zones for the given base event are relevant to the given
+    ///  plugin integration category
+    private bool HasPluginZoneCategory(
+      BaseEvent baseEvent, PluginZoneCategory category) =>
+      category switch
+      {
+        PluginZoneCategory.BackpacksForce =>
+          baseEvent.DropPluginBackpacks == true,
+        PluginZoneCategory.BackpacksPrevent =>
+          baseEvent.DropPluginBackpacks == false,
+        PluginZoneCategory.LootDefender =>
+          baseEvent.BypassLootDefenderLocks,
+        PluginZoneCategory.RestoreUponDeath =>
+          baseEvent.BlockRestoreUponDeath,
+        _ => false
+      };
+
+    /// get the hook category enum value corresponding to the given plugin zone
+    ///  category value
+    private HookCategory ToHookCategory(
+      PluginZoneCategory pluginZoneCategory) =>
+      pluginZoneCategory switch
+      {
+        PluginZoneCategory.BackpacksForce =>
+          HookCategory.PluginBackpacksForce,
+        PluginZoneCategory.BackpacksPrevent =>
+          HookCategory.PluginBackpacksPrevent,
+        PluginZoneCategory.LootDefender =>
+          HookCategory.PluginLootDefender,
+        PluginZoneCategory.RestoreUponDeath =>
+          HookCategory.PluginRestoreUponDeath,
+        _ => throw new ArgumentOutOfRangeException(nameof(pluginZoneCategory))
+      };
+
+    /// add/remove _activePluginZones HashSet entries for any plugin integration
+    ///  categories associated with the base event for a given zone that's being
+    ///  added/removed
+    private void UpdateActivePluginZones(
+      bool added, string zoneId, BaseEvent baseEvent)
     {
-      if (!player || !entity)
+      // check each possible plugin integration category
+      foreach (var (category, zoneSet) in _activePluginZones)
       {
-        return null;
-      }
-
-      // don't bother checking PVP delay, since this is event bounds based
-
-      var result = ZM_GetPlayerZoneIDs(player);
-      if (result == null || result.Length == 0)
-      {
-        return null;
-      }
-
-      foreach (var zoneId in result)
-      {
-        if (!string.IsNullOrEmpty(zoneId) &&
-            _activeLootDefenderBypassZones.Contains(zoneId))
+        // skip base events without this plugin integration active
+        if (!HasPluginZoneCategory(baseEvent, category))
         {
+          continue;
+        }
+
+        if (added)
+        {
+          // add new zone to plugin integration category active zones
+          zoneSet.Add(zoneId);
+        }
+        else
+        {
+          // remove defunct zone from plugin integration category active zones
+          zoneSet.Remove(zoneId);
+        }
+      }
+    }
+
+    /// return true if player is determined to be in a zone of the given plugin
+    ///  integration category, else false
+    private bool PlayerInActivePluginZone(
+      BasePlayer player, PluginZoneCategory pzCat)
+    {
+      // abort if not a valid, real player
+      if (!player || !player.userID.IsSteamId())
+      {
+        return false;
+      }
+
+      // abort if we don't have a zone set for requested category (pathological)
+      if (!_activePluginZones.TryGetValue(pzCat, out var zoneSet))
+      {
+        return false;
+      }
+
+      // get zones player is in, on the assumption that backpack is dropping at
+      //  their position, as this is much more efficient to check than a raw
+      //  position
+      var zoneIDs = ZM_GetPlayerZoneIDs(player);
+
+      // abort if we got nothing
+      if (zoneIDs == null)
+      {
+        return false;
+      }
+
+      // check to see if any of the player's zones are in the set of active
+      //  zones for the relevant plugin integration
+      foreach (var zoneId in zoneIDs)
+      {
+        if (!string.IsNullOrEmpty(zoneId) && zoneSet.Contains(zoneId))
+        {
+          // report match
           return true;
         }
       }
 
-      return null;
+      // no match found
+      return false;
     }
 
-    #endregion LootDefender Integration
+    /// hook handler: return false to prevent plugin Backpacks drop if owner ID
+    ///  can be resolved to a BasePlayer who is in a drop-prevented zone, else
+    ///  return true to allow backpack drop
+    private bool CanDropBackpack(ulong backpackOwnerID, Vector3 position) =>
+      !BasePlayer.TryFindByID(backpackOwnerID, out var player) ||
+      !PlayerInActivePluginZone(player, PluginZoneCategory.BackpacksPrevent);
+
+    /// request plugin Backpacks drop if player dies in a drop-forced zone
+    private void OnPlayerDeath(BasePlayer player, HitInfo info)
+    {
+      if (PlayerInActivePluginZone(player, PluginZoneCategory.BackpacksForce))
+      {
+        // request backpack drop
+        Backpacks?.Call("API_DropBackpack", player);
+      }
+    }
+
+    /// hook handler: return true to bypass Loot Defender locks if player is in
+    ///  a bypass-enabled zone, else return null to take no action
+    private object OnLootLockedEntity(BasePlayer player, BaseEntity entity) =>
+      PlayerInActivePluginZone(player, PluginZoneCategory.LootDefender) ?
+        true : null;
+
+    /// hook handler: return true to block Restore Upon Death if player is in a
+    ///  restore-blocked zone, else return null to take no action
+    private object OnRestoreUponDeath(BasePlayer player) =>
+      PlayerInActivePluginZone(player, PluginZoneCategory.RestoreUponDeath) ?
+        true : null;
+
+    #endregion Backpacks/LootDefender/RestoreUponDeath Integration
 
     #region Debug
 
@@ -3892,8 +4030,14 @@ namespace Oxide.Plugins
       [JsonProperty(PropertyName = "Command List (If there is a '/' at the front, it is a chat command)", Order = 10)]
       public List<string> CommandList { get; set; } = new();
 
-      [JsonProperty(PropertyName = "Bypass Loot Defender locks", Order = 11)]
+      [JsonProperty(PropertyName = "Drop plugin Backpacks on death (null disables override)", Order = 11)]
+      public bool? DropPluginBackpacks { get; set; }
+
+      [JsonProperty(PropertyName = "Bypass Loot Defender locks", Order = 12)]
       public bool BypassLootDefenderLocks { get; set; }
+
+      [JsonProperty(PropertyName = "Block Restore Upon Death", Order = 13)]
+      public bool BlockRestoreUponDeath { get; set; }
 
       public abstract BaseDynamicZone GetDynamicZone();
     }
