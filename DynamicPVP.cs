@@ -2181,9 +2181,11 @@ namespace Oxide.Plugins
         }
 
         var type =
-          custom ? MonumentEventType.Custom :
-          "Underwater Lab" == monumentName ? MonumentEventType.UnderwaterLabs :
-          MonumentEventType.Default;
+          custom ?
+            MonumentEventType.Custom :
+          "Underwater Lab" == monumentName ?
+            MonumentEventType.UnderwaterLabs :
+            MonumentEventType.Default;
         yield return CreateMonumentEvent(
           monumentName, landmarkInfo.transform, type,
           addedEvents, createdEvents);
@@ -2584,8 +2586,9 @@ namespace Oxide.Plugins
     private bool HandleMonumentEvent(
       string eventName, Transform transform, MonumentEvent monumentEvent)
     {
-      var position = monumentEvent.TransformPosition == Vector3.zero ?
-        transform.position :
+      var position =
+        monumentEvent.TransformPosition == Vector3.zero ?
+          transform.position :
         monumentEvent.DynamicZone.FixedRotation ?
           transform.position + monumentEvent.TransformPosition :
           transform.TransformPoint(monumentEvent.TransformPosition);
@@ -3235,7 +3238,7 @@ namespace Oxide.Plugins
 
     /// return whether zones for the given base event are relevant to the given
     ///  plugin integration category
-    private bool HasPluginZoneCategory(
+    private static bool HasPluginZoneCategory(
       BaseEvent baseEvent, PluginZoneCategory category) =>
       category switch
       {
@@ -3252,7 +3255,7 @@ namespace Oxide.Plugins
 
     /// get the hook category enum value corresponding to the given plugin zone
     ///  category value
-    private HookCategory ToHookCategory(
+    private static HookCategory ToHookCategory(
       PluginZoneCategory pluginZoneCategory) =>
       pluginZoneCategory switch
       {
