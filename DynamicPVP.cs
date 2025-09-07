@@ -16,7 +16,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-  [Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "4.7.0", ResourceId = 2728)]
+  [Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "4.7.1", ResourceId = 2728)]
   [Description("Creates temporary PvP zones on certain actions/events")]
   public class DynamicPVP : RustPlugin
   {
@@ -1723,21 +1723,19 @@ namespace Oxide.Plugins
 
     // get cumulative size, rotation, offset of prevent building volume relative
     //  to given monument transform
-    // if attached=true, monument rotation is subtracted from volume rotation
+    // if global=false, monument rotation is subtracted from volume rotation
     //  prior to normalizing (NOTE: custom monuments have global PB colliders,
     //  while vanilla ones attach them to their transform hierarchies)
     // returns all zeroes if something went wrong
     private static (Vector3 size, float rotation, Vector3 offset)
-      GetPreventBuildingParams(Collider collider, Transform tMonument)
+      GetPreventBuildingParams(
+        Collider collider, Transform tMonument, bool global)
     {
       if (!collider || !tMonument)
       {
         return (Vector3.zero, 0.0f, Vector3.zero);
       }
 
-      // if the collider's transform is parented to the root of its hierarchy,
-      //  then it's a global collider - probably for a custom map monument
-      var global = collider.transform.root == collider.transform.parent;
       // collect the parent transform hierarchy into a list
       // for global colliders this will only collect the parent, but for all
       //  others it will collect everything below the root of the hierarchy
@@ -1797,7 +1795,7 @@ namespace Oxide.Plugins
         monumentTransform, customMonument);
       if (!pbCollider) return (0.0f, Vector3.zero, 0.0f, Vector3.zero);
       var (size, rotation, offset) =
-        GetPreventBuildingParams(pbCollider, monumentTransform);
+        GetPreventBuildingParams(pbCollider, monumentTransform, customMonument);
       if (Vector3.zero == size)
       {
         return (0.0f, Vector3.zero, 0.0f, Vector3.zero);
@@ -1942,24 +1940,23 @@ namespace Oxide.Plugins
     //  transform
     private (float radius, Vector3 size, float rotation, Vector3 offset)
       GetMonumentGeometry(Transform monumentTransform, MonumentEventType type)
-    {
-      switch (type)
-      {
-        case MonumentEventType.Default:
-          return GetPreventBuildingParams(monumentTransform, false);
-        case MonumentEventType.Custom:
-          return GetPreventBuildingParams(monumentTransform, true);
-        case MonumentEventType.TunnelEntrance:
-          return GetTunnelLinkParams(monumentTransform, true);
-        case MonumentEventType.TunnelLink:
-          return GetTunnelLinkParams(monumentTransform, false);
-        case MonumentEventType.TunnelSection:
-          return GetPreventBuildingParams(monumentTransform, false);
-        case MonumentEventType.UnderwaterLabs:
-          return GetLabLinkParams(monumentTransform);
-      }
-      throw new ArgumentOutOfRangeException(nameof(type), type, null);
-    }
+        => type switch
+        {
+          MonumentEventType.Default =>
+            GetPreventBuildingParams(monumentTransform, false),
+          MonumentEventType.Custom =>
+            GetPreventBuildingParams(monumentTransform, true),
+          MonumentEventType.TunnelEntrance =>
+            GetTunnelLinkParams(monumentTransform, true),
+          MonumentEventType.TunnelLink =>
+            GetTunnelLinkParams(monumentTransform, false),
+          MonumentEventType.TunnelSection =>
+            GetPreventBuildingParams(monumentTransform, false),
+          MonumentEventType.UnderwaterLabs =>
+            GetLabLinkParams(monumentTransform),
+          _ =>
+            throw new ArgumentOutOfRangeException(nameof(type), type, null)
+        };
 
     // return whether a geometry check should occur for the given monument event
     private static bool ShouldCheckGeometry(MonumentEvent monumentEvent) =>
@@ -2102,7 +2099,7 @@ namespace Oxide.Plugins
       {
         if (ShouldCheckGeometry(monumentEvent))
         {
-          PrintDebug($"Calculating geometry for monument event {monumentName} with type {type}");
+          PrintDebug($"Calculating geometry for monument event {monumentName} with type {type} at location {transform.position}");
           CheckMonumentGeometry(
             monumentName, transform, type,
             !createdEvents.Contains(monumentName), monumentEvent);
