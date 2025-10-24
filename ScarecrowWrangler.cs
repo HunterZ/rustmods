@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using Facepunch;
 using UnityEngine;
 
 namespace Oxide.Plugins
@@ -167,16 +168,101 @@ namespace Oxide.Plugins
         return false;
       }
 
-      // pick a random known-good location and teleport the zombie to it
-      // TODO: consider taking into account player and/or other scarecrow
-      //  locations?
+      // find known-good location with the largest minimum distance from all
+      //  other zombies
+      //
+      //  first, get the locations of all zombies on the server
+      var sLocs = Pool.Get<List<Vector3>>();
+      foreach (var serverEntity in BaseNetworkable.serverEntities)
+      {
+        // skip non-scarecrows, plus the one being moved
+        if (serverEntity is not ScarecrowNPC sc || sc.Equals(scarecrow))
+        {
+          continue;
+        }
+        sLocs.Add(sc.transform.position);
+      }
+      // now find the distance from each known-good point to its closest zombie,
+      //  and record it as a candidate if that distance is the farthest seen
+      var farLoc = scarecrow.transform.position;
+      var farDist = 0.0;
+      foreach (var validLoc in _validLocations)
+      {
+        var closestDist = double.MaxValue;
+        foreach (var sLoc in sLocs)
+        {
+          var curDist = Vector3.Distance(sLoc, validLoc);
+          // Puts($"***** \tlocation={validLoc}, distance to scarecrow@{sLoc}={curDist}");
+          if (curDist < closestDist)
+          {
+            // this zombie is closer to the known-good location than any we've
+            //  seen so far; record distance
+            closestDist = curDist;
+          }
+        }
+        // Puts($"***** location={validLoc} closest scarecrow distance={closestDist}");
+
+        if (closestDist <= farDist) continue;
+
+        // this known-good location is the farthest from its closest zombie
+        //  that we've seen so far; record it as a candidate
+        farLoc = validLoc;
+        farDist = closestDist;
+      }
+
+      if (farDist > 0.0)
+      {
+        PrintWarning($"Relocating scarecrow {scarecrow.net.ID} from forbidden location {scarecrow.transform.position}/{GetGrid(scarecrow.transform.position)} to known-good location {farLoc}/{GetGrid(farLoc)} with distance {farDist} to closest scarecrow");
+        Relocate(scarecrow, farLoc, quiet);
+        return true;
+      }
+
+/*
+      // find known-good location with the furthest average distance from all
+      //  zombies
+      //
+      //  first, get the locations of all zombies on the server
+      var sLocs = Pool.Get<List<Vector3>>();
+      foreach (var serverEntity in BaseNetworkable.serverEntities)
+      {
+        // skip non-scarecrows, plus the one being moved
+        if (serverEntity is not ScarecrowNPC sc || sc.Equals(scarecrow))
+        {
+          continue;
+        }
+        sLocs.Add(sc.transform.position);
+      }
+      // now calculate the average zombie distance to each known-good location
+      var farLoc = scarecrow.transform.position;
+      var farDist = -1.0;
+      foreach (var vLoc in _validLocations)
+      {
+        var curDist = 0.0;
+        foreach (var sLoc in sLocs)
+        {
+          curDist += Vector3.Distance(vLoc, sLoc) / sLocs.Count;
+        }
+        if (curDist <= farDist) continue;
+        farLoc = vLoc;
+        farDist = curDist;
+      }
+      Pool.FreeUnmanaged(ref sLocs);
+
+      if (farDist > 0.0)
+      {
+        PrintWarning($"Relocating scarecrow {scarecrow.net.ID} from forbidden location {scarecrow.transform.position}/{GetGrid(scarecrow.transform.position)} to known-good location {farLoc}/{GetGrid(farLoc)} with average distance {farDist} from all other zombies");
+        Relocate(scarecrow, farLoc, quiet);
+        return true;
+      }
+*/
+      // pick a random known-good location
       var randomIndex = Random.Range(0, _validLocations.Count - 1);
       var i = 0;
       foreach (var location in _validLocations)
       {
         if (i == randomIndex)
         {
-          PrintWarning($"Relocating scarecrow {scarecrow.net.ID} from forbidden location {scarecrow.transform.position}/{GetGrid(scarecrow.transform.position)} to known-good location {location}/{GetGrid(location)} at index {i}/{_validLocations.Count}");
+          PrintWarning($"Relocating scarecrow {scarecrow.net.ID} from forbidden location {scarecrow.transform.position}/{GetGrid(scarecrow.transform.position)} to known-good location {location}/{GetGrid(location)} at random index {i}/{_validLocations.Count}");
           Relocate(scarecrow, location, quiet);
           return true;
         }
@@ -184,7 +270,7 @@ namespace Oxide.Plugins
       }
 
       // pathological
-      PrintError("Ran off end of valid locations database?");
+      PrintWarning("Failed to determine a scarecrow relocation target");
       return true;
     }
 
