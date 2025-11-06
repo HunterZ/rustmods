@@ -8,7 +8,6 @@ using Oxide.Game.Rust.Cui;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.Linq;
 using UnityEngine;
 
 namespace Oxide.Plugins;
@@ -45,8 +44,8 @@ public class SuperPVxInfo : RustPlugin
     Sputnik         = 1 << 3
   }
 
-  // PVP events that are managed via listening to start/stop hooks that
-  //  provide a PVP area definition
+  // PVP events that are managed via listening to start/stop hooks that provide
+  //  a PVP area definition
   private enum PvpLocationEventType
   {
     // KpucTaJl plugins
@@ -72,9 +71,9 @@ public class SuperPVxInfo : RustPlugin
   private readonly Dictionary<ulong, Dictionary<string, Timer>>
     _excludedPlayers = new();
 
-  // NOTE: this is not to be used directly for sending messages, but rather
-  //  for populating the default language dictionary, and for enumerating
-  //  which messages exist
+  // NOTE: this is not to be used directly for sending messages, but rather for
+  //  populating the default language dictionary, and for enumerating which
+  //  messages exist
   private readonly Dictionary<string, string> _notifyMessages = new()
   {
     ["Unexpected Exit From Abandoned Or Raidable Base"] =
@@ -127,8 +126,8 @@ public class SuperPVxInfo : RustPlugin
     if (null == message) return;
     if (_configData.NotifySettings.ChatEnabled)
     {
-      SendReply(player, string.Format(
-        message, _configData.NotifySettings.ChatPrefix));
+      SendReply(
+        player, string.Format(message, _configData.NotifySettings.ChatPrefix));
     }
     if (_configData.NotifySettings.PopupNotificationsEnabled &&
         null != PopupNotifications)
@@ -185,8 +184,7 @@ public class SuperPVxInfo : RustPlugin
     PlayerWatcher.PvpBelowHeight = _configData?.PvpBelowHeight ?? -500.0f;
     PlayerWatcher.UpdateIntervalSeconds =
       _configData?.UpdateIntervalSeconds ?? 1.0f;
-    if (null != _configData &&
-        !string.IsNullOrEmpty(_configData.ToggleCommand))
+    if (null != _configData && !string.IsNullOrEmpty(_configData.ToggleCommand))
     {
       AddCovalenceCommand(_configData.ToggleCommand, nameof(ToggleUI));
     }
@@ -442,25 +440,27 @@ public class SuperPVxInfo : RustPlugin
     // go by zone name first
     if (!string.IsNullOrEmpty(zoneName))
     {
-      if (_configData.PveZoneManagerNames.Any(
-            x => zoneName.Contains(x, CompareOptions.IgnoreCase))
-         )
+      foreach (var pveZoneName in _configData.PveZoneManagerNames)
       {
-        return PVxType.PVE;
+        if (zoneName.Contains(pveZoneName, CompareOptions.IgnoreCase))
+        {
+          return PVxType.PVE;
+        }
       }
-      if (_configData.PvpZoneManagerNames.Any(
-            x => zoneName.Contains(x, CompareOptions.IgnoreCase))
-         )
+      foreach (var pvpZoneName in _configData.PvpZoneManagerNames)
       {
-        return PVxType.PVP;
+        if (zoneName.Contains(pvpZoneName, CompareOptions.IgnoreCase))
+        {
+          return PVxType.PVP;
+        }
       }
     }
 
     if (!string.IsNullOrEmpty(zoneId))
     {
       // return PVP if this is a TruePVE/NextGenPVE exclusion zone
-      // (needed for e.g. ZoneManagerAutoZones which doesn't put "PVP" in
-      //  its zone names)
+      // (needed for e.g. ZoneManagerAutoZones which doesn't put "PVP" in its
+      //  zone names)
       if (IsExcludeZone(zoneId))
       {
         return PVxType.PVP;
@@ -523,12 +523,21 @@ public class SuperPVxInfo : RustPlugin
     ZoneManager?.Call("GetZoneSize", zoneId) is Vector3 zoneSize ?
       zoneSize : Vector3.zero;
 
-  private bool IsExcludeZone(string zoneId) =>
-    null != _storedData &&
-    null != _configData &&
-    _storedData.Mappings.TryGetValue(zoneId, out var ruleset) &&
-    _configData.PveExclusionNames.Any(
-      x => ruleset.Contains(x, CompareOptions.IgnoreCase));
+  private bool IsExcludeZone(string zoneId)
+  {
+    if (null == _storedData || null == _configData ||
+        !_storedData.Mappings.TryGetValue(zoneId, out var ruleset))
+    {
+      return false;
+    }
+
+    foreach (var name in _configData.PveExclusionNames)
+    {
+      if (ruleset.Contains(name, CompareOptions.IgnoreCase)) return true;
+    }
+
+    return false;
+  }
 
   // common logic for setting watcher's zone check request flag
   private void CheckZone(BasePlayer player) =>
@@ -1073,13 +1082,13 @@ public class SuperPVxInfo : RustPlugin
   {
     if (iPlayer.Object is not BasePlayer player) return;
     if (!IsValidPlayer(player, true)) return;
-    if (null == GetPlayerWatcher(player))
+    if (GetPlayerWatcher(player))
     {
-      OnPlayerConnected(player);
+      OnPlayerDisconnected(player, UIName);
     }
     else
     {
-      OnPlayerDisconnected(player, UIName);
+      OnPlayerConnected(player);
     }
   }
 
@@ -1137,8 +1146,7 @@ public class SuperPVxInfo : RustPlugin
     foreach (var (type, ssData) in _configData.SimpleStatusPVxSettings)
     {
       if (ssData is not { Enabled: true }) continue;
-      SimpleStatus.Call(
-        "SetStatus", player.UserIDString, type.ToString(), 0);
+      SimpleStatus.Call("SetStatus", player.UserIDString, type.ToString(), 0);
     }
   }
 
@@ -1150,8 +1158,8 @@ public class SuperPVxInfo : RustPlugin
     foreach (var (type, ssData) in _configData.SimpleStatusPVxSettings)
     {
       if (ssData is not { Enabled: true }) continue;
-      SimpleStatus.Call("CreateStatus",
-        this, type.ToString(), ssData.ToDict());
+      SimpleStatus.Call(
+        "CreateStatus", this, type.ToString(), ssData.ToDict());
     }
   }
 
@@ -1225,8 +1233,8 @@ public class SuperPVxInfo : RustPlugin
       get
       {
         // generate JSON for a PVxType on first use, and cache it in _json
-        // ...unless this PVxType is disabled, in which case return the
-        //  default empty string
+        // ...unless this PVxType is disabled, in which case return the default
+        //  empty string
         if (string.IsNullOrEmpty(_json))
         {
           _json = new CuiElementContainer
@@ -1270,8 +1278,8 @@ public class SuperPVxInfo : RustPlugin
 
   // Class for managing Simple Status settings for an individual PVxType enum
   //  value
-  // Supports user-friendly JSON configuration values and uses them to
-  //  produce a dictionary to be passed to Simple Status hooks.
+  // Supports user-friendly JSON configuration values and uses them to produce a
+  //  dictionary to be passed to Simple Status hooks.
   private sealed class SimpleStatusSettings
   {
     [JsonProperty(PropertyName = "Enabled")]
@@ -1463,9 +1471,9 @@ public class SuperPVxInfo : RustPlugin
           _configData.DefaultType = PVxType.PVE;
         }
         // add default toggle states for any missing notifications
-        foreach (var msgKey in _notifyMessages.Select(x => x.Key).Where(
-                   y => !_configData.NotifySettings.Enabled.ContainsKey(y)))
+        foreach (var (msgKey, _) in _notifyMessages)
         {
+          if (_configData.NotifySettings.Enabled.ContainsKey(msgKey)) continue;
           PrintWarning($"Adding new player notification toggle in disabled state: \"{msgKey}\"");
           _configData.NotifySettings.Enabled.Add(msgKey, false);
         }
@@ -1561,9 +1569,8 @@ public class SuperPVxInfo : RustPlugin
     // abort if save already pending
     if (null != _saveDataTimer) return;
     // start a save timer
-    _saveDataTimer = timer.Once(
-      _configData?.SaveIntervalSeconds ?? 5.0f,
-      WriteData);
+    _saveDataTimer =
+      timer.Once(_configData?.SaveIntervalSeconds ?? 5.0f, WriteData);
   }
 
   private void WriteData()
@@ -1742,8 +1749,8 @@ public class SuperPVxInfo : RustPlugin
 
     // kick off the watcher's periodic processing
     // NOTE: this is used instead of Update() because the latter gets called
-    //  much too frequently for our needs, wasting a lot of processing power
-    //  on time counting overhead
+    //  much too frequently for our needs, wasting a lot of processing power on
+    //  time counting overhead
     public void StartWatching() =>
       InvokeRepeating(nameof(Watch), 0.0f, UpdateIntervalSeconds);
 
@@ -1752,8 +1759,7 @@ public class SuperPVxInfo : RustPlugin
     public void Watch()
     {
       // abort if plugin reference or player invalid
-      if (
-        null == _player || null == Instance || !IsValidPlayer(_player, true))
+      if (!_player || null == Instance || !IsValidPlayer(_player, true))
       {
         return;
       }
@@ -1782,7 +1788,7 @@ public class SuperPVxInfo : RustPlugin
       ref bool? storedState, bool currentState,
       string enterMessage, string exitMessage)
     {
-      if (currentState == storedState || null == Instance || null == _player)
+      if (currentState == storedState || null == Instance || !_player)
       {
         // no change or missing stuff
         return;
@@ -1834,7 +1840,7 @@ public class SuperPVxInfo : RustPlugin
     {
       // note: _pvxState check is to suppress blasting change messages on
       //  initial check
-      if (null == _player ||
+      if (!_player ||
           null == Instance ||
           null == _pvxState ||
           string.IsNullOrEmpty(message))
@@ -1850,8 +1856,7 @@ public class SuperPVxInfo : RustPlugin
     private void UpdateFlags()
     {
       // abort if plugin reference or player invalid
-      if (
-        null == _player || null == Instance || !IsValidPlayer(_player, true))
+      if (!_player || null == Instance || !IsValidPlayer(_player, true))
       {
         return;
       }
@@ -1865,7 +1870,7 @@ public class SuperPVxInfo : RustPlugin
       {
         if (null != _inBaseType &&
             Vector3.Distance(BaseLocation, _player.transform.position) >
-            BaseRadius)
+              BaseRadius)
         {
           _inBaseType = null;
           SendCannedMessage("Unexpected Exit From Abandoned Or Raidable Base");
