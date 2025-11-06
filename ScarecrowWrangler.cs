@@ -14,10 +14,21 @@ public class ScarecrowWrangler : RustPlugin
     (int)TerrainTopology.Enum.Ocean |
     (int)TerrainTopology.Enum.Tier0;
 
+  private class ValidLocation
+  {
+    public float            closestDistance = float.MaxValue;
+    public ScarecrowWatcher closestWatcher;
+    public readonly Vector3 position        = Vector3.zero;
+
+    public ValidLocation() { }
+
+    public ValidLocation(Vector3 pos) => position = pos;
+  }
+
   // all scarecrow watchers being managed by this plugin
   private readonly HashSet<ScarecrowWatcher> _watchers = new();
   // all known-good scarecrow spawn locations, for use as teleport destinations
-  private readonly List<Vector3> _validLocations = new();
+  private readonly List<ValidLocation> _validLocations = new();
   // number of scarecrow spawns since last new known-good location was recorded
   private ushort _validMissCount;
 
@@ -124,13 +135,13 @@ public class ScarecrowWrangler : RustPlugin
     foreach (var goodPos in _validLocations)
     {
       // move on if far enough away
-      if (Vector3.Distance(goodPos, pos) >= 100.0f) continue;
+      if (Vector3.Distance(goodPos.position, pos) >= 100.0f) continue;
       // too close; add to miss count and abort
       ++_validMissCount;
       return;
     }
     // add new known-good location and reset miss counter
-    _validLocations.Add(pos);
+    _validLocations.Add(new ValidLocation(pos));
     _validMissCount = 0;
   }
 
@@ -167,6 +178,14 @@ public class ScarecrowWrangler : RustPlugin
   {
     if (!watcher || watcher.Destroying) return;
     Puts($"Destroying watcher {watcher.GetInstanceID()} on scarecrow {Print(watcher.GetScarecrow())}");
+    // remove watcher from valid location data if present
+    // this avoids the location getting stuck on a defunct scarecrow
+    foreach (var validLoc in _validLocations)
+    {
+      if (validLoc.closestWatcher != watcher) continue;
+      validLoc.closestDistance = float.MaxValue;
+      validLoc.closestWatcher = null;
+    }
     // Destroy() is not immediate, so take some steps now to avoid confusion
     watcher.CancelInvoke();
     _watchers.Remove(watcher);
@@ -215,8 +234,11 @@ public class ScarecrowWrangler : RustPlugin
 
   // return string containing ID, position, and grid name of given scarecrow
   private static string Print(ScarecrowNPC scarecrow) => IsValid(scarecrow) ?
-    $"{scarecrow}/{scarecrow.net.ID}@{scarecrow.transform.position}/{GetGrid(scarecrow.transform.position)}" :
+    $"{scarecrow}/{scarecrow.net.ID}@{Print(scarecrow.transform.position)}" :
     "<null>";
+
+  private static string Print(Vector3 position) =>
+    $"{position}/{GetGrid(position)}";
 
   // try to reset scarecrow AI in case it's chasing something, so that it
   //  doesn't teleport back when moved
@@ -256,15 +278,65 @@ public class ScarecrowWrangler : RustPlugin
       return true;
     }
 
-    // abort if scarecrow is in a valid location
-    if (!IsInForbiddenLocation(scarecrow)) return true;
+    // if scarecrow is in a valid location, update valid locations and abort
+    if (!IsInForbiddenLocation(scarecrow))
+    {
+      // get watcher for scarecrow, aborting if none found
+      var myWatcher = scarecrow.gameObject.GetComponent<ScarecrowWatcher>();
+      if (!myWatcher) return true;
+      // update each valid location if/as appropriate
+      foreach (var validLoc in _validLocations)
+      {
+        // if no closest scarecrow recorded, record this one
+        if (!validLoc.closestWatcher)
+        {
+          validLoc.closestWatcher = myWatcher;
+        }
+        // if this scarecrow is the last-recorded closest one, update distance
+        //  and continue
+        if (myWatcher == validLoc.closestWatcher)
+        {
+          validLoc.closestDistance =
+            Vector3.Distance(scarecrow.transform.position, validLoc.position);
+          continue;
+        }
+        // if this scarecrow is further than the current closest one, skip it
+        var myDist =
+          Vector3.Distance(scarecrow.transform.position, validLoc.position);
+        if (myDist > validLoc.closestDistance) continue;
+        // record this scarecrow as the new closest one
+        validLoc.closestWatcher = myWatcher;
+        validLoc.closestDistance = myDist;
+      }
+      return true;
+    }
 
-    // kill if no known-good positions available
+    // find known-good location that's furthest from any scarecrow
+    ValidLocation bestLoc = null;
+    var myWatcher2 = scarecrow.gameObject.GetComponent<ScarecrowWatcher>();
+    foreach (var validLoc in _validLocations)
+    {
+      // if this scarecrow is recorded as the closest one, ignore location
+      if (validLoc.closestWatcher == myWatcher2) continue;
+      // if no best location recorded, choose validLoc as initial candidate
+      if (null == bestLoc)
+      {
+        bestLoc = validLoc;
+        continue;
+      }
+      // if validLoc is a better candidate, record it as bestLoc
+      if (validLoc.closestDistance > bestLoc.closestDistance)
+      {
+        bestLoc = validLoc;
+      }
+    }
+
+    // kill if no usable known-good positions available
     // NOTE: this should only happen during initial plugin load, and more
     //  scarecrows will eventually spawn to recover things
-    if (_validLocations.Count <= 0)
+    if (null == bestLoc)
     {
-      PrintWarning($"Killing scarecrow {Print(scarecrow)} due to no known-good location(s) available");
+      PrintWarning($"Killing scarecrow {Print(scarecrow)} due to no usable known-good location(s) available");
       if (!quiet)
       {
         Effect.server.Run("assets/prefabs/npc/murderer/sound/death.prefab", scarecrow.transform.position);
@@ -274,72 +346,8 @@ public class ScarecrowWrangler : RustPlugin
       return false;
     }
 
-    // find known-good location with the largest minimum distance from all
-    //  other scarecrows
-    //
-    // first, get the current locations of all watched scarecrows
-    var watchedLocs = Pool.Get<List<Vector3>>();
-    foreach (var watcher in _watchers)
-    {
-      if (!watcher || watcher.Destroying) continue;
-      var watchedScarecrow = watcher.GetScarecrow();
-      if (!watchedScarecrow) continue;
-      // skip non-scarecrows, plus the one being moved
-      if (watchedScarecrow.Equals(scarecrow)) continue;
-      watchedLocs.Add(watchedScarecrow.transform.position);
-    }
-    // find distance from each known-good point to its closest scarecrow, and
-    //  record it as a candidate if that distance is the farthest seen
-    var farLoc = scarecrow.transform.position;
-    var farDist = 0.0;
-    // Puts($"{_validLocations.Count} known-good locations and {watchedLocs.Count} watched scarecrows");
-    foreach (var validLoc in _validLocations)
-    {
-      // ignore any known-good locations that are too close to the scarecrow
-      //  under evaluation
-      // otherwise scarecrows tend to keep wandering into a bad location from a
-      //  nearby spawn location (TODO: maybe just remove such locations from
-      //  ValidLocations?)
-      if (Vector3.Distance(scarecrow.transform.position, validLoc) < 100.0f)
-      {
-        continue;
-      }
-      var closestDist = double.MaxValue;
-      foreach (var watchedLoc in watchedLocs)
-      {
-        var curDist = Vector3.Distance(watchedLoc, validLoc);
-        // Puts($"***** \tlocation={validLoc}: distance to scarecrow@{watchedLoc}={curDist}");
-        if (curDist < closestDist)
-        {
-          // this scarecrow is closer to the known-good location than any we've
-          //  seen so far; record distance
-          closestDist = curDist;
-        }
-      }
-      // Puts($"***** location={validLoc}: closest scarecrow distance={closestDist}");
-
-      // ReSharper disable once CompareOfFloatsByEqualityOperator
-      if (double.MaxValue == closestDist || closestDist <= farDist) continue;
-
-      // this known-good location is the farthest from its closest scarecrow
-      //  that we've seen so far; record it as a candidate
-      farLoc = validLoc;
-      farDist = closestDist;
-    }
-    Pool.FreeUnmanaged(ref watchedLocs);
-
-    if (farDist >= 100.0f)
-    {
-      Puts($"Relocating scarecrow {Print(scarecrow)} to known-good location {farLoc}/{GetGrid(farLoc)} with distance {farDist} to closest scarecrow");
-      Relocate(scarecrow, farLoc, quiet);
-      return true;
-    }
-
-    // pick a random known-good location
-    var randomIndex = Random.Range(0, _validLocations.Count - 1);
-    var newLoc = _validLocations[randomIndex];
-    Puts($"Relocating scarecrow {Print(scarecrow)} to known-good location {newLoc}/{GetGrid(newLoc)} at random index {randomIndex}/{_validLocations.Count}");
-    Relocate(scarecrow, newLoc, quiet);
+    Puts($"Relocating scarecrow {Print(scarecrow)} to known-good location {Print(bestLoc.position)} with distance {bestLoc.closestDistance} to closest scarecrow");
+    Relocate(scarecrow, bestLoc.position, quiet);
     return true;
   }
 
@@ -358,7 +366,7 @@ public class ScarecrowWrangler : RustPlugin
 
     // return scarecrow associated with watcher
     public ScarecrowNPC GetScarecrow() =>
-      gameObject ? GetComponent<ScarecrowNPC>() : null;
+      gameObject ? gameObject.GetComponent<ScarecrowNPC>() : null;
 
     // unity handler called when watcher is destroyed
     // the logic here is really just a safety net in case watcher destruction
