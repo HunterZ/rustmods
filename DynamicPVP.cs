@@ -247,6 +247,12 @@ public class DynamicPVP : RustPlugin
 
   private void OnServerInitialized()
   {
+    if (null == ZoneManager ||
+        ZoneManager.Version < new VersionNumber(3, 1, 10))
+    {
+      PrintError("Zone Manager missing or outdated; please update for proper function of this plugin!");
+    }
+
     DeleteOldDynamicZones();
     if (_configData.GeneralEvents.ExcavatorIgnition.Enabled)
     {
