@@ -2902,7 +2902,7 @@ public class DynamicPVP : RustPlugin
       PrintDebug($"ERROR: Zone NOT removed for zoneId={zoneId} with eventName={eventName} and properties: {sbProperties?.ToString().TrimEnd(',')}.", DebugLevel.Error);
     }
     Pool.FreeUnmanaged(ref players);
-    Pool.FreeUnmanaged(ref sbProperties);
+    if (null != sbProperties) Pool.FreeUnmanaged(ref sbProperties);
     return zoneRemoved;
   }
 
