@@ -275,7 +275,7 @@ public class ScarecrowWrangler : RustPlugin
     if (!IsAlive(scarecrow))
     {
       PrintWarning("Wrangle(): Scarecrow is invalid; aborting");
-      return true;
+      return false;
     }
 
     // if scarecrow is in a valid location, update valid locations and abort
@@ -348,6 +348,11 @@ public class ScarecrowWrangler : RustPlugin
 
     Puts($"Relocating scarecrow {Print(scarecrow)} to known-good location {Print(bestLoc.position)} with distance {bestLoc.closestDistance} to closest scarecrow");
     Relocate(scarecrow, bestLoc.position, quiet);
+    // record scarecrow as zero distance from bestLoc
+    // this prevents multiple scarecrows from getting teleported there if they
+    //  spawn around the same time
+    bestLoc.closestDistance = 0.0f;
+    bestLoc.closestWatcher = myWatcher2;
     return true;
   }
 
