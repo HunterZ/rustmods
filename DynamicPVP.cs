@@ -4,7 +4,6 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
-using System.Linq;
 using System.Text;
 using Facepunch;
 using Newtonsoft.Json;
@@ -180,7 +179,7 @@ public class DynamicPVP : RustPlugin
     foreach (
       PluginZoneCategory pzCat in Enum.GetValues(typeof(PluginZoneCategory)))
     {
-      _activePluginZones[pzCat] = new HashSet<string>();
+      _activePluginZones[pzCat] = Pool.Get<HashSet<string>>();
     }
 
     _brokenTunnels = false;
@@ -188,7 +187,7 @@ public class DynamicPVP : RustPlugin
     Instance = this;
     LoadData();
     permission.RegisterPermission(PermissionAdmin, this);
-    AddCovalenceCommand(configData.Chat.Command, nameof(CmdDynamicPVP));
+    AddCovalenceCommand(_configData.Chat.Command, nameof(CmdDynamicPVP));
 
     Unsubscribe(nameof(CanDropBackpack));
     Unsubscribe(nameof(CanEntityTakeDamage));
@@ -217,13 +216,13 @@ public class DynamicPVP : RustPlugin
       _subscriptionsByCategory[category] = false;
     }
 
-    if (configData.Global.LogToFile)
+    if (_configData.Global.LogToFile)
     {
       _debugStringBuilder = Pool.Get<StringBuilder>();
     }
 
     // setup new TruePVE "ExcludePlayer" support
-    _useExcludePlayer = configData.Global.UseExcludePlayer;
+    _useExcludePlayer = _configData.Global.UseExcludePlayer;
     // if ExcludePlayer is disabled in config but is supported...
     if (!_useExcludePlayer &&
         null != TruePVE &&
@@ -233,7 +232,7 @@ public class DynamicPVP : RustPlugin
       if ((PvpDelayTypes.ZonePlayersCanDamageDelayedPlayers |
            PvpDelayTypes.DelayedPlayersCanDamageZonePlayers |
            PvpDelayTypes.DelayedPlayersCanDamageDelayedPlayers) ==
-          configData.Global.PvpDelayFlags)
+          _configData.Global.PvpDelayFlags)
       {
         _useExcludePlayer = true;
         Puts("All PVP delay flags active and TruePVE 2.2.3+ detected, so TruePVE PVP delays will be used for performance and cross-plugin support; please consider enabling TruePVE PVP Delay API in the config file to skip this check");
@@ -249,61 +248,61 @@ public class DynamicPVP : RustPlugin
   private void OnServerInitialized()
   {
     DeleteOldDynamicZones();
-    if (configData.GeneralEvents.ExcavatorIgnition.Enabled)
+    if (_configData.GeneralEvents.ExcavatorIgnition.Enabled)
     {
       Subscribe(nameof(OnDieselEngineToggled));
     }
-    if (configData.GeneralEvents.PatrolHelicopter.Enabled ||
-        configData.GeneralEvents.BradleyApc.Enabled)
+    if (_configData.GeneralEvents.PatrolHelicopter.Enabled ||
+        _configData.GeneralEvents.BradleyApc.Enabled)
     {
       Subscribe(nameof(OnEntityDeath));
     }
-    if (configData.GeneralEvents.SupplySignal.Enabled ||
-        configData.GeneralEvents.TimedSupply.Enabled)
+    if (_configData.GeneralEvents.SupplySignal.Enabled ||
+        _configData.GeneralEvents.TimedSupply.Enabled)
     {
       Subscribe(nameof(OnCargoPlaneSignaled));
       // this is now subscribed regardless of start on spawn-vs-landing, as we
       //  need to tether the zone to the drop on landing in both cases
       Subscribe(nameof(OnSupplyDropLanded));
     }
-    if (configData.GeneralEvents.HackableCrate.Enabled &&
-        configData.GeneralEvents.HackableCrate.TimerStartWhenUnlocked)
+    if (_configData.GeneralEvents.HackableCrate.Enabled &&
+        _configData.GeneralEvents.HackableCrate.TimerStartWhenUnlocked)
     {
       Subscribe(nameof(OnCrateHackEnd));
     }
-    if ((configData.GeneralEvents.TimedSupply.Enabled &&
-         configData.GeneralEvents.TimedSupply.TimerStartWhenLooted) ||
-        (configData.GeneralEvents.SupplySignal.Enabled &&
-         configData.GeneralEvents.SupplySignal.TimerStartWhenLooted) ||
-        (configData.GeneralEvents.HackableCrate.Enabled &&
-         configData.GeneralEvents.HackableCrate.TimerStartWhenLooted))
+    if ((_configData.GeneralEvents.TimedSupply.Enabled &&
+         _configData.GeneralEvents.TimedSupply.TimerStartWhenLooted) ||
+        (_configData.GeneralEvents.SupplySignal.Enabled &&
+         _configData.GeneralEvents.SupplySignal.TimerStartWhenLooted) ||
+        (_configData.GeneralEvents.HackableCrate.Enabled &&
+         _configData.GeneralEvents.HackableCrate.TimerStartWhenLooted))
     {
       Subscribe(nameof(OnLootEntity));
     }
-    if (configData.GeneralEvents.HackableCrate.Enabled &&
-        !configData.GeneralEvents.HackableCrate.StartWhenSpawned)
+    if (_configData.GeneralEvents.HackableCrate.Enabled &&
+        !_configData.GeneralEvents.HackableCrate.StartWhenSpawned)
     {
       Subscribe(nameof(OnCrateHack));
     }
-    if ((configData.GeneralEvents.TimedSupply.Enabled &&
-         configData.GeneralEvents.TimedSupply.StartWhenSpawned) ||
-        (configData.GeneralEvents.SupplySignal.Enabled &&
-         configData.GeneralEvents.SupplySignal.StartWhenSpawned) ||
-        (configData.GeneralEvents.HackableCrate.Enabled &&
-         configData.GeneralEvents.HackableCrate.StartWhenSpawned))
+    if ((_configData.GeneralEvents.TimedSupply.Enabled &&
+         _configData.GeneralEvents.TimedSupply.StartWhenSpawned) ||
+        (_configData.GeneralEvents.SupplySignal.Enabled &&
+         _configData.GeneralEvents.SupplySignal.StartWhenSpawned) ||
+        (_configData.GeneralEvents.HackableCrate.Enabled &&
+         _configData.GeneralEvents.HackableCrate.StartWhenSpawned))
     {
       Subscribe(nameof(OnEntitySpawned));
     }
-    if ((configData.GeneralEvents.TimedSupply.Enabled &&
-         configData.GeneralEvents.TimedSupply.StopWhenKilled) ||
-        (configData.GeneralEvents.SupplySignal.Enabled &&
-         configData.GeneralEvents.SupplySignal.StopWhenKilled) ||
-        (configData.GeneralEvents.HackableCrate.Enabled &&
-         configData.GeneralEvents.HackableCrate.StopWhenKilled))
+    if ((_configData.GeneralEvents.TimedSupply.Enabled &&
+         _configData.GeneralEvents.TimedSupply.StopWhenKilled) ||
+        (_configData.GeneralEvents.SupplySignal.Enabled &&
+         _configData.GeneralEvents.SupplySignal.StopWhenKilled) ||
+        (_configData.GeneralEvents.HackableCrate.Enabled &&
+         _configData.GeneralEvents.HackableCrate.StopWhenKilled))
     {
       Subscribe(nameof(OnEntityKill));
     }
-    if (configData.GeneralEvents.CargoShip.Enabled)
+    if (_configData.GeneralEvents.CargoShip.Enabled)
     {
       Subscribe(nameof(OnCargoShipEgress));
       Subscribe(nameof(OnCargoShipHarborApproach));
@@ -329,38 +328,55 @@ public class DynamicPVP : RustPlugin
 
     if (_activeDynamicZones.Count > 0)
     {
-      PrintDebug($"Deleting {_activeDynamicZones.Count} active zones");
-      foreach (var entry in _activeDynamicZones.ToArray())
+      PrintDebug($"Deleting {_activeDynamicZones.Count} active zone(s)");
+      // copy zone keys to a temporary list, because each deletion will modify
+      //  _activeDynamicZones
+      var zoneKeys = Pool.Get<List<string>>();
+      zoneKeys.AddRange(_activeDynamicZones.Keys);
+      foreach (var key in zoneKeys)
       {
-        DeleteDynamicZone(entry.Key);
+        DeleteDynamicZone(key);
       }
+      Pool.FreeUnmanaged(ref zoneKeys);
+      _activeDynamicZones.Clear();
     }
 
-    var leftZones = _pvpDelays.Values.ToArray();
-    for (var i = leftZones.Length - 1; i >= 0; i--)
+    // copy LeftZone records to a temporary list to that we can reverse iterate
+    var leftZones = Pool.Get<List<LeftZone>>();
+    leftZones.AddRange(_pvpDelays.Values);
+    for (var i = leftZones.Count - 1; i >= 0; --i)
     {
+      // this is cheating because it leaves leftZones[i] in a dangling state,
+      //  but it's okay because we're going to free/clear everything anyway
       var value = leftZones[i];
       Pool.Free(ref value);
     }
+    Pool.FreeUnmanaged(ref leftZones);
+    _pvpDelays.Clear();
+    // also remove LeftZone class from pool framework, in case it changes on
+    //  plugin reload
+    Pool.Directory.TryRemove(typeof(LeftZone), out _);
 
-    var spheres = _zoneSpheres.Values.ToArray();
-    for (var i = spheres.Length - 1; i >= 0; i--)
+    // copy sphere lists to a temporary list so that we can reverse iterate
+    var spheres = Pool.Get<List<List<SphereEntity>>>();
+    spheres.AddRange(_zoneSpheres.Values);
+    for (var i = _zoneSpheres.Count - 1; i >= 0; --i)
     {
+      // this is cheating because it leaves spheres[i] in a dangling state, but
+      //  it's okay because we're going to free/clear everything anyway
       var sphereEntities = spheres[i];
       foreach (var sphereEntity in sphereEntities)
       {
-        if (sphereEntity && !sphereEntity.IsDestroyed)
-        {
-          sphereEntity.KillMessage();
-        }
+        if (!sphereEntity || sphereEntity.IsDestroyed) continue;
+        sphereEntity.KillMessage();
       }
-
       Pool.FreeUnmanaged(ref sphereEntities);
     }
+    Pool.FreeUnmanaged(ref spheres);
+    _zoneSpheres.Clear();
 
     SaveData();
     SaveDebug();
-    Pool.Directory.TryRemove(typeof(LeftZone), out _);
     Instance = null;
 
     if (null == _debugStringBuilder) return;
@@ -369,6 +385,13 @@ public class DynamicPVP : RustPlugin
 
     _originalMonumentGeometries.Clear();
 
+    foreach (var (_, apZone) in _activePluginZones)
+    {
+      // this is cheating because it leaves apZone in a dangling state, but it's
+      //  okay because we're going to clear the list just after this
+      var apZoneI = apZone;
+      Pool.FreeUnmanaged(ref apZoneI);
+    }
     _activePluginZones.Clear();
   }
 
@@ -444,7 +467,7 @@ public class DynamicPVP : RustPlugin
 
   private bool CheckEntityOwner(BaseEntity baseEntity)
   {
-    if (!configData.Global.CheckEntityOwner ||
+    if (!_configData.Global.CheckEntityOwner ||
         !baseEntity.OwnerID.IsSteamId() ||
         // HeliSignals and BradleyDrops exception
         baseEntity.skinID != 0)
@@ -635,19 +658,19 @@ public class DynamicPVP : RustPlugin
       switch (generalEventType)
       {
         case GeneralEventType.Bradley:
-          return configData.GeneralEvents.BradleyApc;
+          return _configData.GeneralEvents.BradleyApc;
         case GeneralEventType.HackableCrate:
-          return configData.GeneralEvents.HackableCrate;
+          return _configData.GeneralEvents.HackableCrate;
         case GeneralEventType.Helicopter:
-          return configData.GeneralEvents.PatrolHelicopter;
+          return _configData.GeneralEvents.PatrolHelicopter;
         case GeneralEventType.SupplyDrop:
-          return configData.GeneralEvents.TimedSupply;
+          return _configData.GeneralEvents.TimedSupply;
         case GeneralEventType.SupplySignal:
-          return configData.GeneralEvents.SupplySignal;
+          return _configData.GeneralEvents.SupplySignal;
         case GeneralEventType.ExcavatorIgnition:
-          return configData.GeneralEvents.ExcavatorIgnition;
+          return _configData.GeneralEvents.ExcavatorIgnition;
         case GeneralEventType.CargoShip:
-          return configData.GeneralEvents.CargoShip;
+          return _configData.GeneralEvents.CargoShip;
         default:
           PrintDebug(
             $"ERROR: Missing BaseEvent lookup for generalEventType={generalEventType} for eventName={eventName}.",
@@ -656,17 +679,17 @@ public class DynamicPVP : RustPlugin
       }
     }
 
-    if (storedData.autoEvents.TryGetValue(eventName, out var autoEvent))
+    if (_storedData.autoEvents.TryGetValue(eventName, out var autoEvent))
     {
       return autoEvent;
     }
 
-    if (storedData.timedEvents.TryGetValue(eventName, out var timedEvent))
+    if (_storedData.timedEvents.TryGetValue(eventName, out var timedEvent))
     {
       return timedEvent;
     }
 
-    if (configData.MonumentEvents.TryGetValue(
+    if (_configData.MonumentEvents.TryGetValue(
           eventName, out var monumentEvent))
     {
       return monumentEvent;
@@ -691,7 +714,7 @@ public class DynamicPVP : RustPlugin
     if (_targetFps <= 0) _targetFps = Mathf.Min(ConVar.FPS.limit, 30);
 
     return
-      pause && configData.Global.DebugEnabled ? _pauseYield :
+      pause && _configData.Global.DebugEnabled ? _pauseYield :
       Performance.report.frameRate >= _targetFps ? _fastYield :
       _throttleYield;
   }
@@ -723,13 +746,13 @@ public class DynamicPVP : RustPlugin
     //  because iterating over all net entities is not cheap
     var checkGeneralEvents = false;
     // TODO: Bradley, Patrol Helicopter, Supply Drop, Timed Supply
-    checkGeneralEvents |= configData.GeneralEvents.CargoShip.Enabled;
+    checkGeneralEvents |= _configData.GeneralEvents.CargoShip.Enabled;
     // NOTE: StopWhenKilled is checked because we don't want to start events
     //  whose end is determined by a timer, as we don't know elapsed times
     checkGeneralEvents |=
-      configData.GeneralEvents.HackableCrate.Enabled &&
-      configData.GeneralEvents.HackableCrate.StopWhenKilled;
-    checkGeneralEvents |= configData.GeneralEvents.ExcavatorIgnition.Enabled;
+      _configData.GeneralEvents.HackableCrate.Enabled &&
+      _configData.GeneralEvents.HackableCrate.StopWhenKilled;
+    checkGeneralEvents |= _configData.GeneralEvents.ExcavatorIgnition.Enabled;
     if (checkGeneralEvents)
     {
       foreach (var serverEntity in BaseNetworkable.serverEntities)
@@ -771,7 +794,7 @@ public class DynamicPVP : RustPlugin
       return;
     }
 
-    if (!configData.GeneralEvents.ExcavatorIgnition.Enabled)
+    if (!_configData.GeneralEvents.ExcavatorIgnition.Enabled)
     {
       PrintDebug("Excavator Ignition Event is disabled");
       return;
@@ -827,20 +850,20 @@ public class DynamicPVP : RustPlugin
       return;
     }
 
-    if (!configData.GeneralEvents.HackableCrate.Enabled)
+    if (!_configData.GeneralEvents.HackableCrate.Enabled)
     {
       PrintDebug("Hackable Crate Event is disabled");
       return;
     }
 
-    if (!configData.GeneralEvents.HackableCrate.StopWhenKilled)
+    if (!_configData.GeneralEvents.HackableCrate.StopWhenKilled)
     {
       PrintDebug("Hackable Crate Event doesn't stop when killed");
       return;
     }
 
     if (0 != hackableLockedCrate.FirstLooterId &&
-        configData.GeneralEvents.HackableCrate.TimerStartWhenLooted)
+        _configData.GeneralEvents.HackableCrate.TimerStartWhenLooted)
     {
       // looted and stop after time since loot enabled
       // we don't know elapsed time, so err on the side of assuming the event
@@ -850,7 +873,7 @@ public class DynamicPVP : RustPlugin
     }
     else if (
       hackableLockedCrate.HasFlag(HackableLockedCrate.Flag_FullyHacked) &&
-      configData.GeneralEvents.HackableCrate.TimerStartWhenUnlocked)
+      _configData.GeneralEvents.HackableCrate.TimerStartWhenUnlocked)
     {
       // unlocked and stop after time since unlock enabled
       // we don't know elapsed time, so err on the side of assuming the event
@@ -859,13 +882,13 @@ public class DynamicPVP : RustPlugin
         "Found unlocked hackable locked crate and TimerStartWhenUnlocked set; ignoring because elapsed time unknown");
     }
     else if (hackableLockedCrate.HasFlag(HackableLockedCrate.Flag_Hacking) &&
-             !configData.GeneralEvents.HackableCrate.StartWhenSpawned)
+             !_configData.GeneralEvents.HackableCrate.StartWhenSpawned)
     {
       // hacking and start on hacking enabled
       PrintDebug("Found hacking hackable locked crate and StartWhenSpawned NOT set; triggering OnCrateHack()");
       OnCrateHack(hackableLockedCrate);
     }
-    else if (configData.GeneralEvents.HackableCrate.StartWhenSpawned)
+    else if (_configData.GeneralEvents.HackableCrate.StartWhenSpawned)
     {
       // any other state and start on spawn + stop when killed enabled
       PrintDebug("Found hackable locked crate, and StartWhenSpawned set; triggering OnEntitySpawned()");
@@ -886,8 +909,8 @@ public class DynamicPVP : RustPlugin
       return;
     }
 
-    if (!configData.GeneralEvents.HackableCrate.Enabled ||
-        !configData.GeneralEvents.HackableCrate.StartWhenSpawned)
+    if (!_configData.GeneralEvents.HackableCrate.Enabled ||
+        !_configData.GeneralEvents.HackableCrate.StartWhenSpawned)
     {
       PrintDebug("OnEntitySpawned(HackableLockedCrate): Ignoring due to event or spawn start disabled");
       return;
@@ -919,10 +942,10 @@ public class DynamicPVP : RustPlugin
 
     var zoneId = hackableLockedCrate.net.ID.ToString();
     PrintDebug(
-      $"OnCrateHackEnd(): Scheduling delete of zoneId={zoneId} in {configData.GeneralEvents.HackableCrate.Duration}s");
+      $"OnCrateHackEnd(): Scheduling delete of zoneId={zoneId} in {_configData.GeneralEvents.HackableCrate.Duration}s");
     HandleDeleteDynamicZone(
       zoneId,
-      configData.GeneralEvents.HackableCrate.Duration,
+      _configData.GeneralEvents.HackableCrate.Duration,
       nameof(GeneralEventType.HackableCrate));
   }
 
@@ -935,8 +958,8 @@ public class DynamicPVP : RustPlugin
       return;
     }
 
-    if (!configData.GeneralEvents.HackableCrate.Enabled ||
-        !configData.GeneralEvents.HackableCrate.TimerStartWhenLooted)
+    if (!_configData.GeneralEvents.HackableCrate.Enabled ||
+        !_configData.GeneralEvents.HackableCrate.TimerStartWhenLooted)
     {
       PrintDebug("OnLootEntity(HackableLockedCrate): Ignoring due to event or loot delay disabled");
       return;
@@ -944,10 +967,10 @@ public class DynamicPVP : RustPlugin
 
     var zoneId = hackableLockedCrate.net.ID.ToString();
     PrintDebug(
-      $"OnLootEntity(HackableLockedCrate): Scheduling delete of zoneId={zoneId} in {configData.GeneralEvents.HackableCrate.Duration}s");
+      $"OnLootEntity(HackableLockedCrate): Scheduling delete of zoneId={zoneId} in {_configData.GeneralEvents.HackableCrate.Duration}s");
     HandleDeleteDynamicZone(
       zoneId,
-      configData.GeneralEvents.HackableCrate.Duration,
+      _configData.GeneralEvents.HackableCrate.Duration,
       nameof(GeneralEventType.HackableCrate));
   }
 
@@ -959,8 +982,8 @@ public class DynamicPVP : RustPlugin
       return;
     }
 
-    if (!configData.GeneralEvents.HackableCrate.Enabled ||
-        !configData.GeneralEvents.HackableCrate.StopWhenKilled)
+    if (!_configData.GeneralEvents.HackableCrate.Enabled ||
+        !_configData.GeneralEvents.HackableCrate.StopWhenKilled)
     {
       PrintDebug("OnEntityKill(HackableLockedCrate): Ignoring due to event or kill stop disabled");
       return;
@@ -997,14 +1020,14 @@ public class DynamicPVP : RustPlugin
       return;
     }
 
-    if (configData.GeneralEvents.HackableCrate.ExcludeOilRig &&
+    if (_configData.GeneralEvents.HackableCrate.ExcludeOilRig &&
         IsOnTheOilRig(hackableLockedCrate))
     {
       PrintDebug("The hackable locked crate is on an oil rig. Skipping event creation.");
       return;
     }
 
-    if (configData.GeneralEvents.HackableCrate.ExcludeCargoShip &&
+    if (_configData.GeneralEvents.HackableCrate.ExcludeCargoShip &&
         IsOnTheCargoShip(hackableLockedCrate))
     {
       PrintDebug("The hackable locked crate is on a cargo ship. Skipping event creation.");
@@ -1099,7 +1122,7 @@ public class DynamicPVP : RustPlugin
 
   private void PatrolHelicopterEvent(PatrolHelicopter patrolHelicopter)
   {
-    if (!configData.GeneralEvents.PatrolHelicopter.Enabled)
+    if (!_configData.GeneralEvents.PatrolHelicopter.Enabled)
     {
       return;
     }
@@ -1115,7 +1138,7 @@ public class DynamicPVP : RustPlugin
 
   private void BradleyApcEvent(BradleyAPC bradleyAPC)
   {
-    if (!configData.GeneralEvents.BradleyApc.Enabled)
+    if (!_configData.GeneralEvents.BradleyApc.Enabled)
     {
       return;
     }
@@ -1136,7 +1159,7 @@ public class DynamicPVP : RustPlugin
   // TODO: seems dodgy that Vector3 is being used as a key, because comparing
   //  floats is fraught; consider using network ID or something instead, and
   //  storing the location as data if needed
-  private readonly Dictionary<Vector3, Timer> activeSupplySignals = new();
+  private readonly Dictionary<Vector3, Timer> _activeSupplySignals = new();
 
   private void OnCargoPlaneSignaled(
     CargoPlane cargoPlane, SupplySignal supplySignal) => NextTick(() =>
@@ -1147,14 +1170,14 @@ public class DynamicPVP : RustPlugin
     }
 
     Vector3 dropPosition = cargoPlane.dropPosition;
-    if (activeSupplySignals.ContainsKey(dropPosition))
+    if (_activeSupplySignals.ContainsKey(dropPosition))
     {
       return;
     }
 
     // TODO: why is this a hard-coded 15-minute delay?
-    activeSupplySignals.Add(dropPosition,
-      timer.Once(900f, () => activeSupplySignals.Remove(dropPosition)));
+    _activeSupplySignals.Add(dropPosition,
+      timer.Once(900f, () => _activeSupplySignals.Remove(dropPosition)));
     PrintDebug($"A supply signal is thrown at {dropPosition}");
   });
 
@@ -1204,9 +1227,9 @@ public class DynamicPVP : RustPlugin
     var eventConfig = eventName switch
     {
       nameof(GeneralEventType.SupplySignal) =>
-        configData.GeneralEvents.SupplySignal,
+        _configData.GeneralEvents.SupplySignal,
       nameof(GeneralEventType.SupplyDrop) =>
-        configData.GeneralEvents.TimedSupply,
+        _configData.GeneralEvents.TimedSupply,
       _ => null
     };
     if (null == eventConfig)
@@ -1247,9 +1270,9 @@ public class DynamicPVP : RustPlugin
     var eventConfig = eventName switch
     {
       nameof(GeneralEventType.SupplySignal) =>
-        configData.GeneralEvents.SupplySignal,
+        _configData.GeneralEvents.SupplySignal,
       nameof(GeneralEventType.SupplyDrop) =>
-        configData.GeneralEvents.TimedSupply,
+        _configData.GeneralEvents.TimedSupply,
       _ => null
     };
     if (eventConfig is not { Enabled: true } || !eventConfig.StopWhenKilled)
@@ -1290,13 +1313,13 @@ public class DynamicPVP : RustPlugin
     if (null != supplySignal)
     {
       PrintDebug("Supply drop is probably from supply signal");
-      if (!configData.GeneralEvents.SupplySignal.Enabled)
+      if (!_configData.GeneralEvents.SupplySignal.Enabled)
       {
         PrintDebug("Event for supply signals disabled. Skipping event creation.");
         return;
       }
 
-      if (isLanded == configData.GeneralEvents.SupplySignal.StartWhenSpawned)
+      if (isLanded == _configData.GeneralEvents.SupplySignal.StartWhenSpawned)
       {
         PrintDebug($"{GetSupplyDropStateName(isLanded)} for supply signals disabled.");
         return;
@@ -1304,9 +1327,9 @@ public class DynamicPVP : RustPlugin
 
       var entry = supplySignal.Value;
       entry.Value?.Destroy();
-      activeSupplySignals.Remove(entry.Key);
+      _activeSupplySignals.Remove(entry.Key);
       PrintDebug(
-        $"Removing Supply signal from active list. Active supply signals remaining: {activeSupplySignals.Count}");
+        $"Removing Supply signal from active list. Active supply signals remaining: {_activeSupplySignals.Count}");
       const string eventNameSS = nameof(GeneralEventType.SupplySignal);
       if (!CanCreateDynamicPVP(eventNameSS, supplyDrop))
       {
@@ -1319,13 +1342,13 @@ public class DynamicPVP : RustPlugin
     }
 
     PrintDebug("Supply drop is probably NOT from supply signal");
-    if (!configData.GeneralEvents.TimedSupply.Enabled)
+    if (!_configData.GeneralEvents.TimedSupply.Enabled)
     {
       PrintDebug("Event for timed supply disabled. Skipping event creation.");
       return;
     }
 
-    if (isLanded == configData.GeneralEvents.TimedSupply.StartWhenSpawned)
+    if (isLanded == _configData.GeneralEvents.TimedSupply.StartWhenSpawned)
     {
       PrintDebug($"{GetSupplyDropStateName(isLanded)} for timed supply disabled.");
       return;
@@ -1343,18 +1366,18 @@ public class DynamicPVP : RustPlugin
 
   private KeyValuePair<Vector3, Timer>? GetSupplySignalNear(Vector3 position)
   {
-    PrintDebug($"Checking {activeSupplySignals.Count} active supply signals");
-    if (activeSupplySignals.Count <= 0)
+    PrintDebug($"Checking {_activeSupplySignals.Count} active supply signals");
+    if (_activeSupplySignals.Count <= 0)
     {
       PrintDebug("No active signals, must be from a timed event cargo plane");
       return null;
     }
 
-    foreach (var entry in activeSupplySignals)
+    foreach (var entry in _activeSupplySignals)
     {
       var distance = Vector3Ex.Distance2D(entry.Key, position);
       PrintDebug($"Found a supply signal at {entry.Key} located {distance}m away.");
-      if (distance > configData.Global.CompareRadius) continue;
+      if (distance > _configData.Global.CompareRadius) continue;
       PrintDebug("Found matching a supply signal.");
       return entry;
     }
@@ -1378,7 +1401,7 @@ public class DynamicPVP : RustPlugin
       return;
     }
 
-    if (!configData.GeneralEvents.CargoShip.Enabled)
+    if (!_configData.GeneralEvents.CargoShip.Enabled)
     {
       PrintDebug("Cargo Ship Event is disabled");
       return;
@@ -1430,7 +1453,7 @@ public class DynamicPVP : RustPlugin
       return;
     }
 
-    if (!configData.GeneralEvents.CargoShip.Enabled)
+    if (!_configData.GeneralEvents.CargoShip.Enabled)
     {
       return;
     }
@@ -1478,8 +1501,8 @@ public class DynamicPVP : RustPlugin
       return;
     }
 
-    if (!configData.GeneralEvents.CargoShip.Enabled ||
-        !configData.GeneralEvents.CargoShip.SpawnState)
+    if (!_configData.GeneralEvents.CargoShip.Enabled ||
+        !_configData.GeneralEvents.CargoShip.SpawnState)
     {
       // not configured to create event on spawn
       return;
@@ -1510,7 +1533,7 @@ public class DynamicPVP : RustPlugin
       return;
     }
 
-    if (!configData.GeneralEvents.CargoShip.Enabled)
+    if (!_configData.GeneralEvents.CargoShip.Enabled)
     {
       return;
     }
@@ -1519,19 +1542,19 @@ public class DynamicPVP : RustPlugin
   }
 
   private void OnCargoShipEgress(CargoShip cargoShip) => HandleCargoState(
-    cargoShip, configData.GeneralEvents.CargoShip.EgressState);
+    cargoShip, _configData.GeneralEvents.CargoShip.EgressState);
 
   private void OnCargoShipHarborApproach(
     CargoShip cargoShip, CargoNotifier _) => HandleCargoState(
-    cargoShip, configData.GeneralEvents.CargoShip.ApproachState);
+    cargoShip, _configData.GeneralEvents.CargoShip.ApproachState);
 
   private void OnCargoShipHarborArrived(
     CargoShip cargoShip) => HandleCargoState(
-    cargoShip, configData.GeneralEvents.CargoShip.DockState);
+    cargoShip, _configData.GeneralEvents.CargoShip.DockState);
 
   private void OnCargoShipHarborLeave(
     CargoShip cargoShip) => HandleCargoState(
-    cargoShip, configData.GeneralEvents.CargoShip.DepartState);
+    cargoShip, _configData.GeneralEvents.CargoShip.DepartState);
 
   #endregion CargoShip Event
 
@@ -2041,7 +2064,7 @@ public class DynamicPVP : RustPlugin
     var changed = false;
     foreach (var (name, oGeo) in _originalMonumentGeometries)
     {
-      if (!configData.MonumentEvents.TryGetValue(name, out var monumentEvent))
+      if (!_configData.MonumentEvents.TryGetValue(name, out var monumentEvent))
       {
         // pathological: cached original geometry for a monument event that
         //  doesn't exist
@@ -2087,11 +2110,11 @@ public class DynamicPVP : RustPlugin
     string monumentName, Transform transform, MonumentEventType type,
     HashSet<string> addedEvents, List<string> createdEvents)
   {
-    if (!configData.MonumentEvents.TryGetValue(
+    if (!_configData.MonumentEvents.TryGetValue(
           monumentName, out var monumentEvent))
     {
       monumentEvent = new MonumentEvent();
-      configData.MonumentEvents.Add(monumentName, monumentEvent);
+      _configData.MonumentEvents.Add(monumentName, monumentEvent);
       addedEvents.Add(monumentName);
     }
 
@@ -2428,7 +2451,7 @@ public class DynamicPVP : RustPlugin
     var createdEvents = Pool.Get<List<string>>();
 
     // create auto events from data file
-    foreach (var entry in storedData.autoEvents)
+    foreach (var entry in _storedData.autoEvents)
     {
       if (!entry.Value.AutoStart || !CreateDynamicZone(
             entry.Key, entry.Value.Position, entry.Value.ZoneId))
@@ -2801,14 +2824,15 @@ public class DynamicPVP : RustPlugin
       return false;
     }
 
-    var stringBuilder = Pool.Get<StringBuilder>();
-    stringBuilder.Clear();
+    // avoid allocating this StringBuilder when not debug logging
+    var sbProperties =
+      _configData.Global.DebugEnabled ? Pool.Get<StringBuilder>() : null;
     if (DomeCreateAllowed(
           baseEvent as DomeEvent, baseEvent.GetDynamicZone() as ISphereZone))
     {
       if (RemoveDome(zoneId))
       {
-        stringBuilder.Append("Dome,");
+        sbProperties?.Append("Dome,");
       }
       else
       {
@@ -2820,7 +2844,7 @@ public class DynamicPVP : RustPlugin
     {
       if (KillBots(zoneId))
       {
-        stringBuilder.Append("Bots,");
+        sbProperties?.Append("Bots,");
       }
       else
       {
@@ -2830,7 +2854,7 @@ public class DynamicPVP : RustPlugin
 
     if (TP_RemoveMapping(zoneId))
     {
-      stringBuilder.Append("Mapping,");
+      sbProperties?.Append("Mapping,");
     }
     else
     {
@@ -2845,28 +2869,34 @@ public class DynamicPVP : RustPlugin
     var zoneRemoved = ZM_EraseZone(zoneId, eventName);
     if (zoneRemoved)
     {
+      // avoid allocating this StringBuilder when not debug logging
+      var sbPlayers =
+        _configData.Global.DebugEnabled ? Pool.Get<StringBuilder>() : null;
+      var first = true;
       // Release zone players immediately
-      PrintDebug($"Releasing zone players: {string.Join(",", players.Select(x => x.displayName))}");
       foreach (var player in players)
       {
         OnExitZone(zoneId, player);
+        if (first) first = false; else sbPlayers?.Append(", ");
+        sbPlayers?.Append(player.displayName);
       }
+      PrintDebug($"Released zone players: {sbPlayers}");
+      if (null != sbPlayers) Pool.FreeUnmanaged(ref sbPlayers);
+
       if (_activeDynamicZones.Remove(zoneId))
       {
         UpdateActivePluginZones(added: false, zoneId, baseEvent);
         CheckHooks(HookCheckReasons.ZoneRemoved, baseEvent);
       }
-      PrintDebug($"Deleted zoneId={zoneId} with eventName={eventName} and properties: {stringBuilder.ToString().TrimEnd(',')}.");
+      PrintDebug($"Deleted zoneId={zoneId} with eventName={eventName} and properties: {sbProperties?.ToString().TrimEnd(',')}.");
       Interface.CallHook("OnDeletedDynamicPVP", zoneId, eventName);
     }
     else
     {
-      PrintDebug($"ERROR: Zone NOT removed for zoneId={zoneId} with eventName={eventName} and properties: {stringBuilder.ToString().TrimEnd(',')}.", DebugLevel.Error);
+      PrintDebug($"ERROR: Zone NOT removed for zoneId={zoneId} with eventName={eventName} and properties: {sbProperties?.ToString().TrimEnd(',')}.", DebugLevel.Error);
     }
     Pool.FreeUnmanaged(ref players);
-
-    stringBuilder.Clear();
-    Pool.FreeUnmanaged(ref stringBuilder);
+    Pool.FreeUnmanaged(ref sbProperties);
     return zoneRemoved;
   }
 
@@ -2991,7 +3021,7 @@ public class DynamicPVP : RustPlugin
     }
     if (_pvpDelays.TryGetValue(victim.userID, out var victimLeftZone))
     {
-      if (configData.Global.PvpDelayFlags.HasFlag(
+      if (_configData.Global.PvpDelayFlags.HasFlag(
             PvpDelayTypes.ZonePlayersCanDamageDelayedPlayers) &&
           !string.IsNullOrEmpty(victimLeftZone.zoneId) &&
           ZM_IsPlayerInZone(victimLeftZone, attacker))
@@ -2999,7 +3029,7 @@ public class DynamicPVP : RustPlugin
         //ZonePlayer attack DelayedPlayer
         return true;
       }
-      if (configData.Global.PvpDelayFlags.HasFlag(
+      if (_configData.Global.PvpDelayFlags.HasFlag(
             PvpDelayTypes.DelayedPlayersCanDamageDelayedPlayers) &&
           _pvpDelays.TryGetValue(attacker.userID, out var attackerLeftZone) &&
           victimLeftZone.zoneId == attackerLeftZone.zoneId)
@@ -3010,7 +3040,7 @@ public class DynamicPVP : RustPlugin
       return null;
     }
     if (_pvpDelays.TryGetValue(attacker.userID, out var attackerLeftZone2) &&
-        configData.Global.PvpDelayFlags.HasFlag(
+        _configData.Global.PvpDelayFlags.HasFlag(
           PvpDelayTypes.DelayedPlayersCanDamageZonePlayers) &&
         !string.IsNullOrEmpty(attackerLeftZone2.zoneId) &&
         ZM_IsPlayerInZone(attackerLeftZone2, victim))
@@ -3163,13 +3193,15 @@ public class DynamicPVP : RustPlugin
 
   private bool ZM_CreateOrUpdateZone(
     string zoneId, string[] zoneArgs, Vector3 location) => Convert.ToBoolean(
-    ZoneManager.Call("CreateOrUpdateTemporaryZone", zoneId, zoneArgs, location));
+    ZoneManager.Call("CreateOrUpdateTemporaryZone",
+      this, zoneId, zoneArgs, location));
 
   private bool ZM_EraseZone(string zoneId, string eventName = "")
   {
     try
     {
-      return Convert.ToBoolean(ZoneManager.Call("EraseTemporaryZone", zoneId));
+      return Convert.ToBoolean(
+        ZoneManager.Call("EraseTemporaryZone", this, zoneId));
     }
     catch (Exception exception)
     {
@@ -3376,7 +3408,7 @@ public class DynamicPVP : RustPlugin
 
   private void PrintDebug(string message, DebugLevel level = DebugLevel.Info)
   {
-    if (configData.Global.DebugEnabled)
+    if (_configData.Global.DebugEnabled)
     {
       switch (level)
       {
@@ -3386,7 +3418,7 @@ public class DynamicPVP : RustPlugin
       }
     }
 
-    if (configData.Global.LogToFile)
+    if (_configData.Global.LogToFile)
     {
       _debugStringBuilder.AppendLine($"[{DateTime.Now.ToString(CultureInfo.InstalledUICulture)}] | {message}");
     }
@@ -3394,7 +3426,7 @@ public class DynamicPVP : RustPlugin
 
   private void SaveDebug()
   {
-    if (!configData.Global.LogToFile)
+    if (!_configData.Global.LogToFile)
     {
       return;
     }
@@ -3410,13 +3442,23 @@ public class DynamicPVP : RustPlugin
 
   #region API
 
-  private string[] AllDynamicPVPZones() => _activeDynamicZones.Keys.ToArray();
+  private string[] AllDynamicPVPZones()
+  {
+    // this is tortured, but we do it to avoid Linq
+    var retVal = new string[_activeDynamicZones.Count];
+    var i = 0;
+    foreach (var (key, _) in _activeDynamicZones) retVal[i++] = key;
+    return retVal;
+  }
+
+  private void AllDynamicPVPZonesNoAlloc(List<string> list) =>
+    list.AddRange(_activeDynamicZones.Keys);
 
   private bool IsDynamicPVPZone(string zoneId) =>
     _activeDynamicZones.ContainsKey(zoneId);
 
   private bool EventDataExists(string eventName) =>
-    storedData.EventDataExists(eventName);
+    _storedData.EventDataExists(eventName);
 
   private bool IsPlayerInPVPDelay(ulong playerId) =>
     _pvpDelays.ContainsKey(playerId);
@@ -3450,7 +3492,7 @@ public class DynamicPVP : RustPlugin
       {
         return false;
       }
-      storedData.timedEvents.Add(eventName, timedEvent);
+      _storedData.timedEvents.Add(eventName, timedEvent);
     }
     else
     {
@@ -3463,7 +3505,7 @@ public class DynamicPVP : RustPlugin
       {
         return false;
       }
-      storedData.autoEvents.Add(eventName, autoEvent);
+      _storedData.autoEvents.Add(eventName, autoEvent);
       if (autoEvent.AutoStart)
       {
         CreateDynamicZone(eventName, autoEvent.Position, autoEvent.ZoneId);
@@ -3482,11 +3524,11 @@ public class DynamicPVP : RustPlugin
     }
     if (isTimed)
     {
-      storedData.timedEvents.Add(eventName, new TimedEvent());
+      _storedData.timedEvents.Add(eventName, new TimedEvent());
     }
     else
     {
-      storedData.autoEvents.Add(
+      _storedData.autoEvents.Add(
         eventName, new AutoEvent { Position = position });
     }
     _dataChanged = true;
@@ -3499,7 +3541,7 @@ public class DynamicPVP : RustPlugin
     {
       return false;
     }
-    storedData.RemoveEventData(eventName);
+    _storedData.RemoveEventData(eventName);
     if (forceClose)
     {
       ForceCloseZones(eventName);
@@ -3531,13 +3573,16 @@ public class DynamicPVP : RustPlugin
   private bool ForceCloseZones(string eventName)
   {
     var closed = false;
-    foreach (var entry in _activeDynamicZones.ToArray())
+    // create a temporary list of _activeDynamicZones entries, because deleting
+    //  any will cause modifications to the latter
+    var entries = Pool.Get<List<KeyValuePair<string, string>>>();
+    entries.AddRange(_activeDynamicZones);
+    foreach (var entry in entries)
     {
-      if (entry.Value == eventName && DeleteDynamicZone(entry.Key))
-      {
-        closed = true;
-      }
+      if (entry.Value != eventName || !DeleteDynamicZone(entry.Key)) continue;
+      closed = true;
     }
+    Pool.FreeUnmanaged(ref entries);
     return closed;
   }
 
@@ -3663,15 +3708,15 @@ public class DynamicPVP : RustPlugin
     var result = stringBuilder
         .Clear()
         .AppendLine()
-        .AppendLine(Lang("Syntax",  iPlayer.Id, configData.Chat.Command))
-        .AppendLine(Lang("Syntax1", iPlayer.Id, configData.Chat.Command))
-        .AppendLine(Lang("Syntax2", iPlayer.Id, configData.Chat.Command))
-        .AppendLine(Lang("Syntax3", iPlayer.Id, configData.Chat.Command))
-        .AppendLine(Lang("Syntax4", iPlayer.Id, configData.Chat.Command))
-        .AppendLine(Lang("Syntax5", iPlayer.Id, configData.Chat.Command))
-        .AppendLine(Lang("Syntax6", iPlayer.Id, configData.Chat.Command))
-        .AppendLine(Lang("Syntax7", iPlayer.Id, configData.Chat.Command))
-        .AppendLine(Lang("Syntax8", iPlayer.Id, configData.Chat.Command))
+        .AppendLine(Lang("Syntax",  iPlayer.Id, _configData.Chat.Command))
+        .AppendLine(Lang("Syntax1", iPlayer.Id, _configData.Chat.Command))
+        .AppendLine(Lang("Syntax2", iPlayer.Id, _configData.Chat.Command))
+        .AppendLine(Lang("Syntax3", iPlayer.Id, _configData.Chat.Command))
+        .AppendLine(Lang("Syntax4", iPlayer.Id, _configData.Chat.Command))
+        .AppendLine(Lang("Syntax5", iPlayer.Id, _configData.Chat.Command))
+        .AppendLine(Lang("Syntax6", iPlayer.Id, _configData.Chat.Command))
+        .AppendLine(Lang("Syntax7", iPlayer.Id, _configData.Chat.Command))
+        .AppendLine(Lang("Syntax8", iPlayer.Id, _configData.Chat.Command))
         .ToString()
       ;
     stringBuilder.Clear();
@@ -3681,7 +3726,7 @@ public class DynamicPVP : RustPlugin
 
   private void CommandList(IPlayer iPlayer)
   {
-    var customEventCount = storedData.CustomEventsCount;
+    var customEventCount = _storedData.CustomEventsCount;
     if (customEventCount <= 0)
     {
       Print(iPlayer, Lang("NoCustomEvent", iPlayer.Id));
@@ -3692,14 +3737,14 @@ public class DynamicPVP : RustPlugin
     stringBuilder.Clear();
     stringBuilder.AppendLine(Lang("CustomEvents",
       iPlayer.Id, customEventCount));
-    foreach (var entry in storedData.autoEvents)
+    foreach (var entry in _storedData.autoEvents)
     {
       i++;
       stringBuilder.AppendLine(Lang("AutoEvent",
         iPlayer.Id, i,
         entry.Key, entry.Value.AutoStart, entry.Value.Position));
     }
-    foreach (var entry in storedData.timedEvents)
+    foreach (var entry in _storedData.timedEvents)
     {
       i++;
       stringBuilder.AppendLine(Lang("TimedEvent",
@@ -3718,7 +3763,7 @@ public class DynamicPVP : RustPlugin
       return;
     }
 
-    Print(player, Lang("ShowingZones", player.UserIDString, configData.Chat.ShowDistance, configData.Chat.ShowDuration));
+    Print(player, Lang("ShowingZones", player.UserIDString, _configData.Chat.ShowDistance, _configData.Chat.ShowDuration));
 
     var playerPosition2D = player.transform.position.XZ2D();
     foreach (var activeEvent in _activeDynamicZones)
@@ -3727,7 +3772,7 @@ public class DynamicPVP : RustPlugin
       if (!zoneData) continue;
       var position = zoneData.transform.position;
       if (Vector2.Distance(playerPosition2D, position.XZ2D()) >
-          configData.Chat.ShowDistance)
+          _configData.Chat.ShowDistance)
       {
         continue;
       }
@@ -3743,21 +3788,21 @@ public class DynamicPVP : RustPlugin
       {
         case BoxCollider b:
           DrawCube(
-            player, configData.Chat.ShowDuration, zoneColor,
+            player, _configData.Chat.ShowDuration, zoneColor,
             zoneData.transform.position, b.size,
             zoneData.transform.eulerAngles.y);
           break;
 
         case SphereCollider s:
           DrawSphere(
-            player, configData.Chat.ShowDuration, zoneColor,
+            player, _configData.Chat.ShowDuration, zoneColor,
             zoneData.transform.position, s.radius,
             zoneData.transform.eulerAngles.y);
           break;
       }
 
       player.SendConsoleCommand(
-        "ddraw.text", configData.Chat.ShowDuration, zoneColor,
+        "ddraw.text", _configData.Chat.ShowDuration, zoneColor,
         zoneData.transform.position,
         $"{activeEvent.Key}\n{activeEvent.Value}");
     }
@@ -3766,7 +3811,7 @@ public class DynamicPVP : RustPlugin
   private void CommandEdit(
     IPlayer iPlayer, string eventName, Vector3 position, string arg)
   {
-    if (storedData.autoEvents.TryGetValue(eventName, out var autoEvent))
+    if (_storedData.autoEvents.TryGetValue(eventName, out var autoEvent))
     {
       switch (arg.ToLower())
       {
@@ -3799,7 +3844,7 @@ public class DynamicPVP : RustPlugin
         }
       }
     }
-    else if (storedData.timedEvents.TryGetValue(eventName, out var timedEvent)
+    else if (_storedData.timedEvents.TryGetValue(eventName, out var timedEvent)
              && float.TryParse(arg, out var duration))
     {
       timedEvent.Duration = duration;
@@ -3808,7 +3853,7 @@ public class DynamicPVP : RustPlugin
       _dataChanged = true;
       return;
     }
-    Print(iPlayer, Lang("SyntaxError", iPlayer.Id, configData.Chat.Command));
+    Print(iPlayer, Lang("SyntaxError", iPlayer.Id, _configData.Chat.Command));
   }
 
   private void CmdDynamicPVP(IPlayer iPlayer, string command, string[] args)
@@ -3820,7 +3865,7 @@ public class DynamicPVP : RustPlugin
     }
     if (args == null || args.Length < 1)
     {
-      Print(iPlayer, Lang("SyntaxError", iPlayer.Id, configData.Chat.Command));
+      Print(iPlayer, Lang("SyntaxError", iPlayer.Id, _configData.Chat.Command));
       return;
     }
     var commandName = args[0].ToLower();
@@ -3896,14 +3941,14 @@ public class DynamicPVP : RustPlugin
         break;
       }
     }
-    Print(iPlayer, Lang("SyntaxError", iPlayer.Id, configData.Chat.Command));
+    Print(iPlayer, Lang("SyntaxError", iPlayer.Id, _configData.Chat.Command));
   }
 
   #endregion Commands
 
   #region ConfigurationFile
 
-  private ConfigData configData;
+  private ConfigData _configData;
 
   private sealed class ConfigData
   {
@@ -4454,8 +4499,8 @@ public class DynamicPVP : RustPlugin
     base.LoadConfig();
     try
     {
-      configData = Config.ReadObject<ConfigData>();
-      if (configData == null)
+      _configData = Config.ReadObject<ConfigData>();
+      if (_configData == null)
       {
         LoadDefaultConfig();
       }
@@ -4475,7 +4520,7 @@ public class DynamicPVP : RustPlugin
   protected override void LoadDefaultConfig()
   {
     PrintWarning("Creating a new configuration file");
-    configData = new ConfigData
+    _configData = new ConfigData
     {
       Version = Version
     };
@@ -4483,43 +4528,43 @@ public class DynamicPVP : RustPlugin
 
   protected override void SaveConfig()
   {
-    Config.WriteObject(configData);
+    Config.WriteObject(_configData);
   }
 
   private void UpdateConfigValues()
   {
     // handle plugin version updates
     // ...unless config file indicates no version change
-    if (configData.Version >= Version) return;
+    if (_configData.Version >= Version) return;
 
-    if (configData.Version <= new VersionNumber(4, 2, 0))
+    if (_configData.Version <= new VersionNumber(4, 2, 0))
     {
-      configData.Global.CompareRadius = 2f;
+      _configData.Global.CompareRadius = 2f;
     }
 
-    if (configData.Version <= new VersionNumber(4, 2, 4))
+    if (_configData.Version <= new VersionNumber(4, 2, 4))
     {
       LoadData();
       SaveData();
     }
 
-    if (configData.Version <= new VersionNumber(4, 2, 6))
+    if (_configData.Version <= new VersionNumber(4, 2, 6))
     {
       if (GetConfigValue(out bool value, "General Event Settings", "Supply Signal Event", "Supply Drop Event Start When Spawned (If false, the event starts when landed)"))
       {
-        configData.GeneralEvents.SupplySignal.StartWhenSpawned = value;
+        _configData.GeneralEvents.SupplySignal.StartWhenSpawned = value;
       }
       if (GetConfigValue(out value, "General Event Settings", "Timed Supply Event", "Supply Drop Event Start When Spawned (If false, the event starts when landed)"))
       {
-        configData.GeneralEvents.TimedSupply.StartWhenSpawned = value;
+        _configData.GeneralEvents.TimedSupply.StartWhenSpawned = value;
       }
       if (GetConfigValue(out value, "General Event Settings", "Hackable Crate Event", "Hackable Crate Event Start When Spawned (If false, the event starts when unlocking)"))
       {
-        configData.GeneralEvents.HackableCrate.StartWhenSpawned = value;
+        _configData.GeneralEvents.HackableCrate.StartWhenSpawned = value;
       }
     }
 
-    configData.Version = Version;
+    _configData.Version = Version;
   }
 
   private bool GetConfigValue<T>(out T value, params string[] path)
@@ -4551,7 +4596,7 @@ public class DynamicPVP : RustPlugin
 
   #region DataFile
 
-  private StoredData storedData;
+  private StoredData _storedData;
 
   private sealed class StoredData
   {
@@ -4574,14 +4619,14 @@ public class DynamicPVP : RustPlugin
   {
     try
     {
-      storedData =
+      _storedData =
         Interface.Oxide.DataFileSystem.ReadObject<StoredData>(Name);
     }
     catch
     {
-      storedData = null;
+      _storedData = null;
     }
-    if (storedData == null)
+    if (_storedData == null)
     {
       ClearData();
     }
@@ -4589,12 +4634,12 @@ public class DynamicPVP : RustPlugin
 
   private void ClearData()
   {
-    storedData = new StoredData();
+    _storedData = new StoredData();
     SaveData();
   }
 
   private void SaveData() =>
-    Interface.Oxide.DataFileSystem.WriteObject(Name, storedData);
+    Interface.Oxide.DataFileSystem.WriteObject(Name, _storedData);
 
   #endregion DataFile
 
@@ -4608,16 +4653,16 @@ public class DynamicPVP : RustPlugin
     }
     if (iPlayer.Id == "server_console")
     {
-      iPlayer.Reply(message, configData.Chat.Prefix);
+      iPlayer.Reply(message, _configData.Chat.Prefix);
       return;
     }
     var player = iPlayer.Object as BasePlayer;
     if (player != null)
     {
-      Player.Message(player, message, $"<color={configData.Chat.PrefixColor}>{configData.Chat.Prefix}</color>", configData.Chat.SteamIdIcon);
+      Player.Message(player, message, $"<color={_configData.Chat.PrefixColor}>{_configData.Chat.Prefix}</color>", _configData.Chat.SteamIdIcon);
       return;
     }
-    iPlayer.Reply(message, $"<color={configData.Chat.PrefixColor}>{configData.Chat.Prefix}</color>");
+    iPlayer.Reply(message, $"<color={_configData.Chat.PrefixColor}>{_configData.Chat.Prefix}</color>");
   }
 
   private void Print(BasePlayer player, string message)
@@ -4626,8 +4671,8 @@ public class DynamicPVP : RustPlugin
     {
       return;
     }
-    Player.Message(player, message, string.IsNullOrEmpty(configData.Chat.Prefix) ?
-      null : $"<color={configData.Chat.PrefixColor}>{configData.Chat.Prefix}</color>", configData.Chat.SteamIdIcon);
+    Player.Message(player, message, string.IsNullOrEmpty(_configData.Chat.Prefix) ?
+      null : $"<color={_configData.Chat.PrefixColor}>{_configData.Chat.Prefix}</color>", _configData.Chat.SteamIdIcon);
   }
 
   private string Lang(string key, string id = null, params object[] args)
