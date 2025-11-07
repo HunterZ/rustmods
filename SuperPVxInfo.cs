@@ -12,7 +12,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Super PVx Info", "HunterZ", "1.8.0")]
+[Info("Super PVx Info", "HunterZ", "1.8.1")]
 [Description("Displays PvE/PvP/etc. status on player's HUD")]
 public class SuperPVxInfo : RustPlugin
 {
@@ -206,7 +206,7 @@ public class SuperPVxInfo : RustPlugin
     }
 
     if (null == ZoneManager ||
-        ZoneManager.Version < new VersionNumber(3, 1, 8))
+        ZoneManager.Version < new VersionNumber(3, 1, 10))
     {
       PrintWarning("ZoneManager is outdated or not running; this plugin may not work properly");
     }
@@ -423,7 +423,7 @@ public class SuperPVxInfo : RustPlugin
   #region ZoneManager Utilities
 
   private void ZM_GetZoneIDsNoAlloc(List<string> list) =>
-    ZoneManager?.Call("GetZoneIDSNoAlloc", list);
+    ZoneManager?.Call("GetZoneIDsNoAlloc", list);
 
   private void ZM_GetPlayerZoneIDsNoAlloc(
     BasePlayer player, List<string> list) =>
