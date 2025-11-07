@@ -12,7 +12,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Player Base PvP Zones", "HunterZ", "1.2.1")]
+[Info("Player Base PvP Zones", "HunterZ", "1.3.0")]
 [Description("Maintains Zone Manager / TruePVE exclusion zones around player bases")]
 public class PlayerBasePvpZones : RustPlugin
 {
@@ -1210,10 +1210,10 @@ public class PlayerBasePvpZones : RustPlugin
     ZM_GetZoneByID(zoneID)?.transform.SetParent(null, true);
 
   // create or update a ZoneManager zone
-  private static bool ZM_CreateOrUpdateZone(
+  private bool ZM_CreateOrUpdateZone(
     string zoneID, string[] zoneOptions, Vector3 location) =>
-    Convert.ToBoolean(
-      Interface.CallHook("CreateOrUpdateZone", zoneID, zoneOptions, location));
+    Convert.ToBoolean(Interface.CallHook("CreateOrUpdateTemporaryZone",
+      this, zoneID, zoneOptions, location));
 
   // create or update a ZoneManager zone for given building record
   // optionally takes TC ID for performance reasons
@@ -1274,16 +1274,16 @@ public class PlayerBasePvpZones : RustPlugin
   }
 
   // delete a ZoneManager zone by Zone ID
-  private static bool ZM_EraseZone(string zoneID) =>
-    Convert.ToBoolean(Interface.CallHook("EraseZone", zoneID));
+  private bool ZM_EraseZone(string zoneID) =>
+    Convert.ToBoolean(Interface.CallHook("EraseTemporaryZone", this, zoneID));
 
   // delete a batch of ZoneManager zones by Zone ID
-  private static void ZM_EraseZones(
+  private void ZM_EraseZones(
     List<string> zoneIDs, List<bool> results = null) =>
-    Interface.CallHook("EraseZones", zoneIDs, results);
+    Interface.CallHook("EraseTemporaryZones", this, zoneIDs, results);
 
   // delete a ZoneManager zone by networkable ID
-  private static void ZM_EraseZone(NetworkableId networkableId) =>
+  private void ZM_EraseZone(NetworkableId networkableId) =>
     ZM_EraseZone(GetZoneID(networkableId));
 
   // get list of players in the given ZoneManager zone, if any
