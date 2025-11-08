@@ -318,6 +318,8 @@ public class ScarecrowWrangler : RustPlugin
     {
       // if this scarecrow is recorded as the closest one, ignore location
       if (validLoc.closestWatcher == myWatcher2) continue;
+      // also ignore if closest scarecrow is too close
+      if (validLoc.closestDistance < 25.0f) continue;
       // if no best location recorded, choose validLoc as initial candidate
       if (null == bestLoc)
       {
@@ -336,7 +338,7 @@ public class ScarecrowWrangler : RustPlugin
     //  scarecrows will eventually spawn to recover things
     if (null == bestLoc)
     {
-      PrintWarning($"Killing scarecrow {Print(scarecrow)} due to no usable known-good location(s) available");
+      PrintWarning($"Killing scarecrow {Print(scarecrow)} due to no suitable known-good location(s) available (count={_validLocations.Count})");
       if (!quiet)
       {
         Effect.server.Run("assets/prefabs/npc/murderer/sound/death.prefab", scarecrow.transform.position);
