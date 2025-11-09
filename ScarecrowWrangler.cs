@@ -36,9 +36,9 @@ public class ScarecrowWrangler : RustPlugin
 
   private void Init()
   {
-    _watchers.Clear();
-    _validLocations.Clear();
-    _validMissCount = 0;
+    // temporarily unsubscribe from OnEntitySpawned() so that we don't try to
+    //  evaluate scarecrows twice on server startup
+    Unsubscribe(nameof(OnEntitySpawned));
   }
 
   private void OnServerInitialized()
@@ -55,6 +55,10 @@ public class ScarecrowWrangler : RustPlugin
       OnEntitySpawned(scarecrow);
       ++count;
     }
+
+    // resubscribe to OnEntitySpawned so that we learn about future scarecrows
+    Subscribe(nameof(OnEntitySpawned));
+
     Puts($"Completed startup processing for {count} scarecrow(s); recorded {_validLocations.Count} initial known-good location(s)");
   }
 

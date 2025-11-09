@@ -18,7 +18,6 @@ public class MagicTravelingVendorPanel : RustPlugin
 
   private PluginConfig? _pluginConfig; //Plugin Config
   private HashSet<TravellingVendor> _activeVendors = new();
-  private bool _init;
 
   private enum UpdateEnum { All = 1, Panel = 2, Image = 3, Text = 4 }
   #endregion
@@ -80,9 +79,14 @@ public class MagicTravelingVendorPanel : RustPlugin
     return config;
   }
 
+  private void Init()
+  {
+    Unsubscribe(nameof(OnEntitySpawned));
+  }
+
   private void OnServerInitialized()
   {
-    _init = true;
+    Subscribe(nameof(OnEntitySpawned));
     NextTick(() =>
     {
       _activeVendors = BaseNetworkable.serverEntities.OfType<TravellingVendor>().Where(CanShowPanel).ToHashSet();
@@ -123,12 +127,6 @@ public class MagicTravelingVendorPanel : RustPlugin
 
   private void OnEntitySpawned(TravellingVendor vendor)
   {
-    if (!_init)
-    {
-      PrintWarning($"OnEntitySpawned(): Not initialized");
-      return;
-    }
-
     NextTick(() =>
     {
       if (!CanShowPanel(vendor)) return;
