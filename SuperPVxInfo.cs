@@ -12,7 +12,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Super PVx Info", "HunterZ", "1.8.1")]
+[Info("Super PVx Info", "HunterZ", "1.8.2")]
 [Description("Displays PvE/PvP/etc. status on player's HUD")]
 public class SuperPVxInfo : RustPlugin
 {
@@ -61,7 +61,7 @@ public class SuperPVxInfo : RustPlugin
     WaterEvent
   }
 
-  [PluginReference] private readonly Plugin
+  [PluginReference] Plugin
     AbandonedBases, DynamicPVP, DangerousTreasures, PlayerBasePvpZones,
     PopupNotifications, RaidableBases, SimpleStatus, TruePVE, ZoneManager;
 
@@ -97,6 +97,13 @@ public class SuperPVxInfo : RustPlugin
   private Timer _saveDataTimer;
 
   private StoredData _storedData;
+
+  // TODO: the fields below can be removed after December 2025 force update, as
+  //  Carbon's zombie timers issue has been fixed
+  // whether OnServerInitialized() has been called yet
+  private bool _initialized = false;
+  // whether something requested a data save before OnServerInitialized()
+  private bool _delayedSave = false;
 
   private const string UIName = "SuperPVxInfoUI";
 
@@ -151,7 +158,7 @@ public class SuperPVxInfo : RustPlugin
 
     // remove timer entry if present, and destroy it if needed
     if (excludeTimers.Remove(pluginName, out var removedTimer) &&
-        false == removedTimer?.Destroyed)
+        TimerValid(removedTimer))
     {
       removedTimer.Destroy();
     }
@@ -167,6 +174,8 @@ public class SuperPVxInfo : RustPlugin
     }
   }
 
+  private bool TimerValid(Timer t) => false == t?.Destroyed;
+
   #endregion Utility Methods
 
   #region Oxide Methods
@@ -176,6 +185,8 @@ public class SuperPVxInfo : RustPlugin
 
   private void Init()
   {
+    _initialized = false;
+    _delayedSave = false;
     LoadData();
     PlayerWatcher.AllowForceUpdate =
       null == _configData || _configData.ForceUpdates;
@@ -190,8 +201,10 @@ public class SuperPVxInfo : RustPlugin
     }
   }
 
-  private void OnServerInitialized()
+  private void OnServerInitialized(bool isStartup)
   {
+    _initialized = true;
+
     if (Convert.ToBoolean(DynamicPVP?.Call("IsUsingExcludePlayer")))
     {
       Puts("OnServerInitialized(): Detected DynamicPVP support for TruePVE PVP delays");
@@ -211,6 +224,7 @@ public class SuperPVxInfo : RustPlugin
       PrintWarning("ZoneManager is outdated or not running; this plugin may not work properly");
     }
 
+    var saveData = _delayedSave;
     if (null != _storedData)
     {
       // sync with TruePVE mappings in case of reload
@@ -222,9 +236,10 @@ public class SuperPVxInfo : RustPlugin
       ZM_GetZoneIDsNoAlloc(activeZoneIds);
       Puts($"OnServerInitialized(): ZoneManager active zone count: {activeZoneIds.Count}");
       var deadZoneIds = Pool.Get<List<string>>();
-      foreach (var (zoneId, _) in _storedData.Mappings)
+      foreach (var zoneId in _storedData.Mappings.Keys)
       {
-        if (!activeZoneIds.Contains(zoneId)) deadZoneIds.Add(zoneId);
+        if ("default" == zoneId || activeZoneIds.Contains(zoneId)) continue;
+        deadZoneIds.Add(zoneId);
       }
       Pool.FreeUnmanaged(ref activeZoneIds);
       foreach (var deadZoneId in deadZoneIds)
@@ -233,10 +248,43 @@ public class SuperPVxInfo : RustPlugin
       }
       if (deadZoneIds.Count > 0)
       {
-        PrintWarning($"Purging {deadZoneIds.Count} unknown/obsolete zoneId(s) from database");
-        SaveData();
+        PrintWarning($"OnServerInitialized(): Purged {deadZoneIds.Count} unknown/obsolete zoneId(s) from database");
+        saveData = true;
       }
       Pool.FreeUnmanaged(ref deadZoneIds);
+
+      // migrate or clear old PVP events
+      var oldEventsCount = _storedData.PendingPvpEvents.Count;
+      if (oldEventsCount > 0)
+      {
+        if (isStartup)
+        {
+          // don't use events from a previous server run
+          PrintWarning($"OnServerInitialized(): Purging {oldEventsCount} obsolete PVP event record(s)");
+          saveData = true;
+        }
+        else
+        {
+          // migrate events that haven't already been re-added by another
+          //  plugin's OnServerInitialized()
+          var migratedCount = 0;
+          foreach (var (eventType, eventData) in _storedData.PendingPvpEvents)
+          {
+            if (!_storedData.PvpEvents.TryAdd(eventType, eventData)) continue;
+            ++migratedCount;
+          }
+          Puts($"OnServerInitialized(): Migrated {migratedCount}/{oldEventsCount} saved PVP event record(s)");
+          // schedule a save if we didn't just retain everything
+          saveData |= migratedCount != _storedData.PendingPvpEvents.Count ||
+                      migratedCount != _storedData.PvpEvents.Count;
+        }
+        // purge pending list regardless, as we're done with it
+        _storedData.PendingPvpEvents.Clear();
+      }
+    }
+    if (saveData)
+    {
+      SaveData();
     }
 
     // setup SimpleStatus integration if appropriate
@@ -257,11 +305,11 @@ public class SuperPVxInfo : RustPlugin
   private void Unload()
   {
     // clear out any active TruePVE PVP delay timers
-    foreach (var (_, excludeTimers) in _excludedPlayers)
+    foreach (var excludeTimers in _excludedPlayers.Values)
     {
-      foreach (var (_, excludeTimer) in excludeTimers)
+      foreach (var excludeTimer in excludeTimers.Values)
       {
-        if (false == excludeTimer?.Destroyed)
+        if (TimerValid(excludeTimer))
         {
           excludeTimer.Destroy();
         }
@@ -275,8 +323,14 @@ public class SuperPVxInfo : RustPlugin
       OnPlayerDisconnected(player, UIName);
     }
     PlayerWatcher.Instance = null;
-    // if save timer active, destroy and force write
-    if (null != _saveDataTimer) WriteData();
+    // if save timer active, force immediate write
+    if (TimerValid(_saveDataTimer))
+    {
+      WriteData();
+    }
+
+    _saveDataTimer = null;
+    _initialized = _delayedSave = false;
   }
 
   private void OnPlayerConnected(BasePlayer player)
@@ -343,28 +397,44 @@ public class SuperPVxInfo : RustPlugin
       return;
     }
 
-    NextTick(() =>
-    {
-      _storedData.Mappings[zoneId] = ruleset;
-      SaveData();
-    });
+    _storedData.Mappings[zoneId] = ruleset;
+    SaveData();
   }
 
   // called when a plugin deletes a mapping
   private void RemoveMapping(string zoneId)
   {
-    if (null == _storedData || string.IsNullOrEmpty(zoneId)) return;
-
-    NextTick(() =>
+    if (null == _storedData ||
+        string.IsNullOrEmpty(zoneId) ||
+        !_storedData.Mappings.Remove(zoneId))
     {
-      _storedData.Mappings.Remove(zoneId);
+      return;
+    }
+
+    SaveData();
+  }
+
+  // called when a plugin does a mappings bulk remove
+  private void RemoveMappings(List<string> keys, List<string> _ = null)
+  {
+    if (null == _storedData) return;
+
+    var dataChanged = false;
+    foreach (var key in keys)
+    {
+      if (!string.IsNullOrEmpty(key) && _storedData.Mappings.Remove(key))
+      {
+        dataChanged = true;
+      }
+    }
+    if (dataChanged)
+    {
       SaveData();
-    });
+    }
   }
 
   // called when a plugin requests a timed rule exclusion (PVP exit delay)
-  private void ExcludePlayer(
-    ulong userid, float maxDelayLength, Plugin plugin)
+  private void ExcludePlayer(ulong userid, float maxDelayLength, Plugin plugin)
   {
     if (null == plugin || !userid.IsSteamId()) return;
     var pluginName = plugin.Name;
@@ -384,7 +454,7 @@ public class SuperPVxInfo : RustPlugin
       if (hasTimers &&
           excludeTimers.TryGetValue(pluginName, out var excludeTimer))
       {
-        if (false == excludeTimer?.Destroyed)
+        if (TimerValid(excludeTimer))
         {
           excludeTimer.Reset(maxDelayLength);
           return;
@@ -589,8 +659,8 @@ public class SuperPVxInfo : RustPlugin
   // delete an event record with the given data, if any
   private void DeleteLocationPvpEvent(PvpLocationEventType type)
   {
-    if (null == _storedData) return;
-    if (_storedData.PvpEvents.Remove(type)) SaveData();
+    if (null == _storedData || !_storedData.PvpEvents.Remove(type)) return;
+    SaveData();
   }
 
   // check whether player is in any Raidable Base
@@ -632,7 +702,7 @@ public class SuperPVxInfo : RustPlugin
   private bool IsPlayerInPvpEvent(BasePlayer player)
   {
     if (null == _storedData) return false;
-    foreach (var (_, eventData) in _storedData.PvpEvents)
+    foreach (var eventData in _storedData.PvpEvents.Values)
     {
       if (Vector3.Distance(eventData.Location, player.transform.position) <=
           eventData.Radius)
@@ -1471,7 +1541,7 @@ public class SuperPVxInfo : RustPlugin
           _configData.DefaultType = PVxType.PVE;
         }
         // add default toggle states for any missing notifications
-        foreach (var (msgKey, _) in _notifyMessages)
+        foreach (var msgKey in _notifyMessages.Keys)
         {
           if (_configData.NotifySettings.Enabled.ContainsKey(msgKey)) continue;
           PrintWarning($"Adding new player notification toggle in disabled state: \"{msgKey}\"");
@@ -1479,7 +1549,7 @@ public class SuperPVxInfo : RustPlugin
         }
         // remove toggle states for any unrecognized notifications in config
         var deadMsgKeys = Pool.Get<List<string>>();
-        foreach (var (key, _) in _configData.NotifySettings.Enabled)
+        foreach (var key in _configData.NotifySettings.Enabled.Keys)
         {
           if (!_notifyMessages.ContainsKey(key)) deadMsgKeys.Add(key);
         }
@@ -1536,10 +1606,17 @@ public class SuperPVxInfo : RustPlugin
 
   private sealed class StoredData
   {
+    // all mappings between a zone and a PVE ruleset
     public Dictionary<string, string> Mappings { get; set; } = new();
 
+    // all known location-based PVP events
     public Dictionary<PvpLocationEventType, PvpEventData>
       PvpEvents { get; set; } = new();
+
+    // PvpEvents state gets moved here on load and moved back or purged on start
+    [JsonIgnore]
+    public Dictionary<PvpLocationEventType, PvpEventData>
+      PendingPvpEvents { get; set; } = new();
   }
 
   private void LoadData()
@@ -1548,6 +1625,11 @@ public class SuperPVxInfo : RustPlugin
     {
       _storedData =
         Interface.Oxide.DataFileSystem.ReadObject<StoredData>(Name);
+      // move PvpEvents off to the side for now
+      // it will be processed in OnServerInitialized()
+      (_storedData.PvpEvents, _storedData.PendingPvpEvents) =
+        (_storedData.PendingPvpEvents, _storedData.PvpEvents);
+      _storedData.PvpEvents.Clear();
     }
     catch
     {
@@ -1566,19 +1648,27 @@ public class SuperPVxInfo : RustPlugin
   //  data file writes
   private void SaveData()
   {
+    // don't allow timer to be created before OnServerInitialized() because
+    //  Carbon sucks and will make it a zombie forever
+    if (!_initialized)
+    {
+      PrintWarning("Delaying data save because OnServerInitialized() has not been called yet");
+      _delayedSave = true;
+      return;
+    }
     // abort if save already pending
-    if (null != _saveDataTimer) return;
+    if (TimerValid(_saveDataTimer)) return;
     // start a save timer
-    _saveDataTimer =
-      timer.Once(_configData?.SaveIntervalSeconds ?? 5.0f, WriteData);
+    var saveDelay = _configData?.SaveIntervalSeconds ?? 0.0f;
+    if (saveDelay <= 0.0f) saveDelay = 5.0f;
+    _saveDataTimer = timer.Once(saveDelay, WriteData);
   }
 
   private void WriteData()
   {
-    if (null != _saveDataTimer)
+    if (TimerValid(_saveDataTimer))
     {
-      if (!_saveDataTimer.Destroyed) _saveDataTimer.Destroy();
-      _saveDataTimer = null;
+      _saveDataTimer.Destroy();
     }
     Interface.Oxide.DataFileSystem.WriteObject(Name, _storedData);
   }

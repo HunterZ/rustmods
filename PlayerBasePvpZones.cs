@@ -12,13 +12,13 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Player Base PvP Zones", "HunterZ", "1.3.0")]
+[Info("Player Base PvP Zones", "HunterZ", "1.3.1")]
 [Description("Maintains Zone Manager / TruePVE exclusion zones around player bases")]
 public class PlayerBasePvpZones : RustPlugin
 {
   #region Fields
 
-  [PluginReference] private readonly Plugin TruePVE;
+  [PluginReference] Plugin TruePVE;
 
   // user-defined plugin config data
   private ConfigData _configData = new();
@@ -360,6 +360,7 @@ public class PlayerBasePvpZones : RustPlugin
     if (null == bulkDeleteList)
     {
       // ...immediately
+      TP_RemoveMapping(toolCupboardID);
       ZM_EraseZone(toolCupboardID);
     }
     else
@@ -367,9 +368,6 @@ public class PlayerBasePvpZones : RustPlugin
       // ...by adding to given bulk delete list
       bulkDeleteList.Add(GetZoneID(toolCupboardID));
     }
-
-    // destroy mapping
-    TP_RemoveMapping(toolCupboardID);
   }
 
   // schedule a delayed building update check
@@ -503,6 +501,7 @@ public class PlayerBasePvpZones : RustPlugin
     if (null == bulkDeleteList)
     {
       // ...immediately
+      TP_RemoveMapping(legacyShelterID);
       ZM_EraseZone(legacyShelterID);
     }
     else
@@ -510,9 +509,6 @@ public class PlayerBasePvpZones : RustPlugin
       // ...by adding to given bulk delete list
       bulkDeleteList.Add(GetZoneID(legacyShelterID));
     }
-
-    // destroy mapping
-    TP_RemoveMapping(legacyShelterID);
   }
 
   // schedule a delayed shelter creation
@@ -622,6 +618,7 @@ public class PlayerBasePvpZones : RustPlugin
     if (null == bulkDeleteList)
     {
       // ...immediately
+      TP_RemoveMapping(tugboatID);
       ZM_EraseZone(tugboatID);
     }
     else
@@ -629,9 +626,6 @@ public class PlayerBasePvpZones : RustPlugin
       // ...by adding to given bulk delete list
       bulkDeleteList.Add(GetZoneID(tugboatID));
     }
-
-    // destroy mapping
-    TP_RemoveMapping(tugboatID);
   }
 
   // schedule a delayed shelter deletion
@@ -719,44 +713,6 @@ public class PlayerBasePvpZones : RustPlugin
     }
   }
 
-  // purge any dangling zones + mappings from previous runs
-  // this shouldn't be needed, but DynamicPVP does it, so I figured it wouldn't
-  //  hurt
-  private void PurgeOldZones()
-  {
-    // get list of all active Zone Manager zone IDs
-    var zoneIds = Pool.Get<List<string>>();
-    ZM_GetZoneIDs(zoneIds);
-    if (zoneIds.Count <= 0)
-    {
-      Pool.FreeUnmanaged(ref zoneIds);
-      return;
-    }
-
-    var mappingCount = 0U;
-    var eraseList = Pool.Get<List<string>>();
-    foreach (var zoneId in zoneIds)
-    {
-      if (!zoneId.Contains(ZoneIdPrefix)) continue;
-      // this is one of ours - add to delete request list
-      eraseList.Add(zoneId);
-      // ...and delete TruePVE mapping
-      if (TP_RemoveMapping(zoneId)) ++mappingCount;
-    }
-    Pool.FreeUnmanaged(ref zoneIds);
-    // bulk delete zones
-    var eraseResults = Pool.Get<List<bool>>();
-    ZM_EraseZones(eraseList, eraseResults);
-    Pool.FreeUnmanaged(ref eraseList);
-    // count how many zones actually got deleted
-    var zoneCount = 0U;
-    foreach (var result in eraseResults) if (result) ++zoneCount;
-    Pool.FreeUnmanaged(ref eraseResults);
-
-    Puts($"OnServerInitialized():  Deleted {zoneCount} dangling zone(s)...");
-    Puts($"OnServerInitialized():  Deleted {mappingCount} dangling mapping(s)...");
-  }
-
   // utility method to return an appropriate yield instruction based on whether
   //  this is a long pause for debug logging to catch up, whether current server
   //  framerate is too low, etc.
@@ -777,7 +733,7 @@ public class PlayerBasePvpZones : RustPlugin
     Puts("CreateData(): Starting zone creation...");
 
     // create zones for all existing player-owned bases
-    foreach (var (_, building) in BuildingManager.server.buildingDictionary)
+    foreach (var building in BuildingManager.server.buildingDictionary.Values)
     {
       var toolCupboard = GetToolCupboard(building);
       if (!IsValid(toolCupboard) || !IsPlayerOwned(toolCupboard)) continue;
@@ -787,7 +743,7 @@ public class PlayerBasePvpZones : RustPlugin
     Puts($"CreateData():  Created {_buildingData.Count} building zones...");
 
     // create zones for all existing player-owned legacy shelters
-    foreach (var (_, shelterList) in LegacyShelter.SheltersPerPlayer)
+    foreach (var shelterList in LegacyShelter.SheltersPerPlayer.Values)
     {
       foreach (var shelter in shelterList)
       {
@@ -843,6 +799,12 @@ public class PlayerBasePvpZones : RustPlugin
 
   private void Init()
   {
+    // unsubscribe from OnEntitySpawned() hook calls under OnServerInitialized()
+    // for some reason Carbon allows these to fire super early on startup for
+    //  tugboats, which can cause a lot of problems
+    // PBPZ is not dependent on OnEntitySpawned() for initial creation of
+    //  tugboat zones, so this won't hurt anything
+    Unsubscribe(nameof(OnEntitySpawned));
     if (null == _configData) return;
     BaseData.SphereDarkness = _configData.SphereDarkness;
   }
@@ -857,8 +819,8 @@ public class PlayerBasePvpZones : RustPlugin
       Unsubscribe(nameof(CanEntityTakeDamage));
     }
 
-    // purge any dangling zones
-    PurgeOldZones();
+    // resubscribe OnEntitySpawned() hook, as it's now safe to handle this
+    Subscribe(nameof(OnEntitySpawned));
 
     NextTick(() =>
     {
@@ -872,7 +834,7 @@ public class PlayerBasePvpZones : RustPlugin
     List<string> bulkDeleteList)
   {
     var networkableIds = Pool.Get<List<NetworkableId>>();
-    foreach (var (networkableId, _) in dict)
+    foreach (var networkableId in dict.Keys)
     {
       networkableIds.Add(networkableId);
     }
@@ -889,7 +851,7 @@ public class PlayerBasePvpZones : RustPlugin
   {
     if (dict.Count <= 0) return;
     Puts($"Unload():  Destroying {dict.Count} {desc} timer(s)...");
-    foreach (var (_, dTimer) in dict) dTimer?.Destroy();
+    foreach (var dTimer in dict.Values) dTimer?.Destroy();
   }
 
   private void Unload()
@@ -927,7 +889,11 @@ public class PlayerBasePvpZones : RustPlugin
         ref _tugboatData, DeleteTugboatData, bulkDeleteList);
     }
     DestroyTimerDictionary(ref _tugboatDeleteTimers, "tugboat deletion");
-    if (bulkDeleteList.Count > 0) ZM_EraseZones(bulkDeleteList);
+    if (bulkDeleteList.Count > 0)
+    {
+      TP_RemoveMappings(bulkDeleteList);
+      ZM_EraseZones(bulkDeleteList);
+    }
     Pool.FreeUnmanaged(ref bulkDeleteList);
     // cleanup player records
     if (_playerZones.Count > 0)
@@ -944,7 +910,7 @@ public class PlayerBasePvpZones : RustPlugin
     if (_pvpDelayTimers.Count > 0)
     {
       Puts($"Unload():  Destroying {_pvpDelayTimers.Count} player PvP delay timers...");
-      foreach (var (_, timerData) in _pvpDelayTimers)
+      foreach (var timerData in _pvpDelayTimers.Values)
       {
         timerData.Item1.Destroy();
       }
@@ -1418,6 +1384,10 @@ public class PlayerBasePvpZones : RustPlugin
 
   private static void TP_RemoveMapping(NetworkableId networkableID) =>
     TP_RemoveMapping(GetZoneID(networkableID));
+
+  // bulk delete TruePVE mappings for the given list of ZoneManager zone IDs
+  private static void TP_RemoveMappings(List<string> zoneIDs) =>
+    Interface.CallHook("RemoveMappings", zoneIDs);
 
   #endregion TruePVE Integration
 

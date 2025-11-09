@@ -15,14 +15,13 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "4.8.0", ResourceId = 2728)]
+[Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "4.8.1", ResourceId = 2728)]
 [Description("Creates temporary PvP zones on certain actions/events")]
 public class DynamicPVP : RustPlugin
 {
   #region Fields
 
-  [PluginReference] private readonly Plugin
-    Backpacks, BotReSpawn, TruePVE, ZoneManager;
+  [PluginReference] Plugin Backpacks, BotReSpawn, TruePVE, ZoneManager;
 
   private const string PermissionAdmin = "dynamicpvp.admin";
   private const string PrefabLargeOilRig =
@@ -211,7 +210,7 @@ public class DynamicPVP : RustPlugin
     Unsubscribe(nameof(OnRestoreUponDeath));
     Unsubscribe(nameof(OnServerCommand));
     Unsubscribe(nameof(OnSupplyDropLanded));
-    foreach (var (category, _) in _hooksByCategory)
+    foreach (var category in _hooksByCategory.Keys)
     {
       _subscriptionsByCategory[category] = false;
     }
@@ -253,7 +252,6 @@ public class DynamicPVP : RustPlugin
       PrintError("Zone Manager missing or outdated; please update for proper function of this plugin!");
     }
 
-    DeleteOldDynamicZones();
     if (_configData.GeneralEvents.ExcavatorIgnition.Enabled)
     {
       Subscribe(nameof(OnDieselEngineToggled));
@@ -391,7 +389,7 @@ public class DynamicPVP : RustPlugin
 
     _originalMonumentGeometries.Clear();
 
-    foreach (var (_, apZone) in _activePluginZones)
+    foreach (var apZone in _activePluginZones.Values)
     {
       // this is cheating because it leaves apZone in a dangling state, but it's
       //  okay because we're going to clear the list just after this
@@ -2386,7 +2384,7 @@ public class DynamicPVP : RustPlugin
       if (entrance.Links.Count <= 0) continue;
 
       // create Train Tunnel stairwell monument event
-      var (landmarkName, _) = GetLandmarkName(entrance);
+      var landmarkName = GetLandmarkName(entrance).monumentName;
       if (string.IsNullOrEmpty(landmarkName))
       {
         PrintWarning($"Skipping Train Tunnels entrance {entrance}@{entrance.transform.position} because it has no landmark name");
@@ -2904,22 +2902,6 @@ public class DynamicPVP : RustPlugin
     Pool.FreeUnmanaged(ref players);
     if (null != sbProperties) Pool.FreeUnmanaged(ref sbProperties);
     return zoneRemoved;
-  }
-
-  private void DeleteOldDynamicZones()
-  {
-    var zoneIds = Pool.Get<List<string>>();
-    ZM_GetZoneIDs(zoneIds);
-    int attempts = 0, successes = 0;
-    foreach (var zoneId in zoneIds)
-    {
-      if (ZM_GetZoneName(zoneId) != ZoneName) continue;
-      attempts++;
-      if (ZM_EraseZone(zoneId)) successes++;
-      TP_RemoveMapping(zoneId);
-    }
-    Pool.FreeUnmanaged(ref zoneIds);
-    PrintDebug($"Deleted {successes} of {attempts} obsolete DynamicPVP zone(s)", DebugLevel.Warning);
   }
 
   #endregion DynamicZone Handler
@@ -3453,7 +3435,7 @@ public class DynamicPVP : RustPlugin
     // this is tortured, but we do it to avoid Linq
     var retVal = new string[_activeDynamicZones.Count];
     var i = 0;
-    foreach (var (key, _) in _activeDynamicZones) retVal[i++] = key;
+    foreach (var key in _activeDynamicZones.Keys) retVal[i++] = key;
     return retVal;
   }
 
