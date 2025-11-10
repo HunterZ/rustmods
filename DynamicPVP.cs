@@ -15,7 +15,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "4.8.1", ResourceId = 2728)]
+[Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "4.9.0", ResourceId = 2728)]
 [Description("Creates temporary PvP zones on certain actions/events")]
 public class DynamicPVP : RustPlugin
 {
@@ -28,8 +28,16 @@ public class DynamicPVP : RustPlugin
     "assets/bundled/prefabs/autospawn/monument/offshore/oilrig_1.prefab";
   private const string PrefabOilRig =
     "assets/bundled/prefabs/autospawn/monument/offshore/oilrig_2.prefab";
-  private const string PrefabSphere =
+  private const string PrefabSphereDome =
     "assets/prefabs/visualization/sphere.prefab";
+  private const string PrefabSphereRedRing =
+    "assets/bundled/prefabs/modding/events/twitch/br_sphere_red.prefab";
+  private const string PrefabSphereGreenRing =
+    "assets/bundled/prefabs/modding/events/twitch/br_sphere_green.prefab";
+  private const string PrefabSphereBlueRing =
+    "assets/bundled/prefabs/modding/events/twitch/br_sphere.prefab";
+  private const string PrefabSpherePurpleRing =
+    "assets/bundled/prefabs/modding/events/twitch/br_sphere_purple.prefab";
   private const string ZoneName = "DynamicPVP";
 
   private readonly Dictionary<string, Timer> _eventTimers = new();
@@ -64,8 +72,6 @@ public class DynamicPVP : RustPlugin
   private readonly YieldInstruction _pauseYield =
     CoroutineEx.waitForSeconds(0.5f);
   private float _targetFps = -1.0f;
-
-  public static DynamicPVP Instance { get; private set; }
 
   private sealed class LeftZone : Pool.IPooled
   {
@@ -183,7 +189,6 @@ public class DynamicPVP : RustPlugin
 
     _brokenTunnels = false;
 
-    Instance = this;
     LoadData();
     permission.RegisterPermission(PermissionAdmin, this);
     AddCovalenceCommand(_configData.Chat.Command, nameof(CmdDynamicPVP));
@@ -381,7 +386,6 @@ public class DynamicPVP : RustPlugin
 
     SaveData();
     SaveDebug();
-    Instance = null;
 
     if (null == _debugStringBuilder) return;
     Pool.FreeUnmanaged(ref _debugStringBuilder);
@@ -397,6 +401,7 @@ public class DynamicPVP : RustPlugin
       Pool.FreeUnmanaged(ref apZoneI);
     }
     _activePluginZones.Clear();
+    DomeEvent._domeEventsToCheck = null;
   }
 
   private void OnServerSave() =>
@@ -2143,12 +2148,27 @@ public class DynamicPVP : RustPlugin
   private static (string monumentName, bool custom) GetLandmarkName(
     LandmarkInfo landmarkInfo)
   {
-    var monumentName = landmarkInfo.displayPhrase?.english?.Trim();
-    return
-      string.IsNullOrEmpty(monumentName) &&
-      landmarkInfo.name.Contains("monument_marker.prefab") ?
-        (landmarkInfo.transform.root.name, true) :
-        (monumentName, false);
+    // TODO: cache this if it ever gets called more than once per custom
+    //  monument (I tested, and it does not as of 4.9.0)
+
+    // vanilla monument
+    if (!landmarkInfo.name.Contains("monument_marker.prefab"))
+    {
+      return (landmarkInfo.displayPhrase?.english?.Trim(), false);
+    }
+
+    // custom monument
+
+    // this sucks (results in scanning 5000+ prefabs during startup), but it
+    //  seems to be how Facepunch decided to make us do it as of late 2025
+    //  (stolen from their MonumentMarker class)
+    var obj = landmarkInfo.transform.root.gameObject;
+    foreach (var (prefabName, objectSet) in World.SpawnedPrefabs)
+    {
+      if (objectSet.Contains(obj)) return (prefabName, true);
+    }
+
+    return (landmarkInfo.transform.root.name, true);
   }
 
   // sub-coroutine to create (vanilla and custom map) map marker based
@@ -2717,10 +2737,9 @@ public class DynamicPVP : RustPlugin
     stringBuilder.Clear();
     if (baseEvent is DomeEvent domeEvent &&
         dynamicZone is ISphereZone sphereZone &&
-        DomeCreateAllowed(domeEvent, sphereZone))
+        domeEvent.DomeData.DomeCreateAllowed(sphereZone))
     {
-      if (CreateDome(
-            zoneId, position, sphereZone.Radius, domeEvent.DomesDarkness))
+      if (CreateDome(zoneId, position, sphereZone.Radius, domeEvent.DomeData))
       {
         stringBuilder.Append("Dome,");
       }
@@ -2831,8 +2850,9 @@ public class DynamicPVP : RustPlugin
     // avoid allocating this StringBuilder when not debug logging
     var sbProperties =
       _configData.Global.DebugEnabled ? Pool.Get<StringBuilder>() : null;
-    if (DomeCreateAllowed(
-          baseEvent as DomeEvent, baseEvent.GetDynamicZone() as ISphereZone))
+    if (baseEvent is DomeEvent domeEvent &&
+        domeEvent.DomeData.DomeCreateAllowed(
+          baseEvent.GetDynamicZone() as ISphereZone))
     {
       if (RemoveDome(zoneId))
       {
@@ -2910,31 +2930,54 @@ public class DynamicPVP : RustPlugin
 
   private readonly Dictionary<string, List<SphereEntity>> _zoneSpheres = new();
 
-  private static bool DomeCreateAllowed(
-    DomeEvent domeEvent, ISphereZone sphereZone) =>
-    domeEvent?.DomesEnabled == true && sphereZone?.Radius > 0f;
+  private void CreateDome(
+    List<SphereEntity> list, string prefabName, Vector3 position, float radius)
+  {
+    if (null == list || string.IsNullOrEmpty(prefabName) || radius <= 0)
+    {
+      return;
+    }
+
+    if (GameManager.server.CreateEntity(prefabName, position)
+          is not SphereEntity sphereEntity || !sphereEntity)
+    {
+      PrintDebug($"ERROR: Failed to create SphereEntity; prefabName={prefabName}, position={position}, radius={radius}", DebugLevel.Error);
+      return;
+    }
+
+    sphereEntity.enableSaving = false;
+    sphereEntity.Spawn();
+    sphereEntity.LerpRadiusTo(radius * 2f, radius);
+    list.Add(sphereEntity);
+  }
 
   private bool CreateDome(
-    string zoneId, Vector3 position, float radius, int darkness)
+    string zoneId, Vector3 position, float radius, DomeSettings domeData)
   {
     // Method for spherical dome creation
     if (radius <= 0) return false;
 
     var sphereEntities = Pool.Get<List<SphereEntity>>();
-    for (var i = 0; i < darkness; ++i)
+
+    // add domes
+    for (var i = 0; i < domeData.Darkness; ++i)
     {
-      var sphereEntity = GameManager.server.CreateEntity(
-        PrefabSphere, position) as SphereEntity;
-      if (!sphereEntity)
-      {
-        PrintDebug("ERROR: Failed to create SphereEntity", DebugLevel.Error);
-        return false;
-      }
-      sphereEntity.enableSaving = false;
-      sphereEntity.Spawn();
-      sphereEntity.LerpRadiusTo(radius * 2f, radius);
-      sphereEntities.Add(sphereEntity);
+      CreateDome(sphereEntities, PrefabSphereDome, position, radius);
     }
+
+    // add rings
+    foreach (var ring in new[]
+             {
+               (domeData.RedRing,    PrefabSphereRedRing),
+               (domeData.GreenRing,  PrefabSphereGreenRing),
+               (domeData.BlueRing,   PrefabSphereBlueRing),
+               (domeData.PurpleRing, PrefabSpherePurpleRing)
+             })
+    {
+      if (!ring.Item1) continue;
+      CreateDome(sphereEntities, ring.Item2, position, radius);
+    }
+
     _zoneSpheres.Add(zoneId, sphereEntities);
     return true;
   }
@@ -2949,7 +2992,7 @@ public class DynamicPVP : RustPlugin
     }
     foreach (var sphereEntity in sphereEntities)
     {
-      if (parentEntity)
+      if (parentEntity is not null && parentEntity)
       {
         // tethering dome to parent entity
         sphereEntity.SetParent(parentEntity);
@@ -3002,7 +3045,7 @@ public class DynamicPVP : RustPlugin
     var attacker = info.InitiatorPlayer ??
                    (info.Initiator && info.Initiator.OwnerID.IsSteamId() ?
                      BasePlayer.FindByID(info.Initiator.OwnerID) : null);
-    if (!attacker || !attacker.userID.IsSteamId())
+    if (attacker is null || !attacker || !attacker.userID.IsSteamId())
     {
       //The attacker cannot be fully captured
       return null;
@@ -4078,52 +4121,118 @@ public class DynamicPVP : RustPlugin
   // NOTE: reserve order 20-24
   public abstract class DomeEvent : BaseEvent
   {
-    [JsonProperty(PropertyName = "Enable Domes", Order = 20)]
-    public bool DomesEnabled { get; set; } = true;
+    // obsolete field
+    [JsonProperty(PropertyName = "Enable Domes", NullValueHandling = NullValueHandling.Ignore)]
+    public bool? ObeDomesEnabled { get; set; }
 
-    [JsonProperty(PropertyName = "Domes Darkness", Order = 21)]
-    public int DomesDarkness { get; set; } = 8;
+    // obsolete field
+    [JsonProperty(PropertyName = "Domes Darkness", NullValueHandling = NullValueHandling.Ignore)]
+    public int? ObeDomesDarkness { get; set; }
+
+    [JsonProperty(PropertyName = "Dome Settings", Order = 20)]
+    public DomeSettings DomeData { get; set; } = new();
+
+    // this is a temporary list to support migration from obsolete dome settings
+    [JsonIgnore] public static List<DomeEvent> _domeEventsToCheck;
+
+    // self-register all instances for obsolete data migration check
+    protected DomeEvent()
+    {
+      // lazily instantiate
+      _domeEventsToCheck ??= new List<DomeEvent>();
+      _domeEventsToCheck?.Add(this);
+    }
+
+    public static void Migrate()
+    {
+      // 4.9.0 dome settings migration check
+      foreach (var domeEvent in _domeEventsToCheck)
+      {
+        switch (domeEvent.ObeDomesEnabled)
+        {
+          case null:
+            // only care about darkness if domes were enabled
+            domeEvent.ObeDomesDarkness = null;
+            continue;
+          case false:
+            domeEvent.DomeData.Darkness = 0;
+            break;
+          case true:
+            domeEvent.DomeData.Darkness = domeEvent.ObeDomesDarkness is > 0 ?
+              domeEvent.ObeDomesDarkness.Value : 0;
+            break;
+        }
+
+        domeEvent.ObeDomesEnabled = null;
+        domeEvent.ObeDomesDarkness = null;
+      }
+      // clear the list; it may get reused for both config and data files
+      _domeEventsToCheck.Clear();
+    }
+  }
+
+  // NOTE: reserve order 25-34
+  public sealed class DomeSettings
+  {
+    [JsonProperty(PropertyName = "Dome Darkness (0 to disable)", Order = 25)]
+    public int Darkness { get; set; } = 8;
+
+    [JsonProperty(PropertyName = "Enable Red Ring", Order = 26)]
+    public bool RedRing { get; set; }
+
+    [JsonProperty(PropertyName = "Enable Green Ring", Order = 27)]
+    public bool GreenRing { get; set; }
+
+    [JsonProperty(PropertyName = "Enable Blue Ring", Order = 28)]
+    public bool BlueRing { get; set; }
+
+    [JsonProperty(PropertyName = "Enable Purple Ring", Order = 29)]
+    public bool PurpleRing { get; set; }
+
+    public bool DomeCreateAllowed(ISphereZone sphereZone) =>
+      sphereZone?.Radius > 0f &&
+      (Darkness > 0 || RedRing || GreenRing || BlueRing || PurpleRing);
   }
 
   // bot features
-  // NOTE: reserve order 25-29
+  // NOTE: reserve order 35-39
   public abstract class BotDomeEvent : DomeEvent
   {
-    [JsonProperty(PropertyName = "Enable Bots (Need BotSpawn Plugin)", Order = 25)]
+    [JsonProperty(PropertyName = "Enable Bots (Need BotSpawn Plugin)", Order = 35)]
     public bool BotsEnabled { get; set; }
 
-    [JsonProperty(PropertyName = "BotSpawn Profile Name", Order = 26)]
+    [JsonProperty(PropertyName = "BotSpawn Profile Name", Order = 36)]
     public string BotProfileName { get; set; } = string.Empty;
   }
 
   // Excavator Ignition general event (split off from MonumentEvent because it
   //  doesn't support auto-geo)
-  // NOTE: reserve order 30-39
+  // NOTE: reserve order 40-44
   public class IgnitionEvent : DomeEvent
   {
-    [JsonProperty(PropertyName = "Dynamic PVP Zone Settings", Order = 30)]
-    public SphereCubeDynamicZone DynamicZone { get; set; } = new();
-
-    [JsonProperty(PropertyName = "Zone ID", Order = 31)]
-    public string ZoneId { get; set; } = string.Empty;
-
-    [JsonProperty(PropertyName = "Transform Position", Order = 32)]
-    public Vector3 TransformPosition { get; set; }
-
-    public override BaseDynamicZone GetDynamicZone() => DynamicZone;
-  }
-
-  // NOTE: reserve order 40-49
-  // Monument event
-  public class MonumentEvent : DomeEvent
-  {
     [JsonProperty(PropertyName = "Dynamic PVP Zone Settings", Order = 40)]
-    public SphereCubeAutoGeoDynamicZone DynamicZone { get; set; } = new();
+    public SphereCubeDynamicZone DynamicZone { get; set; } = new();
 
     [JsonProperty(PropertyName = "Zone ID", Order = 41)]
     public string ZoneId { get; set; } = string.Empty;
 
     [JsonProperty(PropertyName = "Transform Position", Order = 42)]
+    public Vector3 TransformPosition { get; set; }
+
+    public override BaseDynamicZone GetDynamicZone() => DynamicZone;
+  }
+
+  // NOTE: reserve order 45-49
+  // Monument event
+  public class MonumentEvent : DomeEvent
+  {
+    [JsonProperty(PropertyName = "Dynamic PVP Zone Settings", Order = 45)]
+    public SphereCubeAutoGeoDynamicZone DynamicZone { get; set; } = new();
+
+    [JsonProperty(PropertyName = "Zone ID", Order = 46)]
+    public string ZoneId { get; set; } = string.Empty;
+
+    [JsonProperty(PropertyName = "Transform Position", Order = 47)]
     public Vector3 TransformPosition { get; set; }
 
     public override BaseDynamicZone GetDynamicZone() => DynamicZone;
@@ -4402,7 +4511,7 @@ public class DynamicPVP : RustPlugin
       }
       zoneSettings.Add("rotation");
       var transformedRotation = Rotation;
-      if (transform && !FixedRotation)
+      if (transform is not null && transform && !FixedRotation)
       {
         transformedRotation += transform.rotation.eulerAngles.y;
       }
@@ -4552,6 +4661,9 @@ public class DynamicPVP : RustPlugin
       }
     }
 
+    // 4.9.0 dome settings migration check
+    DomeEvent.Migrate();
+
     _configData.Version = Version;
   }
 
@@ -4607,17 +4719,15 @@ public class DynamicPVP : RustPlugin
   {
     try
     {
-      _storedData =
-        Interface.Oxide.DataFileSystem.ReadObject<StoredData>(Name);
+      _storedData = Interface.Oxide.DataFileSystem.ReadObject<StoredData>(Name);
+      // 4.9.0 dome settings migration check
+      DomeEvent.Migrate();
     }
     catch
     {
       _storedData = null;
     }
-    if (_storedData == null)
-    {
-      ClearData();
-    }
+    if (null == _storedData) ClearData();
   }
 
   private void ClearData()
