@@ -24,13 +24,10 @@ public class PlayerBasePvpZones : RustPlugin
   private const string PermissionToggle = "playerbasepvpzones.toggle";
 
   // tracks which players have zones enabled (stored by OwnerID)
-  private HashSet<ulong> _playersWithZonesEnabled = new HashSet<ulong>();
+  private HashSet<ulong> _playersWithZonesEnabled = new();
 
   // tracks pending zone enable/disable requests by player ID
-  private Dictionary<ulong, Timer> _toggleTimers = new Dictionary<ulong, Timer>();
-
-  // data file name for persistence
-  private const string DataFileName = "PlayerBasePvpZones_EnabledPlayers";
+  private Dictionary<ulong, Timer> _toggleTimers = new();
 
   // user-defined plugin config data
   private ConfigData _configData = new();
@@ -90,17 +87,15 @@ public class PlayerBasePvpZones : RustPlugin
   #region Core Methods
 
   // Collect zone IDs for a player before deletion
-  private List<string> CollectPlayerZoneIds(ulong playerID)
+  private void CollectPlayerZoneIDs(ulong playerID, List<string> zoneIDs)
   {
-    var zoneIds = Pool.Get<List<string>>();
-
     // Collect building zone IDs
     foreach (var (tcID, buildingData) in _buildingData)
     {
       if (buildingData.ToolCupboard &&
           buildingData.ToolCupboard.OwnerID == playerID)
       {
-        zoneIds.Add(GetZoneID(tcID));
+        zoneIDs.Add(GetZoneID(tcID));
       }
     }
 
@@ -110,7 +105,7 @@ public class PlayerBasePvpZones : RustPlugin
       if (shelterData.LegacyShelter &&
           GetOwnerID(shelterData.LegacyShelter) == playerID)
       {
-        zoneIds.Add(GetZoneID(shelterID));
+        zoneIDs.Add(GetZoneID(shelterID));
       }
     }
 
@@ -120,11 +115,9 @@ public class PlayerBasePvpZones : RustPlugin
       if (tugboatData.Tugboat &&
           tugboatData.Tugboat.authorizedPlayers.Contains(playerID))
       {
-        zoneIds.Add(GetZoneID(tugboatID));
+        zoneIDs.Add(GetZoneID(tugboatID));
       }
     }
-
-    return zoneIds;
   }
 
   // generate a current 3D bounding box around a base
@@ -1084,23 +1077,49 @@ public class PlayerBasePvpZones : RustPlugin
   {
     try
     {
-      _playersWithZonesEnabled = Interface.Oxide.DataFileSystem.ReadObject<HashSet<ulong>>(DataFileName);
-      if (_playersWithZonesEnabled == null)
-      {
-        _playersWithZonesEnabled = new HashSet<ulong>();
-      }
-      Puts($"Loaded {_playersWithZonesEnabled.Count} player(s) with zones enabled");
+      _playersWithZonesEnabled =
+        Interface.Oxide.DataFileSystem.ReadObject<HashSet<ulong>>(Name);
     }
-    catch
+    catch (Exception ex)
+    {
+      PrintError($"Exception while loading data file:\n{ex}");
+      _playersWithZonesEnabled = null;
+    }
+
+    if (null == _playersWithZonesEnabled)
     {
       _playersWithZonesEnabled = new HashSet<ulong>();
+      SaveData(false);
       Puts("Created new enabled players data file");
+    }
+    else
+    {
+      Puts($"Loaded {_playersWithZonesEnabled.Count} player(s) with zones enabled");
     }
   }
 
-  private void SaveData()
+  private Timer _saveDataTimer;
+  private static bool TimerValid(Timer t) => false == t?.Destroyed;
+
+  // write data to file
+  // if delay is true, save will be delayed by 5 seconds, and all redundant
+  //  requests during that time will be ignored
+  // if delay is false, save will occur immediately
+  private void SaveData(bool delay = true)
   {
-    Interface.Oxide.DataFileSystem.WriteObject(DataFileName, _playersWithZonesEnabled);
+    if (delay)
+    {
+      // abort if timer is already running
+      if (TimerValid(_saveDataTimer)) return;
+      // schedule a save 5 seconds from now
+      _saveDataTimer = timer.Once(5.0f, () => SaveData(false));
+      return;
+    }
+    // else save immediately
+    Interface.Oxide.DataFileSystem.WriteObject(Name, _playersWithZonesEnabled);
+    // ...and also clean up save timer
+    _saveDataTimer.Destroy();
+    _saveDataTimer = null;
   }
 
   private void Init()
@@ -1142,12 +1161,14 @@ public class PlayerBasePvpZones : RustPlugin
   }
 
   [ChatCommand("pbpz")]
-  private void CommandTogglePvpZones(BasePlayer player, string command, string[] args)
+  private void CommandTogglePvpZones(
+    BasePlayer player, string command, string[] args)
   {
     // Check permission
     if (!permission.UserHasPermission(player.UserIDString, PermissionToggle))
     {
-      SendReply(player, lang.GetMessage("NoPermission", this, player.UserIDString));
+      SendReply(
+        player, lang.GetMessage("NoPermission", this, player.UserIDString));
       return;
     }
 
@@ -1156,29 +1177,31 @@ public class PlayerBasePvpZones : RustPlugin
     // Check if player already has a pending toggle
     if (_toggleTimers.ContainsKey(playerID))
     {
-      SendReply(player, lang.GetMessage("ToggleAlreadyPending", this, player.UserIDString));
+      SendReply(player,
+        lang.GetMessage("ToggleAlreadyPending", this, player.UserIDString));
       return;
     }
 
     // Determine if enabling or disabling
-    bool isEnabling = !_playersWithZonesEnabled.Contains(playerID);
-    float delay = isEnabling ? _configData.ToggleEnableDelaySeconds : _configData.ToggleDisableDelaySeconds;
+    var enable = !_playersWithZonesEnabled.Contains(playerID);
+    var delay = enable ?
+      _configData.ToggleEnableDelaySeconds :
+      _configData.ToggleDisableDelaySeconds;
 
     // Schedule the toggle
-    _toggleTimers.Add(playerID, timer.Once(delay, () => ExecuteToggle(playerID, isEnabling)));
+    _toggleTimers.Add(
+      playerID, timer.Once(delay, () => TogglePlayerZones(playerID, enable)));
 
     // Notify the player
-    if (isEnabling)
+    if (enable)
     {
       var message = lang.GetMessage("ToggleEnableStarted", this, player.UserIDString);
       SendReply(player, string.Format(message, delay));
 
       // Broadcast to server if configured
-      if (_configData.ToggleEnableBroadcast)
-      {
-        var broadcastMsg = lang.GetMessage("ToggleEnableBroadcast", this);
-        Server.Broadcast(string.Format(broadcastMsg, player.displayName, delay));
-      }
+      if (!_configData.ToggleEnableBroadcast) return;
+      var broadcastMsg = lang.GetMessage("ToggleEnableBroadcast", this);
+      Server.Broadcast(string.Format(broadcastMsg, player.displayName, delay));
     }
     else
     {
@@ -1186,32 +1209,31 @@ public class PlayerBasePvpZones : RustPlugin
       SendReply(player, string.Format(message, delay));
 
       // Broadcast to server if configured
-      if (_configData.ToggleDisableBroadcast)
-      {
-        var broadcastMsg = lang.GetMessage("ToggleDisableBroadcast", this);
-        Server.Broadcast(string.Format(broadcastMsg, player.displayName, delay));
-      }
+      if (!_configData.ToggleDisableBroadcast) return;
+      var broadcastMsg = lang.GetMessage("ToggleDisableBroadcast", this);
+      Server.Broadcast(string.Format(broadcastMsg, player.displayName, delay));
     }
   }
 
-  private void ExecuteToggle(ulong playerID, bool isEnabling)
+  private void TogglePlayerZones(ulong playerID, bool enable)
   {
     // Remove timer
-    _toggleTimers.Remove(playerID);
+    CancelDictionaryTimer(ref _toggleTimers, playerID);
 
     // Get player for notifications
     var player = BasePlayer.FindByID(playerID);
     var playerName = player?.displayName ?? "Unknown Player";
 
-    if (isEnabling)
+    if (enable)
     {
       // Enable zones for this player
       _playersWithZonesEnabled.Add(playerID);
       SaveData();
 
-      if (player != null)
+      if (player)
       {
-        SendReply(player, lang.GetMessage("ZonesEnabled", this, player.UserIDString));
+        SendReply(
+          player, lang.GetMessage("ZonesEnabled", this, player.UserIDString));
       }
 
       // Broadcast completion if configured
@@ -1230,14 +1252,15 @@ public class PlayerBasePvpZones : RustPlugin
     else
     {
       // Disable zones for this player
-      var removedZoneIds = CollectPlayerZoneIds(playerID);
-
+      var removedZoneIDs = Pool.Get<List<string>>();
+      CollectPlayerZoneIDs(playerID, removedZoneIDs);
       _playersWithZonesEnabled.Remove(playerID);
       SaveData();
 
-      if (player != null)
+      if (player)
       {
-        SendReply(player, lang.GetMessage("ZonesDisabled", this, player.UserIDString));
+        SendReply(
+          player, lang.GetMessage("ZonesDisabled", this, player.UserIDString));
       }
 
       // Broadcast completion if configured
@@ -1249,11 +1272,12 @@ public class PlayerBasePvpZones : RustPlugin
 
       // Remove all zones owned by this player
       RemovePlayerZones(playerID);
+
       // Call hook to notify other plugins (like ZoneMarkerSync)
-      Interface.CallHook("OnPlayerBasePvpZonesDisabled", playerID, removedZoneIds);
+      Interface.CallHook("OnPlayerBasePvpZonesDisabled", playerID, removedZoneIDs);
 
       // Free the list
-      Pool.FreeUnmanaged(ref removedZoneIds);
+      Pool.FreeUnmanaged(ref removedZoneIDs);
     }
   }
 
@@ -1285,8 +1309,8 @@ public class PlayerBasePvpZones : RustPlugin
 
   private void Unload()
   {
-    // Save enabled players data
-    SaveData();
+    // if delayed save pending, force it now
+    if (TimerValid(_saveDataTimer)) SaveData(false);
 
     if (null != _createDataCoroutine)
     {
@@ -1294,18 +1318,9 @@ public class PlayerBasePvpZones : RustPlugin
       _createDataCoroutine = null;
     }
 
-    // Clean up toggle timers
-    if (_toggleTimers.Count > 0)
-    {
-      Puts($"Unload():  Destroying {_toggleTimers.Count} toggle timer(s)...");
-      foreach (var toggleTimer in _toggleTimers.Values)
-      {
-        toggleTimer?.Destroy();
-      }
-      _toggleTimers.Clear();
-    }
-
     Puts("Unload(): Cleaning up...");
+    // Clean up toggle timers
+    DestroyTimerDictionary(ref _toggleTimers, "toggle");
     // cleanup base zones
     var bulkDeleteList = Pool.Get<List<string>>();
     if (_buildingData.Count > 0)
