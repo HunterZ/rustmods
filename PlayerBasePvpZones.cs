@@ -8,7 +8,6 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
-using System.Linq;
 using UnityEngine;
 
 namespace Oxide.Plugins;
@@ -119,8 +118,7 @@ public class PlayerBasePvpZones : RustPlugin
     foreach (var (tugboatID, tugboatData) in _tugboatData)
     {
       if (tugboatData.Tugboat &&
-          tugboatData.Tugboat.authorizedPlayers.Exists(
-            x => x.userid == playerID))
+          tugboatData.Tugboat.authorizedPlayers.Contains(playerID))
       {
         zoneIds.Add(GetZoneID(tugboatID));
       }
@@ -638,14 +636,12 @@ public class PlayerBasePvpZones : RustPlugin
   private void CreateTugboatData(VehiclePrivilege tugboat)
   {
     // Check if any authorized player has zones enabled
-    bool hasEnabledPlayer = false;
+    var hasEnabledPlayer = false;
     foreach (var auth in tugboat.authorizedPlayers)
     {
-      if (IsPlayerZonesEnabled(auth.userid))
-      {
-        hasEnabledPlayer = true;
-        break;
-      }
+      if (!IsPlayerZonesEnabled(auth)) continue;
+      hasEnabledPlayer = true;
+      break;
     }
     if (!hasEnabledPlayer) return;
 
@@ -852,14 +848,12 @@ public class PlayerBasePvpZones : RustPlugin
       }
 
       // Check if any authorized player has zones enabled
-      bool hasEnabledPlayer = false;
+      var hasEnabledPlayer = false;
       foreach (var auth in tugboat.authorizedPlayers)
       {
-        if (IsPlayerZonesEnabled(auth.userid))
-        {
-          hasEnabledPlayer = true;
-          break;
-        }
+        if (!IsPlayerZonesEnabled(auth)) continue;
+        hasEnabledPlayer = true;
+        break;
       }
       if (!hasEnabledPlayer) continue;
 
@@ -916,10 +910,7 @@ public class PlayerBasePvpZones : RustPlugin
       }
 
       // Check if this player is authorized on the tugboat
-      if (!tugboat.authorizedPlayers.Exists(x => x.userid == playerID))
-      {
-        continue;
-      }
+      if (!tugboat.authorizedPlayers.Contains(playerID)) continue;
 
       CreateTugboatData(tugboat);
       count++;
@@ -986,7 +977,7 @@ public class PlayerBasePvpZones : RustPlugin
     foreach (var (tugboatID, tugboatData) in _tugboatData)
     {
       if (tugboatData.Tugboat &&
-          tugboatData.Tugboat.authorizedPlayers.Exists(x => x.userid == playerID))
+          tugboatData.Tugboat.authorizedPlayers.Contains(playerID))
       {
         tugboatIDsToRemove.Add(tugboatID);
       }
@@ -1016,49 +1007,27 @@ public class PlayerBasePvpZones : RustPlugin
   {
     var toRemove = Pool.Get<List<T>>();
 
-    foreach (var (key, timer) in timerDict)
+    foreach (var key in timerDict.Keys)
     {
       // Check if this is a building/shelter/tugboat owned by the player
-      if (key is NetworkableId netID)
-      {
-        bool shouldRemove = false;
+      if (key is not NetworkableId netID) continue;
 
+      if (
         // Check building data
-        if (_buildingData.TryGetValue(netID, out var buildingData))
-        {
-          if (buildingData.ToolCupboard && buildingData.ToolCupboard.OwnerID == playerID)
-          {
-            shouldRemove = true;
-          }
-        }
-
+        (_buildingData.TryGetValue(netID, out var buildingData) &&
+         buildingData.ToolCupboard &&
+         buildingData.ToolCupboard.OwnerID == playerID) ||
         // Check shelter data
-        if (_shelterData.TryGetValue(netID, out var shelterData))
-        {
-          if (shelterData.LegacyShelter)
-          {
-            var ownerID = GetOwnerID(shelterData.LegacyShelter);
-            if (ownerID == playerID)
-            {
-              shouldRemove = true;
-            }
-          }
-        }
-
+        (_shelterData.TryGetValue(netID, out var shelterData) &&
+         shelterData.LegacyShelter &&
+         GetOwnerID(shelterData.LegacyShelter) == playerID) ||
         // Check tugboat data
-        if (_tugboatData.TryGetValue(netID, out var tugboatData))
-        {
-          if (tugboatData.Tugboat &&
-              tugboatData.Tugboat.authorizedPlayers.Exists(x => x.userid == playerID))
-          {
-            shouldRemove = true;
-          }
-        }
-
-        if (shouldRemove)
-        {
-          toRemove.Add(key);
-        }
+        _tugboatData.TryGetValue(netID, out var tugboatData) &&
+        tugboatData.Tugboat &&
+        tugboatData.Tugboat.authorizedPlayers.Contains(playerID)
+      )
+      {
+        toRemove.Add(key);
       }
     }
 
@@ -1329,7 +1298,7 @@ public class PlayerBasePvpZones : RustPlugin
     if (_toggleTimers.Count > 0)
     {
       Puts($"Unload():  Destroying {_toggleTimers.Count} toggle timer(s)...");
-      foreach (var (_, toggleTimer) in _toggleTimers)
+      foreach (var toggleTimer in _toggleTimers.Values)
       {
         toggleTimer?.Destroy();
       }
@@ -1375,6 +1344,7 @@ public class PlayerBasePvpZones : RustPlugin
       Puts($"Unload():  Destroying {_playerZones.Count} player-in-zones records...");
       foreach (var playerZoneData in _playerZones)
       {
+        // this dance is required to avoid modifying the loop variable
         var zones = playerZoneData.Value;
         if (null == zones) continue;
         Pool.FreeUnmanaged(ref zones);
@@ -2043,6 +2013,7 @@ public class PlayerBasePvpZones : RustPlugin
       if (null == SphereList) return;
       foreach (var sphere in SphereList)
       {
+        if (!IsValid(sphere)) continue;
         sphere.ServerPosition = Vector3.zero;
         sphere.SetParent(tugboatParent);
         // match networking with parent (avoids need to force global tugboats)
@@ -2069,6 +2040,7 @@ public class PlayerBasePvpZones : RustPlugin
       // un-tether any spheres from the tugboat
       foreach (var sphere in SphereList)
       {
+        if (!IsValid(sphere)) continue;
         sphere.SetParent(null, true, true);
         sphere.ServerPosition = Location;
         sphere.LerpRadiusTo(Radius * 2.0f, Radius / 2.0f);
