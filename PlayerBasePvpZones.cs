@@ -914,7 +914,7 @@ public class PlayerBasePvpZones : RustPlugin
       {
         timerData.Item1.Destroy();
       }
-      _buildingDeleteTimers.Clear();
+      _pvpDelayTimers.Clear();
     }
     Puts("Unload(): ...Cleanup complete.");
   }
@@ -1567,6 +1567,7 @@ public class PlayerBasePvpZones : RustPlugin
       if (null == SphereList) return;
       foreach (var sphere in SphereList)
       {
+        if (!IsValid(sphere)) continue;
         sphere.ServerPosition = Vector3.zero;
         sphere.SetParent(tugboatParent);
         // match networking with parent (avoids need to force global tugboats)
@@ -1593,6 +1594,7 @@ public class PlayerBasePvpZones : RustPlugin
       // un-tether any spheres from the tugboat
       foreach (var sphere in SphereList)
       {
+        if (!IsValid(sphere)) continue;
         sphere.SetParent(null, true, true);
         sphere.ServerPosition = Location;
         sphere.LerpRadiusTo(Radius * 2.0f, Radius / 2.0f);
