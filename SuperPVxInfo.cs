@@ -63,7 +63,7 @@ public class SuperPVxInfo : RustPlugin
 
   [PluginReference] Plugin
     AbandonedBases, DynamicPVP, DangerousTreasures, PlayerBasePvpZones,
-    PopupNotifications, RaidableBases, SimpleStatus, TruePVE, ZoneManager;
+    PopupNotifications, RaidableBases, SimpleStatus, ZoneManager;
 
   private ConfigData _configData;
 
@@ -381,8 +381,10 @@ public class SuperPVxInfo : RustPlugin
 
   #region TruePVE Utilities
 
+  // use Interface.CallHook() instead of explicitly calling TruePVE, in case
+  //  other PVE plugins implement support for this
   private void TP_GetMappingsToStoredData() =>
-    TruePVE?.CallHook("GetMappingsDictionaryNoAlloc", _storedData.Mappings);
+    Interface.CallHook("GetMappingsDictionaryNoAlloc", _storedData.Mappings);
 
   #endregion TruePVE Utilities
 
