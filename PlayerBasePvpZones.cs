@@ -192,6 +192,7 @@ public class PlayerBasePvpZones : RustPlugin
   {
     // check the easy stuff first
     if (null == building ||
+        !building.HasDecayEntities() ||
         !building.HasBuildingBlocks() ||
         !building.HasBuildingPrivileges())
     {
@@ -790,16 +791,14 @@ public class PlayerBasePvpZones : RustPlugin
       Performance.report.frameRate >= _targetFps ? _fastYield : _throttleYield;
   }
 
-  // coroutine method to asynchronously create zones for all existing bases
-  // coroutine method to asynchronously create zones for enabled players only
+  // coroutine to asynchronously perform bulk creation of appropriate base zones
   private IEnumerator CreateData()
   {
     var startTime = DateTime.UtcNow;
 
     Puts("CreateData(): Starting zone creation...");
 
-    // create zones for all existing player-owned bases
-    // create zones for enabled players' bases
+    // create zones for all existing bases owned by PVP players
     foreach (var building in BuildingManager.server.buildingDictionary.Values)
     {
       var toolCupboard = GetToolCupboard(building);
@@ -811,8 +810,7 @@ public class PlayerBasePvpZones : RustPlugin
     }
     Puts($"CreateData():  Created {_buildingData.Count} building zones...");
 
-    // create zones for all existing player-owned legacy shelters
-    // create zones for enabled players' shelters
+    // create zones for all existing legacy shelters owned by PVP players
     foreach (var (playerID, shelterList) in LegacyShelter.SheltersPerPlayer)
     {
       if (!IsPlayerZonesEnabled(playerID)) continue;
@@ -831,8 +829,7 @@ public class PlayerBasePvpZones : RustPlugin
     }
     Puts($"CreateData():  Created {_shelterData.Count} shelter zones...");
 
-    // create zones for all existing tugboats
-    // create zones for tugboats (check authorization)
+    // create zones for all existing tugboats owned by PVP players
     foreach (var serverEntity in BaseNetworkable.serverEntities)
     {
       if (serverEntity is not VehiclePrivilege tugboat || !IsValid(tugboat))
@@ -917,6 +914,7 @@ public class PlayerBasePvpZones : RustPlugin
   private void RemovePlayerZones(ulong playerID)
   {
     Puts($"RemovePlayerZones(): Removing zones for player {playerID}...");
+
     var bulkDeleteList = Pool.Get<List<string>>();
     var count = 0;
 
@@ -924,7 +922,8 @@ public class PlayerBasePvpZones : RustPlugin
     var buildingIDsToRemove = Pool.Get<List<NetworkableId>>();
     foreach (var (tcID, buildingData) in _buildingData)
     {
-      if (buildingData.ToolCupboard && buildingData.ToolCupboard.OwnerID == playerID)
+      if (buildingData.ToolCupboard &&
+          buildingData.ToolCupboard.OwnerID == playerID)
       {
         buildingIDsToRemove.Add(tcID);
       }
@@ -945,13 +944,10 @@ public class PlayerBasePvpZones : RustPlugin
     var shelterIDsToRemove = Pool.Get<List<NetworkableId>>();
     foreach (var (shelterID, shelterData) in _shelterData)
     {
-      if (shelterData.LegacyShelter)
+      if (shelterData.LegacyShelter &&
+          GetOwnerID(shelterData.LegacyShelter) == playerID)
       {
-        var ownerID = GetOwnerID(shelterData.LegacyShelter);
-        if (ownerID == playerID)
-        {
-          shelterIDsToRemove.Add(shelterID);
-        }
+        shelterIDsToRemove.Add(shelterID);
       }
     }
     foreach (var shelterID in shelterIDsToRemove)
@@ -988,6 +984,7 @@ public class PlayerBasePvpZones : RustPlugin
     // Bulk delete zones
     if (bulkDeleteList.Count > 0)
     {
+      TP_RemoveMappings(bulkDeleteList);
       ZM_EraseZones(bulkDeleteList);
     }
     Pool.FreeUnmanaged(ref bulkDeleteList);
@@ -996,7 +993,8 @@ public class PlayerBasePvpZones : RustPlugin
   }
 
   // Helper method to cancel timers for a specific player
-  private void CancelPlayerTimers<T>(ulong playerID, ref Dictionary<T, Timer> timerDict)
+  private void CancelPlayerTimers<T>(
+    ulong playerID, ref Dictionary<T, Timer> timerDict)
   {
     var toRemove = Pool.Get<List<T>>();
 
@@ -1015,19 +1013,16 @@ public class PlayerBasePvpZones : RustPlugin
          shelterData.LegacyShelter &&
          GetOwnerID(shelterData.LegacyShelter) == playerID) ||
         // Check tugboat data
-        _tugboatData.TryGetValue(netID, out var tugboatData) &&
-        tugboatData.Tugboat &&
-        tugboatData.Tugboat.authorizedPlayers.Contains(playerID)
+        (_tugboatData.TryGetValue(netID, out var tugboatData) &&
+         tugboatData.Tugboat &&
+         tugboatData.Tugboat.authorizedPlayers.Contains(playerID))
       )
       {
         toRemove.Add(key);
       }
     }
 
-    foreach (var key in toRemove)
-    {
-      CancelDictionaryTimer(ref timerDict, key);
-    }
+    foreach (var key in toRemove) CancelDictionaryTimer(ref timerDict, key);
 
     Pool.FreeUnmanaged(ref toRemove);
   }
