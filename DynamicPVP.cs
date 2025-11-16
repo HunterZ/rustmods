@@ -15,7 +15,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "4.9.0", ResourceId = 2728)]
+[Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "4.9.1", ResourceId = 2728)]
 [Description("Creates temporary PvP zones on certain actions/events")]
 public class DynamicPVP : RustPlugin
 {
@@ -1399,6 +1399,39 @@ public class DynamicPVP : RustPlugin
 
   #region CargoShip Event
 
+  private bool IsLeavingHarbor(CargoShip cargoShip)
+  {
+    // abort if ship invalid, not doing approach sequence, or currently docked
+    if (
+      !cargoShip || !cargoShip.isDoingHarborApproach || cargoShip.IsShipDocked)
+    {
+      return false;
+    }
+
+    // abort with error if path object or node list is missing
+    if (null == cargoShip.harborApproachPath?.nodes)
+    {
+      PrintError($"ERROR: Cargo ship at {cargoShip.transform.position} is on harbor docking sequence, but the path data is null");
+      return false;
+    }
+
+    // scan the remaining approach path nodes to see if the docking node is
+    //  still coming up
+    for (var i = cargoShip.currentHarborApproachNode;
+         i < cargoShip.harborApproachPath.nodes.Count;
+         ++i)
+    {
+      if (cargoShip.harborApproachPath.nodes[i].maxVelocityOnApproach == 0.0f)
+      {
+        // this is the docking node, so it must still be approaching
+        return false;
+      }
+    }
+    // scanned all remaining nodes without finding the docking one, so it must
+    //  have already docked and is leaving
+    return true;
+  }
+
   // invoke appropriate hook handler for current CargoShip state
   // this is only used on startup, to (re)create events for already-existing
   //  CargoShip entities
@@ -1416,39 +1449,45 @@ public class DynamicPVP : RustPlugin
       return;
     }
 
-    if (cargoShip.IsShipDocked)
-    {
-      // docked
-      PrintDebug("Found docked cargo ship");
-      OnCargoShipHarborArrived(cargoShip);
-    }
-    else if (cargoShip.HasFlag(CargoShip.Egressing))
+    if (cargoShip.HasFlag(CargoShip.Egressing))
     {
       // leaving the map
-      PrintDebug("Found egressing cargo ship");
+      PrintDebug("Found cargo ship in egress from the map");
       OnCargoShipEgress(cargoShip);
     }
-    else if (
-      cargoShip.isDoingHarborApproach && cargoShip.currentHarborApproachNode <
-      cargoShip.harborApproachPath.nodes.Count / 2)
+    else if (cargoShip.isDoingHarborApproach)
     {
-      // approaching a Harbor
-      PrintDebug("Found cargo ship approaching Harbor");
-      OnCargoShipHarborApproach(cargoShip, null);
+      // approaching, docked at, or leaving a Harbor
+      if (cargoShip.IsShipDocked)
+      {
+        // docked at a Harbor
+        PrintDebug("Found cargo ship docked at a Harbor");
+        OnCargoShipHarborArrived(cargoShip);
+      }
+      else if (IsLeavingHarbor(cargoShip))
+      {
+        // leaving a Harbor
+        PrintDebug("Found cargo ship leaving a Harbor");
+        OnCargoShipHarborLeave(cargoShip);
+      }
+      else
+      {
+        // approaching a Harbor
+        PrintDebug("Found cargo ship approaching a Harbor");
+        OnCargoShipHarborApproach(cargoShip);
+      }
     }
     else if (cargoShip.HasFlag(CargoShip.HasDocked))
     {
-      // not in any other state, but has previously docked, so this is
-      //  equivalent to having most recently received an
-      //  OnCargoShipHarborLeave hook call
-      PrintDebug("Found cargo ship leaving Harbor");
+      // not doing anything of interest, but has previously docked, so treat as
+      //  leaving harbor since that was the last state change of interest
+      PrintDebug("Found cargo ship that has previously docked at a Harbor");
       OnCargoShipHarborLeave(cargoShip);
     }
     else
     {
-      // not docked, not egressing, not approaching, has never docked
-      // this implies it has most recently spawned
-      PrintDebug("Found spawned cargo ship");
+      // not doing anything of interest, so treat as a normal spawn
+      PrintDebug("Found cargo ship that has not approached a Harbor");
       OnEntitySpawned(cargoShip);
     }
   }
@@ -1550,20 +1589,21 @@ public class DynamicPVP : RustPlugin
     HandleDeleteDynamicZone(cargoShip.net.ID.ToString());
   }
 
-  private void OnCargoShipEgress(CargoShip cargoShip) => HandleCargoState(
-    cargoShip, _configData.GeneralEvents.CargoShip.EgressState);
+  private void OnCargoShipEgress(CargoShip cargoShip) =>
+    HandleCargoState(
+      cargoShip, _configData.GeneralEvents.CargoShip.EgressState);
 
-  private void OnCargoShipHarborApproach(
-    CargoShip cargoShip, CargoNotifier _) => HandleCargoState(
-    cargoShip, _configData.GeneralEvents.CargoShip.ApproachState);
+  private void OnCargoShipHarborApproach(CargoShip cargoShip) =>
+    HandleCargoState(
+      cargoShip, _configData.GeneralEvents.CargoShip.ApproachState);
 
-  private void OnCargoShipHarborArrived(
-    CargoShip cargoShip) => HandleCargoState(
-    cargoShip, _configData.GeneralEvents.CargoShip.DockState);
+  private void OnCargoShipHarborArrived(CargoShip cargoShip) =>
+    HandleCargoState(
+      cargoShip, _configData.GeneralEvents.CargoShip.DockState);
 
-  private void OnCargoShipHarborLeave(
-    CargoShip cargoShip) => HandleCargoState(
-    cargoShip, _configData.GeneralEvents.CargoShip.DepartState);
+  private void OnCargoShipHarborLeave(CargoShip cargoShip) =>
+    HandleCargoState(
+      cargoShip, _configData.GeneralEvents.CargoShip.DepartState);
 
   #endregion CargoShip Event
 
