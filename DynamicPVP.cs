@@ -1203,8 +1203,8 @@ public class DynamicPVP : RustPlugin
     var zoneId = supplyDrop.net.ID.ToString();
     if (_activeDynamicZones.TryGetValue(zoneId, out var eventName))
     {
-      // event was already created on spawn; parent the event to the entity,
-      //  so that they move together
+      // event was already created on spawn; parent the event to the entity, so
+      //  that they move together
       // NOTES:
       // - don't delete on failure, because leaving the existing zone on the
       //    ground is better than deleting it
@@ -2721,6 +2721,15 @@ public class DynamicPVP : RustPlugin
     {
       PrintDebug($"CreateDynamicZone(): ERROR: Invalid location, zone creation failed for eventName={eventName}.", DebugLevel.Error);
       return false;
+    }
+    // protect against immediate creation of a zone if one already exists with
+    //  given zone ID (don't want to block delays because they may be
+    //  orchestrated?)
+    if (!delay && _activeDynamicZones.ContainsKey(zoneId))
+    {
+      PrintDebug($"CreateDynamicZone(): WARNING: Cannot create zone for event {eventName} because requested zone ID {zoneId} already exists", DebugLevel.Warning);
+      // return true to indicate that the zone exists
+      return true;
     }
     var baseEvent = GetBaseEvent(eventName);
     if (baseEvent == null)
