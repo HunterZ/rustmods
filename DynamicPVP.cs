@@ -15,7 +15,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "4.9.1", ResourceId = 2728)]
+[Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "4.9.2", ResourceId = 2728)]
 [Description("Creates temporary PvP zones on certain actions/events")]
 public class DynamicPVP : RustPlugin
 {
@@ -266,10 +266,14 @@ public class DynamicPVP : RustPlugin
     {
       Subscribe(nameof(OnEntityDeath));
     }
+    if (_configData.GeneralEvents.SupplySignal.Enabled)
+    {
+      Subscribe(nameof(OnCargoPlaneSignaled));
+    }
     if (_configData.GeneralEvents.SupplySignal.Enabled ||
         _configData.GeneralEvents.TimedSupply.Enabled)
     {
-      Subscribe(nameof(OnCargoPlaneSignaled));
+      Subscribe(nameof(OnSupplyDropDropped));
       // this is now subscribed regardless of start on spawn-vs-landing, as we
       //  need to tether the zone to the drop on landing in both cases
       Subscribe(nameof(OnSupplyDropLanded));
@@ -402,6 +406,8 @@ public class DynamicPVP : RustPlugin
     }
     _activePluginZones.Clear();
     DomeEvent._domeEventsToCheck = null;
+
+    _activeSignaledPlanesAndDrops.Clear();
   }
 
   private void OnServerSave() =>
@@ -1165,35 +1171,56 @@ public class DynamicPVP : RustPlugin
 
   #region SupplyDrop And SupplySignal Event
 
-  // TODO: seems dodgy that Vector3 is being used as a key, because comparing
-  //  floats is fraught; consider using network ID or something instead, and
-  //  storing the location as data if needed
-  private readonly Dictionary<Vector3, Timer> _activeSupplySignals = new();
+  // stores NetIDs of active CargoPlane and SupplyDrop instances spawned by a
+  //  SupplySignal
+  private readonly HashSet<NetworkableId> _activeSignaledPlanesAndDrops = new();
 
   private void OnCargoPlaneSignaled(
-    CargoPlane cargoPlane, SupplySignal supplySignal) => NextTick(() =>
+    CargoPlane plane, SupplySignal signal) => NextTick(() =>
   {
-    if (!supplySignal || !cargoPlane)
+    if (!plane || !signal)
     {
       return;
     }
 
-    Vector3 dropPosition = cargoPlane.dropPosition;
-    if (_activeSupplySignals.ContainsKey(dropPosition))
+    // record that plane was signaled
+    var planeID = plane.net.ID;
+    if (!_activeSignaledPlanesAndDrops.Add(planeID))
     {
       return;
     }
 
-    // TODO: why is this a hard-coded 15-minute delay?
-    _activeSupplySignals.Add(dropPosition,
-      timer.Once(900f, () => _activeSupplySignals.Remove(dropPosition)));
-    PrintDebug($"A supply signal is thrown at {dropPosition}");
+    PrintDebug($"Supply Signal {signal.net.ID} spawned Cargo Plane {planeID} with drop position {plane.dropPosition}");
   });
 
-  private void OnEntitySpawned(SupplyDrop supplyDrop) => NextTick(() =>
-    OnSupplyDropEvent(supplyDrop, false));
+  private void OnSupplyDropDropped(
+    BaseEntity entity, CargoPlane plane) => NextTick(() =>
+  {
+    var supplyDrop = entity as SupplyDrop;
+    if (!supplyDrop || null == supplyDrop.net ||
+        !plane || null == plane.net)
+    {
+      return;
+    }
 
-  private void OnSupplyDropLanded(SupplyDrop supplyDrop)
+    // if plane was signaled, record drop as signaled too
+    var planeID = plane.net.ID;
+    var supplyDropID = supplyDrop.net.ID;
+    if (_activeSignaledPlanesAndDrops.Contains(planeID))
+    {
+      _activeSignaledPlanesAndDrops.Add(supplyDropID);
+      PrintDebug($"Signaled Cargo Plane {planeID} spawned Supply Drop {supplyDropID} at position {supplyDrop.transform.position}");
+    }
+    else
+    {
+      // must be a timed drop rather than a signaled one
+      PrintDebug($"Timed Cargo Plane {planeID} spawned Supply Drop {supplyDropID} at position {supplyDrop.transform.position}");
+    }
+
+    OnSupplyDropEvent(supplyDrop, false);
+  });
+
+  private void OnSupplyDropLanded(SupplyDrop supplyDrop) => NextTick(() =>
   {
     if (!supplyDrop || null == supplyDrop.net)
     {
@@ -1216,8 +1243,8 @@ public class DynamicPVP : RustPlugin
       return;
     }
 
-    NextTick(() => OnSupplyDropEvent(supplyDrop, true));
-  }
+    OnSupplyDropEvent(supplyDrop, true);
+  });
 
   private void OnLootEntity(BasePlayer _, SupplyDrop supplyDrop)
   {
@@ -1264,7 +1291,10 @@ public class DynamicPVP : RustPlugin
       return;
     }
 
-    var zoneId = supplyDrop.net.ID.ToString();
+    var supplyDropID = supplyDrop.net.ID;
+    _activeSignaledPlanesAndDrops.Remove(supplyDropID);
+
+    var zoneId = supplyDropID.ToString();
     if (!_activeDynamicZones.TryGetValue(zoneId, out var eventName))
     {
       // no active zone for this supply drop
@@ -1289,7 +1319,7 @@ public class DynamicPVP : RustPlugin
       return;
     }
 
-    //When the timer starts, don't stop the event immediately
+    // When the timer starts, don't stop the event immediately
     if (_eventTimers.ContainsKey(zoneId))
     {
       PrintDebug(
@@ -1300,6 +1330,24 @@ public class DynamicPVP : RustPlugin
     PrintDebug($"OnEntityKill(SupplyDrop): Scheduling delete of zoneId={zoneId}");
     HandleDeleteDynamicZone(zoneId);
   }
+
+  private void OnEntityKill(CargoPlane plane)
+  {
+    if (!plane || null == plane.net)
+    {
+      return;
+    }
+
+    _activeSignaledPlanesAndDrops.Remove(plane.net.ID);
+  }
+
+  private static string GetSupplyDropConfigName(string eventName) =>
+    eventName switch
+    {
+      nameof(GeneralEventType.SupplySignal) => "SupplySignal",
+      nameof(GeneralEventType.SupplyDrop) => "TimedSupply",
+      _ => $"<unknown:{eventName}>"
+    };
 
   private static string GetSupplyDropStateName(bool isLanded) =>
     isLanded ? "Landed" : "Spawned";
@@ -1318,81 +1366,49 @@ public class DynamicPVP : RustPlugin
       return;
     }
 
-    var supplySignal = GetSupplySignalNear(supplyDrop.transform.position);
-    if (null != supplySignal)
+    var supplyDropID = supplyDrop.net.ID;
+    var isSignaled = _activeSignaledPlanesAndDrops.Contains(supplyDropID);
+    if (isSignaled)
     {
-      PrintDebug("Supply drop is probably from supply signal");
-      if (!_configData.GeneralEvents.SupplySignal.Enabled)
-      {
-        PrintDebug("Event for supply signals disabled. Skipping event creation.");
-        return;
-      }
-
-      if (isLanded == _configData.GeneralEvents.SupplySignal.StartWhenSpawned)
-      {
-        PrintDebug($"{GetSupplyDropStateName(isLanded)} for supply signals disabled.");
-        return;
-      }
-
-      var entry = supplySignal.Value;
-      entry.Value?.Destroy();
-      _activeSupplySignals.Remove(entry.Key);
-      PrintDebug(
-        $"Removing Supply signal from active list. Active supply signals remaining: {_activeSupplySignals.Count}");
-      const string eventNameSS = nameof(GeneralEventType.SupplySignal);
-      if (!CanCreateDynamicPVP(eventNameSS, supplyDrop))
-      {
-        return;
-      }
-
-      HandleParentedEntityEvent(
-        eventNameSS, supplyDrop, parentOnCreate: isLanded);
-      return;
+      PrintDebug($"Supply drop {supplyDropID} is from supply signal");
+      HandleSupplyDropEvent(
+        _configData.GeneralEvents.SupplySignal, isLanded,
+        nameof(GeneralEventType.SupplySignal), supplyDrop);
     }
-
-    PrintDebug("Supply drop is probably NOT from supply signal");
-    if (!_configData.GeneralEvents.TimedSupply.Enabled)
+    else
     {
-      PrintDebug("Event for timed supply disabled. Skipping event creation.");
-      return;
+      PrintDebug($"Supply drop {supplyDropID} is from timed event");
+      HandleSupplyDropEvent(
+        _configData.GeneralEvents.TimedSupply, isLanded,
+        nameof(GeneralEventType.SupplyDrop), supplyDrop);
     }
-
-    if (isLanded == _configData.GeneralEvents.TimedSupply.StartWhenSpawned)
-    {
-      PrintDebug($"{GetSupplyDropStateName(isLanded)} for timed supply disabled.");
-      return;
-    }
-
-    const string eventNameSD = nameof(GeneralEventType.SupplyDrop);
-    if (!CanCreateDynamicPVP(eventNameSD, supplyDrop))
-    {
-      return;
-    }
-
-    HandleParentedEntityEvent(
-      eventNameSD, supplyDrop, parentOnCreate: isLanded);
   }
 
-  private KeyValuePair<Vector3, Timer>? GetSupplySignalNear(Vector3 position)
+  private void HandleSupplyDropEvent(
+    SupplyDropEvent eventConfig, bool isLanded, string eventName,
+    SupplyDrop supplyDrop)
   {
-    PrintDebug($"Checking {_activeSupplySignals.Count} active supply signals");
-    if (_activeSupplySignals.Count <= 0)
+    if (!eventConfig.Enabled)
     {
-      PrintDebug("No active signals, must be from a timed event cargo plane");
-      return null;
+      PrintDebug($"Skipping event creation because supply drop event type is disabled: {GetSupplyDropConfigName(eventName)}");
+      return;
     }
 
-    foreach (var entry in _activeSupplySignals)
+    // abort if:
+    // - landed but configured to start on spawn, or
+    // - not landed but configured to start on landing
+    if (isLanded == eventConfig.StartWhenSpawned)
     {
-      var distance = Vector3Ex.Distance2D(entry.Key, position);
-      PrintDebug($"Found a supply signal at {entry.Key} located {distance}m away.");
-      if (distance > _configData.Global.CompareRadius) continue;
-      PrintDebug("Found matching a supply signal.");
-      return entry;
+      PrintDebug($"Skipping event creation because supply drop event state is disabled: {GetSupplyDropStateName(isLanded)}");
+      return;
     }
 
-    PrintDebug("No matches found, probably from a timed event cargo plane");
-    return null;
+    if (!CanCreateDynamicPVP(eventName, supplyDrop))
+    {
+      return;
+    }
+
+    HandleParentedEntityEvent(eventName, supplyDrop, parentOnCreate: isLanded);
   }
 
   #endregion SupplyDrop And SupplySignal Event
