@@ -12,13 +12,22 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Player Base PvP Zones", "HunterZ", "1.3.1")]
+[Info("Player Base PvP Zones", "HunterZ", "1.4.0")]
 [Description("Maintains Zone Manager / TruePVE exclusion zones around player bases")]
 public class PlayerBasePvpZones : RustPlugin
 {
   #region Fields
 
   [PluginReference] Plugin TruePVE;
+
+  // permission for zone toggle command
+  private const string PermissionToggle = "playerbasepvpzones.toggle";
+
+  // tracks which players have zones enabled (stored by OwnerID)
+  private HashSet<ulong> _playersWithZonesEnabled = new();
+
+  // tracks pending zone enable/disable requests by player ID
+  private Dictionary<ulong, Timer> _toggleTimers = new();
 
   // user-defined plugin config data
   private ConfigData _configData = new();
@@ -76,6 +85,40 @@ public class PlayerBasePvpZones : RustPlugin
   #endregion Fields
 
   #region Core Methods
+
+  // Collect zone IDs for a player before deletion
+  private void CollectPlayerZoneIDs(ulong playerID, List<string> zoneIDs)
+  {
+    // Collect building zone IDs
+    foreach (var (tcID, buildingData) in _buildingData)
+    {
+      if (buildingData.ToolCupboard &&
+          buildingData.ToolCupboard.OwnerID == playerID)
+      {
+        zoneIDs.Add(GetZoneID(tcID));
+      }
+    }
+
+    // Collect shelter zone IDs
+    foreach (var (shelterID, shelterData) in _shelterData)
+    {
+      if (shelterData.LegacyShelter &&
+          GetOwnerID(shelterData.LegacyShelter) == playerID)
+      {
+        zoneIDs.Add(GetZoneID(shelterID));
+      }
+    }
+
+    // Collect tugboat zone IDs
+    foreach (var (tugboatID, tugboatData) in _tugboatData)
+    {
+      if (tugboatData.Tugboat &&
+          tugboatData.Tugboat.authorizedPlayers.Contains(playerID))
+      {
+        zoneIDs.Add(GetZoneID(tugboatID));
+      }
+    }
+  }
 
   // generate a current 3D bounding box around a base
   private Bounds CalculateBuildingBounds(BuildingPrivlidge toolCupboard)
@@ -149,6 +192,7 @@ public class PlayerBasePvpZones : RustPlugin
   {
     // check the easy stuff first
     if (null == building ||
+        !building.HasDecayEntities() ||
         !building.HasBuildingBlocks() ||
         !building.HasBuildingPrivileges())
     {
@@ -218,6 +262,11 @@ public class PlayerBasePvpZones : RustPlugin
     !baseNetworkable.IsDestroyed &&
     null != baseNetworkable.net &&
     baseNetworkable.transform;
+
+  private bool IsPlayerZonesEnabled(ulong playerID)
+  {
+    return _playersWithZonesEnabled.Contains(playerID);
+  }
 
   private void NotifyOwnerAbort(ulong ownerID)
   {
@@ -397,6 +446,9 @@ public class PlayerBasePvpZones : RustPlugin
   //  and/or notifications per plugin configuration
   private void ScheduleCreateBuildingData(BuildingPrivlidge toolCupboard)
   {
+    // Check if this player has zones enabled
+    if (!IsPlayerZonesEnabled(toolCupboard.OwnerID)) return;
+
     var toolCupboardID = GetNetworkableID(toolCupboard);
 
     // abort if building is already known, or if any timers are already running
@@ -516,6 +568,12 @@ public class PlayerBasePvpZones : RustPlugin
   //  and/or notifications per plugin configuration
   private void ScheduleCreateShelterData(EntityPrivilege legacyShelter)
   {
+    var ownerID = GetOwnerID(legacyShelter);
+    if (null == ownerID) return;
+
+    // Check if this player has zones enabled
+    if (!IsPlayerZonesEnabled((ulong)ownerID)) return;
+
     var legacyShelterID = GetNetworkableID(legacyShelter);
 
     // abort if shelter is already known, or if any timers are already running
@@ -532,9 +590,7 @@ public class PlayerBasePvpZones : RustPlugin
       () => CreateShelterData(legacyShelter)));
 
     // notify players
-    if (!_configData.CreateNotify) return;
-    var ownerID = GetOwnerID(legacyShelter);
-    if (null != ownerID) NotifyOwnerCreate((ulong)ownerID);
+    if (_configData.CreateNotify) NotifyOwnerCreate((ulong)ownerID);
   }
 
   // schedule a delayed shelter deletion
@@ -573,6 +629,16 @@ public class PlayerBasePvpZones : RustPlugin
   // create a new tugboat record + zone for given tugboat
   private void CreateTugboatData(VehiclePrivilege tugboat)
   {
+    // Check if any authorized player has zones enabled
+    var hasEnabledPlayer = false;
+    foreach (var auth in tugboat.authorizedPlayers)
+    {
+      if (!IsPlayerZonesEnabled(auth)) continue;
+      hasEnabledPlayer = true;
+      break;
+    }
+    if (!hasEnabledPlayer) return;
+
     // abort if tugboat object is destroyed
     if (!IsValid(tugboat)) return;
 
@@ -725,26 +791,30 @@ public class PlayerBasePvpZones : RustPlugin
       Performance.report.frameRate >= _targetFps ? _fastYield : _throttleYield;
   }
 
-  // coroutine method to asynchronously create zones for all existing bases
+  // coroutine to asynchronously perform bulk creation of appropriate base zones
   private IEnumerator CreateData()
   {
     var startTime = DateTime.UtcNow;
 
     Puts("CreateData(): Starting zone creation...");
 
-    // create zones for all existing player-owned bases
+    // create zones for all existing bases owned by PVP players
     foreach (var building in BuildingManager.server.buildingDictionary.Values)
     {
       var toolCupboard = GetToolCupboard(building);
       if (!IsValid(toolCupboard) || !IsPlayerOwned(toolCupboard)) continue;
+      if (!IsPlayerZonesEnabled(toolCupboard.OwnerID)) continue;
+
       CreateBuildingData(toolCupboard);
       yield return DynamicYield();
     }
     Puts($"CreateData():  Created {_buildingData.Count} building zones...");
 
-    // create zones for all existing player-owned legacy shelters
-    foreach (var shelterList in LegacyShelter.SheltersPerPlayer.Values)
+    // create zones for all existing legacy shelters owned by PVP players
+    foreach (var (playerID, shelterList) in LegacyShelter.SheltersPerPlayer)
     {
+      if (!IsPlayerZonesEnabled(playerID)) continue;
+
       foreach (var shelter in shelterList)
       {
         if (!IsValid(shelter) ||
@@ -759,13 +829,24 @@ public class PlayerBasePvpZones : RustPlugin
     }
     Puts($"CreateData():  Created {_shelterData.Count} shelter zones...");
 
-    // create zones for all existing tugboats
+    // create zones for all existing tugboats owned by PVP players
     foreach (var serverEntity in BaseNetworkable.serverEntities)
     {
       if (serverEntity is not VehiclePrivilege tugboat || !IsValid(tugboat))
       {
         continue;
       }
+
+      // Check if any authorized player has zones enabled
+      var hasEnabledPlayer = false;
+      foreach (var auth in tugboat.authorizedPlayers)
+      {
+        if (!IsPlayerZonesEnabled(auth)) continue;
+        hasEnabledPlayer = true;
+        break;
+      }
+      if (!hasEnabledPlayer) continue;
+
       CreateTugboatData(tugboat);
       yield return DynamicYield();
     }
@@ -774,6 +855,176 @@ public class PlayerBasePvpZones : RustPlugin
     Puts($"CreateData(): ...Startup completed in {(DateTime.UtcNow - startTime).TotalSeconds} seconds.");
 
     _createDataCoroutine = null;
+  }
+
+  // Method to create zones for a specific player
+  private int CreatePlayerZones(ulong playerID)
+  {
+    Puts($"CreatePlayerZones(): Creating zones for player {playerID}...");
+    var count = 0;
+
+    // Create building zones
+    foreach (var building in BuildingManager.server.buildingDictionary.Values)
+    {
+      var toolCupboard = GetToolCupboard(building);
+      if (!IsValid(toolCupboard) || !IsPlayerOwned(toolCupboard)) continue;
+      if (toolCupboard.OwnerID != playerID) continue;
+
+      CreateBuildingData(toolCupboard);
+      count++;
+    }
+
+    // Create shelter zones
+    if (LegacyShelter.SheltersPerPlayer.TryGetValue(playerID, out var shelterList))
+    {
+      foreach (var shelter in shelterList)
+      {
+        if (!IsValid(shelter) ||
+            !shelter.entityPrivilege.TryGet(true, out var legacyShelter) ||
+            !IsPlayerOwned(legacyShelter))
+        {
+          continue;
+        }
+        CreateShelterData(legacyShelter);
+        count++;
+      }
+    }
+
+    // Create tugboat zones - tugboats don't have direct owner tracking
+    // so we need to check each one
+    foreach (var serverEntity in BaseNetworkable.serverEntities)
+    {
+      if (serverEntity is not VehiclePrivilege tugboat || !IsValid(tugboat))
+      {
+        continue;
+      }
+
+      // Check if this player is authorized on the tugboat
+      if (!tugboat.authorizedPlayers.Contains(playerID)) continue;
+
+      CreateTugboatData(tugboat);
+      count++;
+    }
+
+    Puts($"CreatePlayerZones(): Created {count} zone(s) for player {playerID}");
+    return count;
+  }
+
+  // Method to remove zones for a specific player
+  private void RemovePlayerZones(ulong playerID)
+  {
+    Puts($"RemovePlayerZones(): Removing zones for player {playerID}...");
+
+    var bulkDeleteList = Pool.Get<List<string>>();
+    var count = 0;
+
+    // Remove building zones
+    var buildingIDsToRemove = Pool.Get<List<NetworkableId>>();
+    foreach (var (tcID, buildingData) in _buildingData)
+    {
+      if (buildingData.ToolCupboard &&
+          buildingData.ToolCupboard.OwnerID == playerID)
+      {
+        buildingIDsToRemove.Add(tcID);
+      }
+    }
+    foreach (var tcID in buildingIDsToRemove)
+    {
+      DeleteBuildingData(tcID, bulkDeleteList);
+      count++;
+    }
+    Pool.FreeUnmanaged(ref buildingIDsToRemove);
+
+    // Cancel any pending building timers
+    CancelPlayerTimers(playerID, ref _buildingCheckTimers);
+    CancelPlayerTimers(playerID, ref _buildingCreateTimers);
+    CancelPlayerTimers(playerID, ref _buildingDeleteTimers);
+
+    // Remove shelter zones
+    var shelterIDsToRemove = Pool.Get<List<NetworkableId>>();
+    foreach (var (shelterID, shelterData) in _shelterData)
+    {
+      if (shelterData.LegacyShelter &&
+          GetOwnerID(shelterData.LegacyShelter) == playerID)
+      {
+        shelterIDsToRemove.Add(shelterID);
+      }
+    }
+    foreach (var shelterID in shelterIDsToRemove)
+    {
+      DeleteShelterData(shelterID, bulkDeleteList);
+      count++;
+    }
+    Pool.FreeUnmanaged(ref shelterIDsToRemove);
+
+    // Cancel any pending shelter timers
+    CancelPlayerTimers(playerID, ref _shelterCreateTimers);
+    CancelPlayerTimers(playerID, ref _shelterDeleteTimers);
+
+    // Remove tugboat zones - check authorization
+    var tugboatIDsToRemove = Pool.Get<List<NetworkableId>>();
+    foreach (var (tugboatID, tugboatData) in _tugboatData)
+    {
+      if (tugboatData.Tugboat &&
+          tugboatData.Tugboat.authorizedPlayers.Contains(playerID))
+      {
+        tugboatIDsToRemove.Add(tugboatID);
+      }
+    }
+    foreach (var tugboatID in tugboatIDsToRemove)
+    {
+      DeleteTugboatData(tugboatID, bulkDeleteList);
+      count++;
+    }
+    Pool.FreeUnmanaged(ref tugboatIDsToRemove);
+
+    // Cancel any pending tugboat timers
+    CancelPlayerTimers(playerID, ref _tugboatDeleteTimers);
+
+    // Bulk delete zones
+    if (bulkDeleteList.Count > 0)
+    {
+      TP_RemoveMappings(bulkDeleteList);
+      ZM_EraseZones(bulkDeleteList);
+    }
+    Pool.FreeUnmanaged(ref bulkDeleteList);
+
+    Puts($"RemovePlayerZones(): Removed {count} zone(s) for player {playerID}");
+  }
+
+  // Helper method to cancel timers for a specific player
+  private void CancelPlayerTimers<T>(
+    ulong playerID, ref Dictionary<T, Timer> timerDict)
+  {
+    var toRemove = Pool.Get<List<T>>();
+
+    foreach (var key in timerDict.Keys)
+    {
+      // Check if this is a building/shelter/tugboat owned by the player
+      if (key is not NetworkableId netID) continue;
+
+      if (
+        // Check building data
+        (_buildingData.TryGetValue(netID, out var buildingData) &&
+         buildingData.ToolCupboard &&
+         buildingData.ToolCupboard.OwnerID == playerID) ||
+        // Check shelter data
+        (_shelterData.TryGetValue(netID, out var shelterData) &&
+         shelterData.LegacyShelter &&
+         GetOwnerID(shelterData.LegacyShelter) == playerID) ||
+        // Check tugboat data
+        (_tugboatData.TryGetValue(netID, out var tugboatData) &&
+         tugboatData.Tugboat &&
+         tugboatData.Tugboat.authorizedPlayers.Contains(playerID))
+      )
+      {
+        toRemove.Add(key);
+      }
+    }
+
+    foreach (var key in toRemove) CancelDictionaryTimer(ref timerDict, key);
+
+    Pool.FreeUnmanaged(ref toRemove);
   }
 
   #endregion Core Methods
@@ -793,8 +1044,77 @@ public class PlayerBasePvpZones : RustPlugin
       ["MessageZoneEnter"] =
         "WARNING: Entering Player Base PVP Zone",
       ["MessageZoneExit"] =
-        "Leaving Player Base PVP Zone"
+        "Leaving Player Base PVP Zone",
+      ["NoPermission"] =
+        "You don't have permission to use this command.",
+      ["ZonesEnabled"] =
+        "[PBPZ] Your base PvP zones are now ENABLED.",
+      ["ZonesDisabled"] =
+        "[PBPZ] Your base PvP zones are now DISABLED.",
+      ["ToggleAlreadyPending"] =
+        "[PBPZ] You already have a zone toggle in progress. Please wait.",
+      ["ToggleEnableStarted"] =
+        "[PBPZ] Your base PvP zones will be ENABLED in {0} second(s).",
+      ["ToggleDisableStarted"] =
+        "[PBPZ] Your base PvP zones will be DISABLED in {0} second(s).",
+      ["ToggleEnableBroadcast"] =
+        "[PBPZ] {0} is enabling their base PvP zones in {1} second(s).",
+      ["ToggleDisableBroadcast"] =
+        "[PBPZ] {0} is disabling their base PvP zones in {1} second(s).",
+      ["ToggleEnableComplete"] =
+        "[PBPZ] {0}'s base PvP zones are now ACTIVE.",
+      ["ToggleDisableComplete"] =
+        "[PBPZ] {0}'s base PvP zones are now INACTIVE."
     }, this);
+  }
+
+  private void LoadData()
+  {
+    try
+    {
+      _playersWithZonesEnabled =
+        Interface.Oxide.DataFileSystem.ReadObject<HashSet<ulong>>(Name);
+    }
+    catch (Exception ex)
+    {
+      PrintError($"Exception while loading data file:\n{ex}");
+      _playersWithZonesEnabled = null;
+    }
+
+    if (null == _playersWithZonesEnabled)
+    {
+      _playersWithZonesEnabled = new HashSet<ulong>();
+      SaveData(false);
+      Puts("Created new enabled players data file");
+    }
+    else
+    {
+      Puts($"Loaded {_playersWithZonesEnabled.Count} player(s) with zones enabled");
+    }
+  }
+
+  private Timer _saveDataTimer;
+  private static bool TimerValid(Timer t) => false == t?.Destroyed;
+
+  // write data to file
+  // if delay is true, save will be delayed by 5 seconds, and all redundant
+  //  requests during that time will be ignored
+  // if delay is false, save will occur immediately
+  private void SaveData(bool delay = true)
+  {
+    if (delay)
+    {
+      // abort if timer is already running
+      if (TimerValid(_saveDataTimer)) return;
+      // schedule a save 5 seconds from now
+      _saveDataTimer = timer.Once(5.0f, () => SaveData(false));
+      return;
+    }
+    // else save immediately
+    Interface.Oxide.DataFileSystem.WriteObject(Name, _playersWithZonesEnabled);
+    // ...and also clean up save timer
+    _saveDataTimer.Destroy();
+    _saveDataTimer = null;
   }
 
   private void Init()
@@ -807,6 +1127,12 @@ public class PlayerBasePvpZones : RustPlugin
     Unsubscribe(nameof(OnEntitySpawned));
     if (null == _configData) return;
     BaseData.SphereDarkness = _configData.SphereDarkness;
+
+    // Register permission
+    permission.RegisterPermission(PermissionToggle, this);
+
+    // Load enabled players data
+    LoadData();
   }
 
   private void OnServerInitialized()
@@ -822,10 +1148,132 @@ public class PlayerBasePvpZones : RustPlugin
     // resubscribe OnEntitySpawned() hook, as it's now safe to handle this
     Subscribe(nameof(OnEntitySpawned));
 
+    // Create zones only for players who have them enabled
     NextTick(() =>
     {
       _createDataCoroutine = ServerMgr.Instance.StartCoroutine(CreateData());
     });
+  }
+
+  [ChatCommand("pbpz")]
+  private void CommandTogglePvpZones(
+    BasePlayer player, string command, string[] args)
+  {
+    // Check permission
+    if (!permission.UserHasPermission(player.UserIDString, PermissionToggle))
+    {
+      SendReply(
+        player, lang.GetMessage("NoPermission", this, player.UserIDString));
+      return;
+    }
+
+    var playerID = player.userID.Get();
+
+    // Check if player already has a pending toggle
+    if (_toggleTimers.ContainsKey(playerID))
+    {
+      SendReply(player,
+        lang.GetMessage("ToggleAlreadyPending", this, player.UserIDString));
+      return;
+    }
+
+    // Determine if enabling or disabling
+    var enable = !_playersWithZonesEnabled.Contains(playerID);
+    var delay = enable ?
+      _configData.ToggleEnableDelaySeconds :
+      _configData.ToggleDisableDelaySeconds;
+
+    // Schedule the toggle
+    _toggleTimers.Add(
+      playerID, timer.Once(delay, () => TogglePlayerZones(playerID, enable)));
+
+    // Notify the player
+    if (enable)
+    {
+      var message = lang.GetMessage("ToggleEnableStarted", this, player.UserIDString);
+      SendReply(player, string.Format(message, delay));
+
+      // Broadcast to server if configured
+      if (!_configData.ToggleEnableBroadcast) return;
+      var broadcastMsg = lang.GetMessage("ToggleEnableBroadcast", this);
+      Server.Broadcast(string.Format(broadcastMsg, player.displayName, delay));
+    }
+    else
+    {
+      var message = lang.GetMessage("ToggleDisableStarted", this, player.UserIDString);
+      SendReply(player, string.Format(message, delay));
+
+      // Broadcast to server if configured
+      if (!_configData.ToggleDisableBroadcast) return;
+      var broadcastMsg = lang.GetMessage("ToggleDisableBroadcast", this);
+      Server.Broadcast(string.Format(broadcastMsg, player.displayName, delay));
+    }
+  }
+
+  private void TogglePlayerZones(ulong playerID, bool enable)
+  {
+    // Remove timer
+    CancelDictionaryTimer(ref _toggleTimers, playerID);
+
+    // Get player for notifications
+    var player = BasePlayer.FindByID(playerID);
+    var playerName = player?.displayName ?? "Unknown Player";
+
+    if (enable)
+    {
+      // Enable zones for this player
+      _playersWithZonesEnabled.Add(playerID);
+      SaveData();
+
+      if (player)
+      {
+        SendReply(
+          player, lang.GetMessage("ZonesEnabled", this, player.UserIDString));
+      }
+
+      // Broadcast completion if configured
+      if (_configData.ToggleEnableCompleteBroadcast)
+      {
+        var broadcastMsg = lang.GetMessage("ToggleEnableComplete", this);
+        Server.Broadcast(string.Format(broadcastMsg, playerName));
+      }
+
+      // Create zones for this player's bases
+      var zoneCount = CreatePlayerZones(playerID);
+
+      // Call hook to notify other plugins (like ZoneMarkerSync)
+      Interface.CallHook("OnPlayerBasePvpZonesEnabled", playerID, zoneCount);
+    }
+    else
+    {
+      // Disable zones for this player
+      var removedZoneIDs = Pool.Get<List<string>>();
+      CollectPlayerZoneIDs(playerID, removedZoneIDs);
+      _playersWithZonesEnabled.Remove(playerID);
+      SaveData();
+
+      if (player)
+      {
+        SendReply(
+          player, lang.GetMessage("ZonesDisabled", this, player.UserIDString));
+      }
+
+      // Broadcast completion if configured
+      if (_configData.ToggleDisableCompleteBroadcast)
+      {
+        var broadcastMsg = lang.GetMessage("ToggleDisableComplete", this);
+        Server.Broadcast(string.Format(broadcastMsg, playerName));
+      }
+
+      // Remove all zones owned by this player
+      RemovePlayerZones(playerID);
+
+      // Call hook to notify other plugins (like ZoneMarkerSync)
+      Interface.CallHook("OnPlayerBasePvpZonesDisabled", playerID, removedZoneIDs);
+
+      // Free the list
+      Pool.FreeUnmanaged(ref removedZoneIDs);
+    }
   }
 
   private static void DestroyBaseDataDictionary<T>(
@@ -856,6 +1304,9 @@ public class PlayerBasePvpZones : RustPlugin
 
   private void Unload()
   {
+    // if delayed save pending, force it now
+    if (TimerValid(_saveDataTimer)) SaveData(false);
+
     if (null != _createDataCoroutine)
     {
       ServerMgr.Instance.StopCoroutine(_createDataCoroutine);
@@ -863,6 +1314,8 @@ public class PlayerBasePvpZones : RustPlugin
     }
 
     Puts("Unload(): Cleaning up...");
+    // Clean up toggle timers
+    DestroyTimerDictionary(ref _toggleTimers, "toggle");
     // cleanup base zones
     var bulkDeleteList = Pool.Get<List<string>>();
     if (_buildingData.Count > 0)
@@ -901,6 +1354,7 @@ public class PlayerBasePvpZones : RustPlugin
       Puts($"Unload():  Destroying {_playerZones.Count} player-in-zones records...");
       foreach (var playerZoneData in _playerZones)
       {
+        // this dance is required to avoid modifying the loop variable
         var zones = playerZoneData.Value;
         if (null == zones) continue;
         Pool.FreeUnmanaged(ref zones);
@@ -941,6 +1395,8 @@ public class PlayerBasePvpZones : RustPlugin
         ClampToZero(ref _configData.CreateDelaySeconds, "createDelaySeconds");
         ClampToZero(ref _configData.DeleteDelaySeconds, "deleteDelaySeconds");
         ClampToZero(ref _configData.PvpDelaySeconds, "pvpDelaySeconds");
+        ClampToZero(ref _configData.ToggleEnableDelaySeconds, "toggleEnableDelaySeconds");
+        ClampToZero(ref _configData.ToggleDisableDelaySeconds, "toggleDisableDelaySeconds");
         if (_configData.SphereDarkness > 10)
         {
           PrintWarning($"Illegal sphereDarkness={_configData.SphereDarkness} value; clamping to 10");
@@ -1631,6 +2087,24 @@ public class PlayerBasePvpZones : RustPlugin
     [JsonProperty(PropertyName = "Zone TruePVE mappings ruleset name")]
     public string RulesetName = "exclude";
 
+    [JsonProperty(PropertyName = "Toggle enable delay in seconds")]
+    public float ToggleEnableDelaySeconds = 300.0f;
+
+    [JsonProperty(PropertyName = "Toggle disable delay in seconds")]
+    public float ToggleDisableDelaySeconds = 60.0f;
+
+    [JsonProperty(PropertyName = "Broadcast when player starts enabling zones")]
+    public bool ToggleEnableBroadcast = true;
+
+    [JsonProperty(PropertyName = "Broadcast when player starts disabling zones")]
+    public bool ToggleDisableBroadcast = true;
+
+    [JsonProperty(PropertyName = "Broadcast when player zones are enabled (complete)")]
+    public bool ToggleEnableCompleteBroadcast = true;
+
+    [JsonProperty(PropertyName = "Broadcast when player zones are disabled (complete)")]
+    public bool ToggleDisableCompleteBroadcast = true;
+
     [JsonProperty(PropertyName = "Building settings")]
     public BuildingConfigData Building = new();
 
@@ -1670,6 +2144,6 @@ public class PlayerBasePvpZones : RustPlugin
     [JsonProperty(PropertyName = "Tugboat zone radius")]
     public float Radius = 32.0f;
   }
-}
 
-#endregion Internal Classes
+  #endregion Internal Classes
+}
