@@ -13,42 +13,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-/*
-Layer[0]=Default
-Layer[1]=TransparentFX
-Layer[2]=Ignore Raycast
-Layer[3]=
-Layer[4]=Water
-Layer[5]=UI
-Layer[6]=
-Layer[7]=
-Layer[8]=Deployed
-Layer[9]=Ragdoll
-Layer[10]=Invisible
-Layer[11]=AI
-Layer[12]=Player Movement
-Layer[13]=Vehicle Detailed
-Layer[14]=Game Trace
-Layer[15]=Vehicle World
-Layer[16]=World
-Layer[17]=Player (Server)
-Layer[18]=Trigger
-Layer[19]=Harvestable
-Layer[20]=Physics Projectile
-Layer[21]=Construction
-Layer[22]=Construction Socket
-Layer[23]=Terrain
-Layer[24]=Transparent
-Layer[25]=Clutter
-Layer[26]=Bush
-Layer[27]=Vehicle Large
-Layer[28]=Prevent Movement
-Layer[29]=Prevent Building
-Layer[30]=Tree
-Layer[31]=Physics Debris
-*/
-
-[Info("Player Base PvP Zones", "HunterZ", "1.3.1")]
+[Info("Player Base PvP Zones", "HunterZ", "1.4.0")]
 [Description("Maintains Zone Manager / TruePVE exclusion zones around player bases")]
 public class PlayerBasePvpZones : RustPlugin
 {
@@ -898,7 +863,7 @@ public class PlayerBasePvpZones : RustPlugin
       ["NotifyNoPerms"] =
         "You do not have permission to run any PBPZ commands",
       ["NotifyCommandToggle"] =
-        "/{0} {1} - toggle Player Base PvP Zone for nearby shelter, looked-at TC, or mounted tugboat"
+        "/{0} {1} - toggle Player Base PvP Zone for authorized nearby shelter, looked-at TC, or mounted tugboat"
     }, this);
   }
 
@@ -1356,7 +1321,7 @@ public class PlayerBasePvpZones : RustPlugin
 
       // record damage lockout
       // NOTE: state=true is specified because we've verified that a zone exists
-      SetZoneToggleData(
+      SetToggleStates(
         _persistData.BuildingToggleData, toolCupboardID, true,
         LockoutReason.Damage);
     });
@@ -1381,7 +1346,7 @@ public class PlayerBasePvpZones : RustPlugin
 
       // record damage lockout
       // NOTE: state=true is specified because we've verified that a zone exists
-      SetZoneToggleData(
+      SetToggleStates(
         _persistData.BuildingToggleData, toolCupboardID, true,
         LockoutReason.Damage);
     });
@@ -1407,7 +1372,7 @@ public class PlayerBasePvpZones : RustPlugin
 
       // record damage lockout
       // NOTE: state=true is specified because we've verified that a zone exists
-      SetZoneToggleData(
+      SetToggleStates(
         _persistData.ShelterToggleData, legacyShelterID, true,
         LockoutReason.Damage);
     });
@@ -1430,7 +1395,7 @@ public class PlayerBasePvpZones : RustPlugin
 
       // record damage lockout
       // NOTE: state=true is specified because we've verified that a zone exists
-      SetZoneToggleData(
+      SetToggleStates(
         _persistData.TugboatToggleData, tugboatID, true, LockoutReason.Damage);
     });
 
@@ -1517,7 +1482,7 @@ public class PlayerBasePvpZones : RustPlugin
         this, player.UserIDString), _configData.PrefixNotify));
 
       // record disabled state and apply toggle lockout (if applicable)
-      SetZoneToggleData(toggleDict, netID, false, LockoutReason.Toggle);
+      SetToggleStates(toggleDict, netID, false, LockoutReason.Toggle);
 
       // cancel zone creation to keep it as PVE
       CancelDictionaryTimer(ref createDict, netID);
@@ -1536,7 +1501,7 @@ public class PlayerBasePvpZones : RustPlugin
         this, player.UserIDString), _configData.PrefixNotify));
 
       // record toggle state and apply lockout (if applicable)
-      SetZoneToggleData(toggleDict, netID, true, LockoutReason.Toggle);
+      SetToggleStates(toggleDict, netID, true, LockoutReason.Toggle);
 
       // cancel zone delete to keep it as PVP
       CancelDictionaryTimer(ref deleteDict, netID);
@@ -1551,7 +1516,7 @@ public class PlayerBasePvpZones : RustPlugin
         this, player.UserIDString), _configData.PrefixNotify));
 
       // record toggle state and apply lockout (if applicable)
-      SetZoneToggleData(toggleDict, netID, false, LockoutReason.Toggle);
+      SetToggleStates(toggleDict, netID, false, LockoutReason.Toggle);
 
       // schedule zone delete to convert it to PVE
       switch (entity)
@@ -1574,7 +1539,7 @@ public class PlayerBasePvpZones : RustPlugin
       this, player.UserIDString), _configData.PrefixNotify));
 
     // record toggle state and apply lockout (if applicable)
-    SetZoneToggleData(toggleDict, netID, true, LockoutReason.Toggle);
+    SetToggleStates(toggleDict, netID, true, LockoutReason.Toggle);
 
     // schedule zone create to convert it to PVP
     switch (entity)
@@ -2387,7 +2352,7 @@ public class PlayerBasePvpZones : RustPlugin
   //  lockout would expire at or after time of any existing one
   //
   // data file save will be scheduled if anything changed
-  private void SetZoneToggleData(
+  private void SetToggleStates(
     Dictionary<ulong, ToggleData> toggleDict, NetworkableId netId,
     bool state, LockoutReason reason)
   {
