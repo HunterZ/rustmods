@@ -15,7 +15,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "4.9.2", ResourceId = 2728)]
+[Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "4.9.3", ResourceId = 2728)]
 [Description("Creates temporary PvP zones on certain actions/events")]
 public class DynamicPVP : RustPlugin
 {
@@ -266,13 +266,12 @@ public class DynamicPVP : RustPlugin
     {
       Subscribe(nameof(OnEntityDeath));
     }
-    if (_configData.GeneralEvents.SupplySignal.Enabled)
-    {
-      Subscribe(nameof(OnCargoPlaneSignaled));
-    }
     if (_configData.GeneralEvents.SupplySignal.Enabled ||
         _configData.GeneralEvents.TimedSupply.Enabled)
     {
+      // this is subscribed if either drop event is enabled, because we need to
+      //  differentiate either way
+      Subscribe(nameof(OnCargoPlaneSignaled));
       Subscribe(nameof(OnSupplyDropDropped));
       // this is now subscribed regardless of start on spawn-vs-landing, as we
       //  need to tether the zone to the drop on landing in both cases
@@ -1217,7 +1216,7 @@ public class DynamicPVP : RustPlugin
       PrintDebug($"Timed Cargo Plane {planeID} spawned Supply Drop {supplyDropID} at position {supplyDrop.transform.position}");
     }
 
-    OnSupplyDropEvent(supplyDrop, false);
+    HandleSupplyDropEvent(supplyDrop, false);
   });
 
   private void OnSupplyDropLanded(SupplyDrop supplyDrop) => NextTick(() =>
@@ -1243,7 +1242,7 @@ public class DynamicPVP : RustPlugin
       return;
     }
 
-    OnSupplyDropEvent(supplyDrop, true);
+    HandleSupplyDropEvent(supplyDrop, true);
   });
 
   private void OnLootEntity(BasePlayer _, SupplyDrop supplyDrop)
@@ -1352,7 +1351,7 @@ public class DynamicPVP : RustPlugin
   private static string GetSupplyDropStateName(bool isLanded) =>
     isLanded ? "Landed" : "Spawned";
 
-  private void OnSupplyDropEvent(SupplyDrop supplyDrop, bool isLanded)
+  private void HandleSupplyDropEvent(SupplyDrop supplyDrop, bool isLanded)
   {
     if (!supplyDrop || null == supplyDrop.net)
     {
@@ -1370,14 +1369,14 @@ public class DynamicPVP : RustPlugin
     var isSignaled = _activeSignaledPlanesAndDrops.Contains(supplyDropID);
     if (isSignaled)
     {
-      PrintDebug($"Supply drop {supplyDropID} is from supply signal");
+      PrintDebug($"Supply Drop {supplyDropID} is from supply signal");
       HandleSupplyDropEvent(
         _configData.GeneralEvents.SupplySignal, isLanded,
         nameof(GeneralEventType.SupplySignal), supplyDrop);
     }
     else
     {
-      PrintDebug($"Supply drop {supplyDropID} is from timed event");
+      PrintDebug($"Supply Drop {supplyDropID} is from timed event");
       HandleSupplyDropEvent(
         _configData.GeneralEvents.TimedSupply, isLanded,
         nameof(GeneralEventType.SupplyDrop), supplyDrop);
