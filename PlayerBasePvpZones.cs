@@ -850,29 +850,29 @@ public class PlayerBasePvpZones : RustPlugin
       ["MessageZoneExit"] =
         "Leaving Player Base PVP Zone",
       ["ToggleLockoutDamage"] =
-        "{0}Player Base PvP Zone cannot be toggled for another {1} second(s) due to recent damage",
+        "Player Base PvP Zone cannot be toggled for another {0} second(s) due to recent damage",
       ["ToggleLockoutToggle"] =
-        "{0}Player Base PvP Zone cannot be toggled for another {1} second(s) due to recent toggle",
+        "Player Base PvP Zone cannot be toggled for another {0} second(s) due to recent toggle",
       ["ToggleCancelCreate"] =
-        "{0}Player Base PvP Zone creation canceled due to toggle command",
+        "Player Base PvP Zone creation canceled due to toggle command",
       ["ToggleCancelDelete"] =
-        "{0}Player Base PvP Zone deletion canceled due to toggle command",
+        "Player Base PvP Zone deletion canceled due to toggle command",
       ["ToggleDelete"] =
-        "{0}Player Base PvP Zone deletion triggered due to toggle command",
+        "Player Base PvP Zone deletion triggered due to toggle command",
       ["ToggleCreate"] =
-        "{0}Player Base PvP Zone creation triggered due to toggle command",
+        "Player Base PvP Zone creation triggered due to toggle command",
       ["ToggleFail"] =
-        "{0}Player Base PvP Zone not found",
+        "No togglable Player Base PvP Zone here",
       ["HelpToggle"] =
-        "/{0} {1} - toggle Player Base PvP Zone for authorized nearby shelter, looked-at TC, or mounted tugboat",
+        "  /{0} {1} - toggle Player Base PvP Zone for authorized nearby shelter, looked-at TC, or mounted tugboat",
       ["HelpNoPerms"] =
-        "You do not have permission to run any PBPZ commands",
+        "You do not have permission to run any Player Base PvP Zone commands",
       ["CmdNoParams"] =
         "Valid parameter(s) required; type the following chat command for help: /{0} {1}",
       ["CmdNoPerm"] =
-        "You do not have permission to run this PBPZ command",
+        "You do not have permission to run this Player Base PvP Zone command",
       ["CmdUnknown"] =
-        "Unknown PBPZ command"
+        "Unknown Player Base PvP Zone command"
     }, this);
   }
 
@@ -1480,8 +1480,7 @@ public class PlayerBasePvpZones : RustPlugin
     if (null != lockoutMessage)
     {
       SendReply(player, string.Format(lang.GetMessage(lockoutMessage,
-          this, player.UserIDString),
-        _configData.PrefixNotify, Mathf.CeilToInt(toggleStates.Item3)));
+        this, player.UserIDString), Mathf.CeilToInt(toggleStates.Item3)));
       return;
     }
 
@@ -1491,7 +1490,7 @@ public class PlayerBasePvpZones : RustPlugin
     if (true == createDict?.ContainsKey(netID))
     {
       SendReply(player, string.Format(lang.GetMessage("ToggleCancelCreate",
-        this, player.UserIDString), _configData.PrefixNotify));
+        this, player.UserIDString)));
 
       // record disabled state and apply toggle lockout (if applicable)
       SetToggleStates(toggleDict, netID, false, LockoutReason.Toggle);
@@ -1510,7 +1509,7 @@ public class PlayerBasePvpZones : RustPlugin
     if (deleteDict.ContainsKey(netID))
     {
       SendReply(player, string.Format(lang.GetMessage("ToggleCancelDelete",
-        this, player.UserIDString), _configData.PrefixNotify));
+        this, player.UserIDString)));
 
       // record toggle state and apply lockout (if applicable)
       SetToggleStates(toggleDict, netID, true, LockoutReason.Toggle);
@@ -1525,7 +1524,7 @@ public class PlayerBasePvpZones : RustPlugin
     if (dataDict.ContainsKey(netID))
     {
       SendReply(player, string.Format(lang.GetMessage("ToggleDelete",
-        this, player.UserIDString), _configData.PrefixNotify));
+        this, player.UserIDString)));
 
       // record toggle state and apply lockout (if applicable)
       SetToggleStates(toggleDict, netID, false, LockoutReason.Toggle);
@@ -1548,7 +1547,7 @@ public class PlayerBasePvpZones : RustPlugin
 
     // else zone was previously toggled off
     SendReply(player, string.Format(lang.GetMessage("ToggleCreate",
-      this, player.UserIDString), _configData.PrefixNotify));
+      this, player.UserIDString)));
 
     // record toggle state and apply lockout (if applicable)
     SetToggleStates(toggleDict, netID, true, LockoutReason.Toggle);
@@ -1583,8 +1582,7 @@ public class PlayerBasePvpZones : RustPlugin
   private void HandleCommandToggle(BasePlayer player)
   {
     // handle player in tugboat
-    var tugboat = GetPlayerTugboat(player);
-    if (tugboat)
+    if (GetPlayerTugboat(player) is {} tugboat)
     {
       Dictionary<NetworkableId, Timer> temp = null;
       ToggleZone(
@@ -1596,8 +1594,7 @@ public class PlayerBasePvpZones : RustPlugin
 
     // handle player looking at TC (do this before shelter because it's possible
     //  to put a TC inside a shelter if you're a goofball like hJune)
-    var building = GetPlayerBuilding(player);
-    if (building)
+    if (GetPlayerBuilding(player) is {} building && IsPlayerOwned(building))
     {
       ToggleZone(
         player, ref _buildingCreateTimers, ref _buildingDeleteTimers,
@@ -1607,8 +1604,7 @@ public class PlayerBasePvpZones : RustPlugin
     }
 
     // handle player looking at legacy shelter
-    var shelter = GetPlayerShelter(player);
-    if (shelter)
+    if (GetPlayerShelter(player) is {} shelter && IsPlayerOwned(shelter))
     {
       ToggleZone(
         player, ref _shelterCreateTimers, ref _shelterDeleteTimers,
@@ -1618,7 +1614,7 @@ public class PlayerBasePvpZones : RustPlugin
     }
 
     SendReply(player, string.Format(lang.GetMessage("ToggleFail",
-      this, player.UserIDString), _configData.PrefixNotify));
+      this, player.UserIDString)));
   }
 
   // chat command handler
