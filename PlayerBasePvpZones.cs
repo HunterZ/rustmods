@@ -3,6 +3,7 @@
 using Facepunch;
 using Newtonsoft.Json;
 using Oxide.Core;
+using Oxide.Core.Libraries.Covalence;
 using Oxide.Core.Plugins;
 using System;
 using System.Collections;
@@ -12,7 +13,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Player Base PvP Zones", "HunterZ", "1.3.1")]
+[Info("Player Base PvP Zones", "HunterZ", "1.4.0")]
 [Description("Maintains Zone Manager / TruePVE exclusion zones around player bases")]
 public class PlayerBasePvpZones : RustPlugin
 {
@@ -22,6 +23,12 @@ public class PlayerBasePvpZones : RustPlugin
 
   // user-defined plugin config data
   private ConfigData _configData = new();
+
+  // persistent data
+  private PersistData _persistData = new();
+
+  // _persistData disk write delay timer
+  private Timer _saveDataTimer;
 
   // active building zones by TC ID
   private Dictionary<NetworkableId, BuildingData> _buildingData = new();
@@ -73,9 +80,29 @@ public class PlayerBasePvpZones : RustPlugin
   // ZoneManager zone ID prefix
   private const string ZoneIdPrefix = "PlayerBasePVP:";
 
+  // zone toggle data
+  //  layer mask for tool cupboard raycast searches
+  private readonly int _buildingLayerMask = LayerMask.GetMask("Deployed");
+  //  layer mask for legacy shelter raycast searches
+  private readonly int _shelterLayerMask =
+    LayerMask.GetMask("Deployed", "Construction");
+  //  maximum distance from tool cupboard at which toggling allowed; this is
+  //   currently meant to roughly match regular interaction distance
+  private const float BuildingToggleRadius = 3.0f;
+  //  shelters use player being in building privilege as a requirement
+  //  tugboats use player being mounted at the wheel as a requirement, in lieu
+  //   of raycast/distance checks
+
+  private const string CommandRoot = "pbpz";
+  private const string CommandHelp = "help";
+  private const string CommandToggle = "toggle";
+  private const string TogglePermission = "toggleZones";
+
   #endregion Fields
 
   #region Core Methods
+
+  private string GetPermission(string suffix) => $"{Name}.{TogglePermission}";
 
   // generate a current 3D bounding box around a base
   private Bounds CalculateBuildingBounds(BuildingPrivlidge toolCupboard)
@@ -131,7 +158,7 @@ public class PlayerBasePvpZones : RustPlugin
     ref Dictionary<T, Timer> dictionary, T key)
   {
     if (!dictionary.Remove(key, out var cTimer)) return false;
-    cTimer.Destroy();
+    DestroyTimer(cTimer);
     return true;
   }
 
@@ -172,8 +199,10 @@ public class PlayerBasePvpZones : RustPlugin
   // get unique ID for any BaseNetworkable object
   // credit: Karuza for suggesting this as the best unique ID approach
   private static NetworkableId GetNetworkableID(
-    BaseNetworkable baseNetworkable) =>
-    baseNetworkable.net.ID;
+    BaseNetworkable baseNetworkable) => baseNetworkable.net.ID;
+
+  // construct NetworkableId from the given unsigned long integer value
+  private static NetworkableId GetNetworkableID(ulong value) => new(value);
 
   private bool IsKnownPlayerBaseId(NetworkableId networkableId) =>
     _buildingData.ContainsKey(networkableId) ||
@@ -197,8 +226,15 @@ public class PlayerBasePvpZones : RustPlugin
     return null;
   }
 
+  // get building privilege for a given legacy shelter
+  private static EntityPrivilege GetShelterPrivilege(BaseEntity entity) =>
+    entity is LegacyShelter shelter && IsValid(shelter) ?
+      shelter.GetEntityBuildingPrivilege() : null;
+
+  // get building privilege for a given vehicle (tugboat)
   private static VehiclePrivilege GetVehiclePrivilege(BaseVehicle vehicle)
   {
+    if (!IsValid(vehicle)) return null;
     foreach (var child in vehicle.children)
     {
       if (child is VehiclePrivilege privilege) return privilege;
@@ -206,12 +242,12 @@ public class PlayerBasePvpZones : RustPlugin
     return null;
   }
 
-  // OwnerID is zero for shelters for some reason, so check auth list
+  // OwnerID is zero for shelters for some reason, so check auth list instead
   private static bool IsPlayerOwned(EntityPrivilege legacyShelter) =>
-    null != GetOwnerID(legacyShelter);
+    IsValid(legacyShelter) && null != GetOwnerID(legacyShelter);
 
   private static bool IsPlayerOwned(DecayEntity decayEntity) =>
-    decayEntity && decayEntity.OwnerID.IsSteamId();
+    IsValid(decayEntity) && decayEntity.OwnerID.IsSteamId();
 
   private static bool IsValid(BaseNetworkable baseNetworkable) =>
     baseNetworkable &&
@@ -235,7 +271,8 @@ public class PlayerBasePvpZones : RustPlugin
     var message = lang.GetMessage(
       "NotifyOwnerCreate", this, player.UserIDString);
     SendReply(player, string.Format(
-      message, _configData.PrefixNotify, _configData.CreateDelaySeconds));
+      message, _configData.PrefixNotify,
+      Mathf.CeilToInt(_configData.CreateDelaySeconds)));
   }
 
   private void NotifyZoneDelete(NetworkableId baseID)
@@ -317,6 +354,12 @@ public class PlayerBasePvpZones : RustPlugin
 
     // if a building already exists, then this call is probably redundant
     if (_buildingData.ContainsKey(toolCupboardID)) return;
+
+    // abort if zone toggled off
+    if (!GetToggleStates(_persistData.BuildingToggleData, toolCupboardID).Item1)
+    {
+      return;
+    }
 
     // get initial building footprint data
     var buildingBounds = CalculateBuildingBounds(toolCupboard);
@@ -466,6 +509,12 @@ public class PlayerBasePvpZones : RustPlugin
     // if a shelter already exists, then this call is probably redundant
     if (_shelterData.ContainsKey(legacyShelterID)) return;
 
+    // abort if zone toggled off
+    if (!GetToggleStates(_persistData.ShelterToggleData, legacyShelterID).Item1)
+    {
+      return;
+    }
+
     // create + record new shelter data record
     var shelterData = Pool.Get<ShelterData>();
     if (null == shelterData)
@@ -580,6 +629,12 @@ public class PlayerBasePvpZones : RustPlugin
 
     // if a tugboat already exists, then this call is probably redundant
     if (_tugboatData.ContainsKey(tugboatID)) return;
+
+    // abort if zone toggled off
+    if (!GetToggleStates(_persistData.TugboatToggleData, tugboatID).Item1)
+    {
+      return;
+    }
 
     // create + record new tugboat data record
     var tugboatData = Pool.Get<TugboatData>();
@@ -701,7 +756,7 @@ public class PlayerBasePvpZones : RustPlugin
     if (!_pvpDelayTimers.Remove(playerID, out var delayData)) return;
 
     // clean up timer
-    delayData.Item1.Destroy();
+    DestroyTimer(delayData.Item1);
 
     // fire notification hook
     Interface.CallHook("OnPlayerBasePvpDelayStop", playerID, delayData.Item2);
@@ -736,7 +791,7 @@ public class PlayerBasePvpZones : RustPlugin
     foreach (var building in BuildingManager.server.buildingDictionary.Values)
     {
       var toolCupboard = GetToolCupboard(building);
-      if (!IsValid(toolCupboard) || !IsPlayerOwned(toolCupboard)) continue;
+      if (!IsPlayerOwned(toolCupboard)) continue;
       CreateBuildingData(toolCupboard);
       yield return DynamicYield();
     }
@@ -793,18 +848,49 @@ public class PlayerBasePvpZones : RustPlugin
       ["MessageZoneEnter"] =
         "WARNING: Entering Player Base PVP Zone",
       ["MessageZoneExit"] =
-        "Leaving Player Base PVP Zone"
+        "Leaving Player Base PVP Zone",
+      ["ToggleLockoutDamage"] =
+        "Player Base PvP Zone cannot be toggled for another {0} second(s) due to recent damage",
+      ["ToggleLockoutToggle"] =
+        "Player Base PvP Zone cannot be toggled for another {0} second(s) due to recent toggle",
+      ["ToggleCancelCreate"] =
+        "Player Base PvP Zone creation canceled due to toggle command",
+      ["ToggleCancelDelete"] =
+        "Player Base PvP Zone deletion canceled due to toggle command",
+      ["ToggleDelete"] =
+        "Player Base PvP Zone deletion triggered due to toggle command",
+      ["ToggleCreate"] =
+        "Player Base PvP Zone creation triggered due to toggle command",
+      ["ToggleFail"] =
+        "No togglable Player Base PvP Zone here",
+      ["HelpToggle"] =
+        "  /{0} {1} - toggle Player Base PvP Zone for authorized nearby shelter, looked-at TC, or mounted tugboat",
+      ["HelpNoPerms"] =
+        "You do not have permission to run any Player Base PvP Zone commands",
+      ["CmdNoParams"] =
+        "Valid parameter(s) required; type the following chat command for help: /{0} {1}",
+      ["CmdNoPerm"] =
+        "You do not have permission to run this Player Base PvP Zone command",
+      ["CmdUnknown"] =
+        "Unknown Player Base PvP Zone command"
     }, this);
   }
 
   private void Init()
   {
+    LoadData();
+
     // unsubscribe from OnEntitySpawned() hook calls under OnServerInitialized()
-    // for some reason Carbon allows these to fire super early on startup for
-    //  tugboats, which can cause a lot of problems
-    // PBPZ is not dependent on OnEntitySpawned() for initial creation of
-    //  tugboat zones, so this won't hurt anything
+    // PBPZ is not dependent on OnEntitySpawned() during server startup, because
+    //  it scans all entities instead
     Unsubscribe(nameof(OnEntitySpawned));
+    // also initially unsubscribe from damage hooks, because they're expensive
+    Unsubscribe(nameof(OnEntityTakeDamage));
+
+    AddCovalenceCommand(CommandRoot, nameof(HandleCommand));
+
+    permission.RegisterPermission(GetPermission(TogglePermission), this);
+
     if (null == _configData) return;
     BaseData.SphereDarkness = _configData.SphereDarkness;
   }
@@ -821,6 +907,39 @@ public class PlayerBasePvpZones : RustPlugin
 
     // resubscribe OnEntitySpawned() hook, as it's now safe to handle this
     Subscribe(nameof(OnEntitySpawned));
+
+    // subscribe OnEntityTakeDamage() if toggle lockout on damage is requested
+    //  via config file
+    if (_configData.Toggle.DamageLockoutSeconds > 0.0f)
+    {
+      Subscribe(nameof(OnEntityTakeDamage));
+    }
+
+    // clean up toggle data dictionaries, and save data file if anything changed
+    // NOTE: this mainly handles the case that a wipe happened between sessions
+    var saveData = false;
+    if (CleanupToggleDict(_persistData.BuildingToggleData) is
+        var defunctBuildings and > 0)
+    {
+      Puts($"Removed {defunctBuildings} defunct building zone toggle data entries from data file");
+      saveData = true;
+    }
+    if (CleanupToggleDict(_persistData.ShelterToggleData) is
+        var defunctShelters and > 0)
+    {
+      Puts($"Removed {defunctShelters} defunct shelter zone toggle data entries from data file");
+      saveData = true;
+    }
+    if (CleanupToggleDict(_persistData.TugboatToggleData) is
+        var defunctTugboats and > 0)
+    {
+      Puts($"Removed {defunctTugboats} defunct tugboat zone toggle data entries from data file");
+      saveData = true;
+    }
+    if (saveData)
+    {
+      SaveData();
+    }
 
     NextTick(() =>
     {
@@ -846,12 +965,22 @@ public class PlayerBasePvpZones : RustPlugin
     Pool.FreeUnmanaged(ref networkableIds);
   }
 
+  private static void DestroyTimer(Timer t)
+  {
+    if (TimerValid(t)) t.Destroy();
+  }
+
+  private static bool TimerValid(Timer t) => false == t?.Destroyed;
+
   private void DestroyTimerDictionary<T>(
     ref Dictionary<T, Timer> dict, string desc)
   {
     if (dict.Count <= 0) return;
     Puts($"Unload():  Destroying {dict.Count} {desc} timer(s)...");
-    foreach (var dTimer in dict.Values) dTimer?.Destroy();
+    foreach (var dTimer in dict.Values)
+    {
+      DestroyTimer(dTimer);
+    }
   }
 
   private void Unload()
@@ -861,6 +990,14 @@ public class PlayerBasePvpZones : RustPlugin
       ServerMgr.Instance.StopCoroutine(_createDataCoroutine);
       _createDataCoroutine = null;
     }
+
+    // if save timer active, force immediate write
+    if (TimerValid(_saveDataTimer))
+    {
+      Puts("Unload(): Forcing data file write");
+      WriteData();
+    }
+    _saveDataTimer = null;
 
     Puts("Unload(): Cleaning up...");
     // cleanup base zones
@@ -912,7 +1049,7 @@ public class PlayerBasePvpZones : RustPlugin
       Puts($"Unload():  Destroying {_pvpDelayTimers.Count} player PvP delay timers...");
       foreach (var timerData in _pvpDelayTimers.Values)
       {
-        timerData.Item1.Destroy();
+        DestroyTimer(timerData.Item1);
       }
       _pvpDelayTimers.Clear();
     }
@@ -974,9 +1111,51 @@ public class PlayerBasePvpZones : RustPlugin
 
   protected override void SaveConfig() => Config.WriteObject(_configData);
 
-  // called when a tugboat reaches zero health and sinks
-  // NOTE: this only fires for Tugboat and not VehiclePrivilege
-  private void OnEntityDeath(Tugboat tugboat)
+  private void LoadData()
+  {
+    try
+    {
+      _persistData =
+        Interface.Oxide.DataFileSystem.ReadObject<PersistData>(Name);
+    }
+    catch (Exception ex)
+    {
+      Puts($"LoadData(): Error reading data file: {ex}");
+      _persistData = null;
+    }
+    if (_persistData == null) ClearData();
+  }
+
+  private void ClearData()
+  {
+    _persistData = new PersistData();
+    Puts("ClearData(): Scheduling write of new data file");
+    SaveData();
+  }
+
+  // this is a frontend to WriteData() that enforces a minimum delay between
+  //  data file writes
+  private void SaveData()
+  {
+    // start a save timer unless already running
+    if (TimerValid(_saveDataTimer)) return;
+    // TODO: make save delay configurable?
+    _saveDataTimer = timer.Once(60.0f, WriteData);
+  }
+
+  // do the actual data file write
+  private void WriteData()
+  {
+    DestroyTimer(_saveDataTimer);
+    Interface.Oxide.DataFileSystem.WriteObject(Name, _persistData);
+    Puts("WriteData(): Wrote data file");
+  }
+
+  // common logic for tugboat zone end-of-life scenarios
+  // untether controls whether sphere(s) and/or zone should be disconnected from
+  //  the tugboat, which is desirable when it's sunk/killed but not when the
+  //  zone is being toggled off by a player
+  private void HandleTugboatEol(Tugboat tugboat, bool disconnect = true)
   {
     // cache tugboat ID
     var tugboatPrivilege = GetVehiclePrivilege(tugboat);
@@ -991,14 +1170,22 @@ public class PlayerBasePvpZones : RustPlugin
     {
       return;
     }
-    // release entity reference immediately to minimize side effects
-    tugboatData.ClearEntity();
-    // also untether ZoneManager zone if present, so that it doesn't disappear
-    UntetherZone(GetZoneID(tugboatID), tugboat);
+    // disconnect sphere(s) and/or zone if requested
+    if (disconnect)
+    {
+      // release entity reference immediately to minimize side effects
+      tugboatData.ClearEntity();
+      // also untether ZoneManager zone if present, so that it doesn't disappear
+      UntetherZone(GetZoneID(tugboatID), tugboat);
+    }
 
     // schedule deletion of the dropped base
     NextTick(() => ScheduleDeleteTugboatData(tugboatID));
   }
+
+  // called when a tugboat reaches zero health and sinks
+  // NOTE: this only fires for Tugboat and not VehiclePrivilege
+  private void OnEntityDeath(Tugboat tugboat) => HandleTugboatEol(tugboat);
 
   // called when a building block is destroyed
   private void OnEntityKill(BuildingBlock buildingBlock)
@@ -1009,8 +1196,8 @@ public class PlayerBasePvpZones : RustPlugin
     // attempt to find an attached TC
     var toolCupboard = GetToolCupboard(buildingBlock);
 
-    // abort if no TC found, since there's nothing we can do without one
-    if (!toolCupboard) return;
+    // abort if no TC found, or if TC is not player-owned
+    if (!IsPlayerOwned(toolCupboard)) return;
 
     // cache TC ID
     var toolCupboardID = GetNetworkableID(toolCupboard);
@@ -1072,7 +1259,7 @@ public class PlayerBasePvpZones : RustPlugin
   // called when a tugboat despawns
   // NOTE: using Tugboat instead of VehiclePrivilege since we've tethered a
   //  bunch of stuff to that
-  private void OnEntityKill(Tugboat tugboat) => OnEntityDeath(tugboat);
+  private void OnEntityKill(Tugboat tugboat) => HandleTugboatEol(tugboat);
 
   // called when a building block is spawned
   // this is preferred over OnEntityBuilt both because it's more
@@ -1123,13 +1310,352 @@ public class PlayerBasePvpZones : RustPlugin
     NextTick(() => CreateTugboatData(tugboat));
   }
 
+  // called when a building block is damaged
+  private object OnEntityTakeDamage(
+    BuildingBlock buildingBlock, HitInfo hitInfo)
+  {
+    NextTick(() =>
+    {
+      // abort if this isn't a player-owned building block
+      if (!IsPlayerOwned(buildingBlock)) return;
+
+      // attempt to find an attached TC
+      var toolCupboard = GetToolCupboard(buildingBlock);
+
+      // abort if no TC found, or if TC is not player-owned
+      if (!IsPlayerOwned(toolCupboard)) return;
+
+      // cache TC ID
+      var toolCupboardID = GetNetworkableID(toolCupboard);
+
+      // abort if no PBPZ PVP zone for this TC
+      if (!_buildingData.ContainsKey(toolCupboardID)) return;
+
+      // record damage lockout
+      // NOTE: state=true is specified because we've verified that a zone exists
+      SetToggleStates(
+        _persistData.BuildingToggleData, toolCupboardID, true,
+        LockoutReason.Damage);
+    });
+
+    return null;
+  }
+
+  // called when a TC is damaged
+  private object OnEntityTakeDamage(
+    BuildingPrivlidge toolCupboard, HitInfo hitInfo)
+  {
+    NextTick(() =>
+    {
+      // abort if this isn't a player-owned building TC
+      if (!IsPlayerOwned(toolCupboard)) return;
+
+      // cache TC ID
+      var toolCupboardID = GetNetworkableID(toolCupboard);
+
+      // abort if no PBPZ PVP zone for this TC
+      if (!_buildingData.ContainsKey(toolCupboardID)) return;
+
+      // record damage lockout
+      // NOTE: state=true is specified because we've verified that a zone exists
+      SetToggleStates(
+        _persistData.BuildingToggleData, toolCupboardID, true,
+        LockoutReason.Damage);
+    });
+
+    return null;
+  }
+
+  // called when a legacy shelter is damaged
+  private object OnEntityTakeDamage(
+    LegacyShelter legacyShelter, HitInfo hitInfo)
+  {
+    NextTick(() =>
+    {
+      // abort if this isn't a player-owned building shelter
+      if (!IsPlayerOwned(legacyShelter)) return;
+
+      // cache shelter ID
+      var legacyShelterID =
+        GetNetworkableID(legacyShelter.GetEntityPrivilege());
+
+      // abort if no PBPZ PVP zone for this shelter
+      if (!_shelterData.ContainsKey(legacyShelterID)) return;
+
+      // record damage lockout
+      // NOTE: state=true is specified because we've verified that a zone exists
+      SetToggleStates(
+        _persistData.ShelterToggleData, legacyShelterID, true,
+        LockoutReason.Damage);
+    });
+
+    return null;
+  }
+
+  // called when a tugboat is damaged
+  private object OnEntityTakeDamage(Tugboat tugboat, HitInfo hitInfo)
+  {
+    NextTick(() =>
+    {
+      // cache tugboat ID
+      var tugboatPrivilege = GetVehiclePrivilege(tugboat);
+      if (!tugboatPrivilege) return;
+      var tugboatID = GetNetworkableID(tugboatPrivilege);
+
+      // abort if no PBPZ PVP zone for this tugboat
+      if (!_tugboatData.ContainsKey(tugboatID)) return;
+
+      // record damage lockout
+      // NOTE: state=true is specified because we've verified that a zone exists
+      SetToggleStates(
+        _persistData.TugboatToggleData, tugboatID, true, LockoutReason.Damage);
+    });
+
+    return null;
+  }
+
   // custom hook defined by this plugin to return originating zoneID if player
   //  has an active PvP delay, or an empty string if not
   private string OnPlayerBasePvpDelayQuery(ulong playerID) =>
     _pvpDelayTimers.TryGetValue(playerID, out var delayData) ?
       delayData.Item2 : string.Empty;
 
+  // get TC that player is within interaction range of, looking at, and
+  //  authorized to, or null if none
+  private BuildingPrivlidge GetPlayerBuilding(BasePlayer player) =>
+    Physics.Raycast(
+      player.eyes.HeadRay(), out var hit, BuildingToggleRadius,
+      _buildingLayerMask) &&
+    hit.GetEntity() is BuildingPrivlidge toolCupboard &&
+    IsPlayerOwned(toolCupboard) &&
+    toolCupboard.IsAuthed(player)
+      ? toolCupboard
+      : null;
+
   private bool IsUsingExcludePlayer() => _useExcludePlayer;
+
+  // get legacy shelter whose build privilege the player is both inside of and
+  //  authorized to
+  private EntityPrivilege GetPlayerShelter(BasePlayer player) =>
+    // this first step is really here to force a
+    //  player.cachedEntityBuildingPrivilege cache update when applicable
+    !player.IsBuildingBlockedByEntity(true) &&
+    GetShelterPrivilege(player.cachedEntityBuildingPrivilege) is {} privilege &&
+    IsPlayerOwned(privilege) &&
+    privilege.IsAuthed(player)
+        ? privilege
+        : null;
+
+  // get non-dying tugboat that player is mounted and authorized to, or null if
+  //  none
+  private VehiclePrivilege GetPlayerTugboat(BasePlayer player) =>
+    player.GetMountedVehicle() is Tugboat { IsDying: false } tugboat &&
+    GetVehiclePrivilege(tugboat) is {} privilege &&
+    privilege.IsAuthed(player)
+      ? privilege
+      : null;
+
+  private string GetLockoutMessageName(LockoutReason reason) => reason switch
+  {
+    LockoutReason.None => null,
+    LockoutReason.Damage => "ToggleLockoutDamage",
+    LockoutReason.Toggle => "ToggleLockoutToggle",
+    _ => null
+  };
+
+  // apply zone toggle logic for given player and data set
+  private void ToggleZone<T>(
+    BasePlayer                            player,
+    ref Dictionary<NetworkableId, Timer>  createDict,
+    ref Dictionary<NetworkableId, Timer>  deleteDict,
+    Dictionary<NetworkableId, T>          dataDict,
+    Dictionary<ulong, ToggleData>         toggleDict,
+    BaseNetworkable                       entity)
+  {
+    if (!player || !player.userID.IsSteamId()) return;
+    var netID = GetNetworkableID(entity);
+    var toggleStates = GetToggleStates(toggleDict, netID);
+
+    // abort if lockout in progress
+    var lockoutMessage = GetLockoutMessageName(toggleStates.Item2);
+    if (null != lockoutMessage)
+    {
+      SendReply(player, string.Format(lang.GetMessage(lockoutMessage,
+        this, player.UserIDString), Mathf.CeilToInt(toggleStates.Item3)));
+      return;
+    }
+
+    // handle zone currently scheduled for creation due to spawn or previous
+    //  toggle
+    // NOTE: supports null because tugboats don't currently have creation delays
+    if (true == createDict?.ContainsKey(netID))
+    {
+      SendReply(player, string.Format(lang.GetMessage("ToggleCancelCreate",
+        this, player.UserIDString)));
+
+      // record disabled state and apply toggle lockout (if applicable)
+      SetToggleStates(toggleDict, netID, false, LockoutReason.Toggle);
+
+      // cancel zone creation to keep it as PVE
+      CancelDictionaryTimer(ref createDict, netID);
+
+      return;
+    }
+
+    // handle zone currently scheduled for deletion due to deploy or previous
+    //  toggle
+    //
+    // NOTE: it is assumed that previous code has verified that the delete timer
+    //  is not running due to entity kill/death
+    if (deleteDict.ContainsKey(netID))
+    {
+      SendReply(player, string.Format(lang.GetMessage("ToggleCancelDelete",
+        this, player.UserIDString)));
+
+      // record toggle state and apply lockout (if applicable)
+      SetToggleStates(toggleDict, netID, true, LockoutReason.Toggle);
+
+      // cancel zone delete to keep it as PVP
+      CancelDictionaryTimer(ref deleteDict, netID);
+
+      return;
+    }
+
+    // handle zone currently active
+    if (dataDict.ContainsKey(netID))
+    {
+      SendReply(player, string.Format(lang.GetMessage("ToggleDelete",
+        this, player.UserIDString)));
+
+      // record toggle state and apply lockout (if applicable)
+      SetToggleStates(toggleDict, netID, false, LockoutReason.Toggle);
+
+      // schedule zone delete to convert it to PVE
+      switch (entity)
+      {
+        case VehiclePrivilege tugboat:
+        {
+          // call tugboat end-of-life logic, but leave zone/sphere(s) connected
+          HandleTugboatEol(tugboat.GetParentEntity() as Tugboat, false);
+          break;
+        }
+        case BuildingPrivlidge building: OnEntityKill(building); break;
+        case EntityPrivilege   shelter:  OnEntityKill(shelter);  break;
+      }
+
+      return;
+    }
+
+    // else zone was previously toggled off
+    SendReply(player, string.Format(lang.GetMessage("ToggleCreate",
+      this, player.UserIDString)));
+
+    // record toggle state and apply lockout (if applicable)
+    SetToggleStates(toggleDict, netID, true, LockoutReason.Toggle);
+
+    // schedule zone create to convert it to PVP
+    switch (entity)
+    {
+      case VehiclePrivilege  tugboat:  OnEntitySpawned(tugboat);  break;
+      case BuildingPrivlidge building: OnEntitySpawned(building); break;
+      case EntityPrivilege   shelter:  OnEntitySpawned(shelter);  break;
+    }
+  }
+
+  private void HandleCommandHelp(IPlayer iPlayer, BasePlayer player)
+  {
+    var noPerms = true;
+
+    if (iPlayer.HasPermission(GetPermission(TogglePermission)))
+    {
+      SendReply(player, string.Format(lang.GetMessage("HelpToggle",
+        this, player.UserIDString), CommandRoot, CommandToggle));
+      noPerms = false;
+    }
+
+    if (noPerms)
+    {
+      SendReply(player, lang.GetMessage("HelpNoPerms",
+        this, player.UserIDString));
+    }
+  }
+
+  private void HandleCommandToggle(BasePlayer player)
+  {
+    // handle player in tugboat
+    if (GetPlayerTugboat(player) is {} tugboat)
+    {
+      Dictionary<NetworkableId, Timer> temp = null;
+      ToggleZone(
+        player, ref temp, ref _tugboatDeleteTimers,
+        _tugboatData, _persistData.TugboatToggleData, tugboat);
+
+      return;
+    }
+
+    // handle player looking at TC (do this before shelter because it's possible
+    //  to put a TC inside a shelter if you're a goofball like hJune)
+    if (GetPlayerBuilding(player) is {} building)
+    {
+      ToggleZone(
+        player, ref _buildingCreateTimers, ref _buildingDeleteTimers,
+        _buildingData, _persistData.BuildingToggleData, building);
+
+      return;
+    }
+
+    // handle player looking at legacy shelter
+    if (GetPlayerShelter(player) is {} shelter)
+    {
+      ToggleZone(
+        player, ref _shelterCreateTimers, ref _shelterDeleteTimers,
+        _shelterData, _persistData.ShelterToggleData, shelter);
+
+      return;
+    }
+
+    SendReply(player, string.Format(lang.GetMessage("ToggleFail",
+      this, player.UserIDString)));
+  }
+
+  // chat command handler
+  private void HandleCommand(IPlayer iPlayer, string command, string[] args)
+  {
+    if (iPlayer.Object is not BasePlayer player ||
+        !player || !player.userID.IsSteamId())
+    {
+      return;
+    }
+
+    if (args.Length < 1)
+    {
+      SendReply(player, string.Format(lang.GetMessage("CmdNoParams",
+        this, player.UserIDString), CommandRoot, CommandHelp));
+      return;
+    }
+
+    switch (args[0])
+    {
+      case CommandHelp:
+        HandleCommandHelp(iPlayer, player);
+        return;
+
+      case CommandToggle:
+        if (iPlayer.HasPermission(GetPermission(TogglePermission)))
+        {
+          HandleCommandToggle(player);
+        }
+        else
+        {
+          SendReply(player, string.Format(lang.GetMessage("CmdNoPerm",
+            this, player.UserIDString), CommandRoot, CommandHelp));
+        }
+        return;
+    }
+
+    SendReply(player, string.Format(lang.GetMessage("CmdUnknown",
+      this, player.UserIDString), CommandRoot, CommandHelp));
+  }
 
   #endregion Oxide/RustPlugin API/Hooks
 
@@ -1639,6 +2165,9 @@ public class PlayerBasePvpZones : RustPlugin
 
     [JsonProperty(PropertyName = "Tugboat settings")]
     public TugboatConfigData Tugboat = new();
+
+    [JsonProperty(PropertyName = "Zone toggle settings")]
+    public ToggleConfigData Toggle = new();
   }
 
   private sealed class BuildingConfigData
@@ -1669,6 +2198,225 @@ public class PlayerBasePvpZones : RustPlugin
 
     [JsonProperty(PropertyName = "Tugboat zone radius")]
     public float Radius = 32.0f;
+  }
+
+  private sealed class ToggleConfigData
+  {
+    [JsonProperty(PropertyName = "Zone toggle lockout seconds after damage")]
+    public float DamageLockoutSeconds = 60.0f;
+    [JsonProperty(PropertyName = "Zone toggle lockout seconds after toggle")]
+    public float ToggleLockoutSeconds = 60.0f;
+  }
+
+  // data file structure
+  private sealed class PersistData
+  {
+    public Dictionary<ulong, ToggleData>
+      BuildingToggleData { get; set; } = new();
+    public Dictionary<ulong, ToggleData>
+      ShelterToggleData  { get; set; } = new();
+    public Dictionary<ulong, ToggleData>
+      TugboatToggleData  { get; set; } = new();
+  }
+
+  // state data pertaining to zone toggling
+  private class ToggleData
+  {
+    public ToggleData()
+    {
+    }
+
+    public ToggleData(LockoutReason lockReason, DateTime unlockTime, bool zoneEnabled)
+    {
+      LockReason = lockReason;
+      UnlockTime = unlockTime;
+      ZoneEnabled = zoneEnabled;
+    }
+
+    // if not None, toggling is locked out for this reason
+    public LockoutReason LockReason { get; set; } = LockoutReason.None;
+    // if not MinValue, toggling is locked out until this time
+    public DateTime UnlockTime { get; set; } = DateTime.MinValue;
+    // whether zone is enabled
+    public bool ZoneEnabled { get; set; } = true;
+  }
+
+  private readonly ToggleData _defaultToggleData  = new(
+    LockoutReason.None,
+    DateTime.MinValue,
+    true
+  );
+
+  // reasons that toggling of a zone may be locked out
+  private enum LockoutReason { None, Damage, Toggle }
+
+  // result flags for CleanupToggleData()
+  [Flags]
+  private enum CleanupToggleResult
+  {
+    None   = 0,
+    Changed = 1,
+    Defunct = 2
+  }
+
+  private static CleanupToggleResult CleanupToggleData(
+    ToggleData toggleData, DateTime curTime)
+  {
+    var retVal = CleanupToggleResult.None;
+
+    if (LockoutReason.None != toggleData.LockReason &&
+        curTime >= toggleData.UnlockTime)
+    {
+      // lockout expired; reset state to None + MinValue
+      toggleData.LockReason = LockoutReason.None;
+      toggleData.UnlockTime = DateTime.MinValue;
+      retVal |= CleanupToggleResult.Changed;
+    }
+
+    if (LockoutReason.None == toggleData.LockReason && toggleData.ZoneEnabled)
+    {
+      // no reason to track enabled zone with no lockout in effect, as this is
+      //  the default state
+      retVal |= CleanupToggleResult.Defunct;
+    }
+
+    return retVal;
+  }
+
+  // prune any dead entities from given toggle dictionary
+  // NOTE: doesn't bother expiring lockouts or pruning redundant entries, as
+  //  this will get done when checking remaining entries during zone creation
+  private int CleanupToggleDict(
+    Dictionary<ulong, ToggleData> toggleDict)
+  {
+    // not worth using pooling here, as it will be 3 lists per plugin lifetime
+    HashSet<ulong> deadKeys = new();
+
+    foreach (var id in toggleDict.Keys)
+    {
+      if (!BaseNetworkable.serverEntities.Contains(GetNetworkableID(id)))
+      {
+        // this entry is for an entity that no longer exists on the server
+        deadKeys.Add(id);
+      }
+    }
+
+    // trash any dead keys
+    foreach (var key in deadKeys)
+    {
+      toggleDict.Remove(key);
+    }
+
+    return deadKeys.Count;
+  }
+
+  private readonly (bool, LockoutReason, float) _defaultToggleStates =
+    (true, LockoutReason.None, 0.0f);
+
+  // get zone enable state and lockout reason
+  //
+  // handles various cases:
+  // - no toggleDict entry
+  // - redundant toggleDict entry
+  // - lockout expired
+  //
+  // schedules data file save if something changed
+  private (bool, LockoutReason, float) GetToggleStates(
+    Dictionary<ulong, ToggleData> toggleDict, NetworkableId netId)
+  {
+    // if no toggle entry, zone should be enabled
+    if (!toggleDict.TryGetValue(netId.Value, out var toggleData))
+    {
+      return _defaultToggleStates;
+    }
+
+    var changed = false;
+    var curTime = DateTime.UtcNow;
+    var cleanupState = CleanupToggleData(toggleData, curTime);
+    if (cleanupState.HasFlag(CleanupToggleResult.Defunct))
+    {
+      toggleDict.Remove(netId.Value);
+      changed = true;
+    }
+    else if (cleanupState.HasFlag(CleanupToggleResult.Changed))
+    {
+      changed = true;
+    }
+    if (changed)
+    {
+      SaveData();
+    }
+
+    var lockoutRemainingSeconds = LockoutReason.None == toggleData.LockReason ?
+      0.0f : (float)(toggleData.UnlockTime - curTime).TotalSeconds;
+    if (lockoutRemainingSeconds < 0.0f) lockoutRemainingSeconds = 0.0f;
+
+    return
+      (toggleData.ZoneEnabled, toggleData.LockReason, lockoutRemainingSeconds);
+  }
+
+  // records zone toggle state and/or applies lockout of the appropriate
+  //  duration for the given reason
+  //
+  // lockout only applied if reason is other than None, has a configured
+  //  positive lockout duration, and (if a lockout is already in effect) new
+  //  lockout would expire at or after time of any existing one
+  //
+  // data file save will be scheduled if anything changed
+  private void SetToggleStates(
+    Dictionary<ulong, ToggleData> toggleDict, NetworkableId netId,
+    bool state, LockoutReason reason)
+  {
+    // get configured lockout duration for requested lockout reason
+    var lockoutTime = reason switch
+    {
+      LockoutReason.None    => 0.0f,
+      LockoutReason.Damage  => _configData.Toggle.DamageLockoutSeconds,
+      LockoutReason.Toggle => _configData.Toggle.ToggleLockoutSeconds,
+      _                     => 0.0f
+    };
+    if (LockoutReason.None != reason && lockoutTime <= 0.0f)
+    {
+      reason = LockoutReason.None;
+    }
+    // get effective proposed lockout expiration time
+    var expireTime = LockoutReason.None == reason ?
+      DateTime.MinValue : DateTime.UtcNow.AddSeconds(lockoutTime);
+
+    // if no existing record, add one, schedule save, and return
+    if (!toggleDict.TryGetValue(netId.Value, out var toggleData))
+    {
+      // ...unless the record would be redundant
+      if (!state && reason == LockoutReason.None) return;
+
+      toggleDict.Add(netId.Value, new ToggleData(
+        lockReason: reason, unlockTime: expireTime, zoneEnabled: state));
+      SaveData();
+      return;
+    }
+    // else found an existing record
+
+    var changed = false;
+    if (toggleData.ZoneEnabled != state)
+    {
+      toggleData.ZoneEnabled = state;
+      changed = true;
+    }
+
+    // only apply lockout if reason is other than None, and either no current
+    //  lockout in effect, or new lockout would expire after existing one
+    if (reason != LockoutReason.None &&
+        (toggleData.LockReason == LockoutReason.None ||
+         expireTime >= toggleData.UnlockTime))
+    {
+      toggleData.LockReason = reason;
+      toggleData.UnlockTime = expireTime;
+      changed = true;
+    }
+
+    if (!changed) return;
+
+    SaveData();
   }
 }
 
