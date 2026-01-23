@@ -791,7 +791,7 @@ public class PlayerBasePvpZones : RustPlugin
     foreach (var building in BuildingManager.server.buildingDictionary.Values)
     {
       var toolCupboard = GetToolCupboard(building);
-      if (!IsValid(toolCupboard) || !IsPlayerOwned(toolCupboard)) continue;
+      if (!IsPlayerOwned(toolCupboard)) continue;
       CreateBuildingData(toolCupboard);
       yield return DynamicYield();
     }
@@ -1420,6 +1420,18 @@ public class PlayerBasePvpZones : RustPlugin
     _pvpDelayTimers.TryGetValue(playerID, out var delayData) ?
       delayData.Item2 : string.Empty;
 
+  // get TC that player is within interaction range of, looking at, and
+  //  authorized to, or null if none
+  private BuildingPrivlidge GetPlayerBuilding(BasePlayer player) =>
+    Physics.Raycast(
+      player.eyes.HeadRay(), out var hit, BuildingToggleRadius,
+      _buildingLayerMask) &&
+    hit.GetEntity() is BuildingPrivlidge toolCupboard &&
+    IsPlayerOwned(toolCupboard) &&
+    toolCupboard.IsAuthed(player)
+      ? toolCupboard
+      : null;
+
   private bool IsUsingExcludePlayer() => _useExcludePlayer;
 
   // get legacy shelter whose build privilege the player is both inside of and
@@ -1429,21 +1441,10 @@ public class PlayerBasePvpZones : RustPlugin
     //  player.cachedEntityBuildingPrivilege cache update when applicable
     !player.IsBuildingBlockedByEntity(true) &&
     GetShelterPrivilege(player.cachedEntityBuildingPrivilege) is {} privilege &&
+    IsPlayerOwned(privilege) &&
     privilege.IsAuthed(player)
         ? privilege
         : null;
-
-  // get TC that player is within interaction range of, looking at, and
-  //  authorized to, or null if none
-  private BuildingPrivlidge GetPlayerBuilding(BasePlayer player) =>
-    Physics.Raycast(
-      player.eyes.HeadRay(), out var hit, BuildingToggleRadius,
-      _buildingLayerMask) &&
-    hit.GetEntity() is BuildingPrivlidge toolCupboard &&
-    IsValid(toolCupboard) &&
-    toolCupboard.IsAuthed(player)
-      ? toolCupboard
-      : null;
 
   // get non-dying tugboat that player is mounted and authorized to, or null if
   //  none
@@ -1594,7 +1595,7 @@ public class PlayerBasePvpZones : RustPlugin
 
     // handle player looking at TC (do this before shelter because it's possible
     //  to put a TC inside a shelter if you're a goofball like hJune)
-    if (GetPlayerBuilding(player) is {} building && IsPlayerOwned(building))
+    if (GetPlayerBuilding(player) is {} building)
     {
       ToggleZone(
         player, ref _buildingCreateTimers, ref _buildingDeleteTimers,
@@ -1604,7 +1605,7 @@ public class PlayerBasePvpZones : RustPlugin
     }
 
     // handle player looking at legacy shelter
-    if (GetPlayerShelter(player) is {} shelter && IsPlayerOwned(shelter))
+    if (GetPlayerShelter(player) is {} shelter)
     {
       ToggleZone(
         player, ref _shelterCreateTimers, ref _shelterDeleteTimers,
