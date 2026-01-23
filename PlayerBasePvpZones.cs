@@ -155,8 +155,12 @@ public class PlayerBasePvpZones : RustPlugin
 
   // remove+destroy timer stored in the given dictionary under the given key
   private static bool CancelDictionaryTimer<T>(
-    ref Dictionary<T, Timer> dictionary, T key) =>
-      dictionary.Remove(key, out var cTimer) && DestroyTimer(cTimer);
+    ref Dictionary<T, Timer> dictionary, T key)
+  {
+    if (!dictionary.Remove(key, out var cTimer)) return false;
+    DestroyTimer(cTimer);
+    return true;
+  }
 
   // BuildingBlock wrapper for GetToolCupboard()
   private static BuildingPrivlidge GetToolCupboard(
@@ -267,7 +271,8 @@ public class PlayerBasePvpZones : RustPlugin
     var message = lang.GetMessage(
       "NotifyOwnerCreate", this, player.UserIDString);
     SendReply(player, string.Format(
-      message, _configData.PrefixNotify, _configData.CreateDelaySeconds));
+      message, _configData.PrefixNotify,
+      Mathf.CeilToInt(_configData.CreateDelaySeconds)));
   }
 
   private void NotifyZoneDelete(NetworkableId baseID)
@@ -844,26 +849,30 @@ public class PlayerBasePvpZones : RustPlugin
         "WARNING: Entering Player Base PVP Zone",
       ["MessageZoneExit"] =
         "Leaving Player Base PVP Zone",
-      ["NotifyLockoutDamage"] =
+      ["ToggleLockoutDamage"] =
         "{0}Player Base PvP Zone cannot be toggled for another {1} second(s) due to recent damage",
-      ["NotifyLockoutToggle"] =
+      ["ToggleLockoutToggle"] =
         "{0}Player Base PvP Zone cannot be toggled for another {1} second(s) due to recent toggle",
-      ["NotifyCancelCreate"] =
+      ["ToggleCancelCreate"] =
         "{0}Player Base PvP Zone creation canceled due to toggle command",
-      ["NotifyCancelDelete"] =
+      ["ToggleCancelDelete"] =
         "{0}Player Base PvP Zone deletion canceled due to toggle command",
-      ["NotifyToggleDelete"] =
+      ["ToggleDelete"] =
         "{0}Player Base PvP Zone deletion triggered due to toggle command",
-      ["NotifyToggleCreate"] =
+      ["ToggleCreate"] =
         "{0}Player Base PvP Zone creation triggered due to toggle command",
-      ["NotifyToggleFail"] =
+      ["ToggleFail"] =
         "{0}Player Base PvP Zone not found",
-      ["NotifyNoParams"] =
-        "Valid parameter(s) required; type the following chat command for help: /{0} {1}",
-      ["NotifyNoPerms"] =
+      ["HelpToggle"] =
+        "/{0} {1} - toggle Player Base PvP Zone for authorized nearby shelter, looked-at TC, or mounted tugboat",
+      ["HelpNoPerms"] =
         "You do not have permission to run any PBPZ commands",
-      ["NotifyCommandToggle"] =
-        "/{0} {1} - toggle Player Base PvP Zone for authorized nearby shelter, looked-at TC, or mounted tugboat"
+      ["CmdNoParams"] =
+        "Valid parameter(s) required; type the following chat command for help: /{0} {1}",
+      ["CmdNoPerm"] =
+        "You do not have permission to run this PBPZ command",
+      ["CmdUnknown"] =
+        "Unknown PBPZ command"
     }, this);
   }
 
@@ -956,7 +965,10 @@ public class PlayerBasePvpZones : RustPlugin
     Pool.FreeUnmanaged(ref networkableIds);
   }
 
-  private static bool DestroyTimer(Timer t) => TimerValid(t) && t.Destroy();
+  private static void DestroyTimer(Timer t)
+  {
+    if (TimerValid(t)) t.Destroy();
+  }
 
   private static bool TimerValid(Timer t) => false == t?.Destroyed;
 
@@ -1445,8 +1457,8 @@ public class PlayerBasePvpZones : RustPlugin
   private string GetLockoutMessageName(LockoutReason reason) => reason switch
   {
     LockoutReason.None => null,
-    LockoutReason.Damage => "NotifyLockoutDamage",
-    LockoutReason.Toggle => "NotifyLockoutToggle",
+    LockoutReason.Damage => "ToggleLockoutDamage",
+    LockoutReason.Toggle => "ToggleLockoutToggle",
     _ => null
   };
 
@@ -1469,7 +1481,7 @@ public class PlayerBasePvpZones : RustPlugin
     {
       SendReply(player, string.Format(lang.GetMessage(lockoutMessage,
           this, player.UserIDString),
-        _configData.PrefixNotify, toggleStates.Item3));
+        _configData.PrefixNotify, Mathf.CeilToInt(toggleStates.Item3)));
       return;
     }
 
@@ -1478,7 +1490,7 @@ public class PlayerBasePvpZones : RustPlugin
     // NOTE: supports null because tugboats don't currently have creation delays
     if (true == createDict?.ContainsKey(netID))
     {
-      SendReply(player, string.Format(lang.GetMessage("NotifyCancelCreate",
+      SendReply(player, string.Format(lang.GetMessage("ToggleCancelCreate",
         this, player.UserIDString), _configData.PrefixNotify));
 
       // record disabled state and apply toggle lockout (if applicable)
@@ -1497,7 +1509,7 @@ public class PlayerBasePvpZones : RustPlugin
     //  is not running due to entity kill/death
     if (deleteDict.ContainsKey(netID))
     {
-      SendReply(player, string.Format(lang.GetMessage("NotifyCancelDelete",
+      SendReply(player, string.Format(lang.GetMessage("ToggleCancelDelete",
         this, player.UserIDString), _configData.PrefixNotify));
 
       // record toggle state and apply lockout (if applicable)
@@ -1512,7 +1524,7 @@ public class PlayerBasePvpZones : RustPlugin
     // handle zone currently active
     if (dataDict.ContainsKey(netID))
     {
-      SendReply(player, string.Format(lang.GetMessage("NotifyToggleDelete",
+      SendReply(player, string.Format(lang.GetMessage("ToggleDelete",
         this, player.UserIDString), _configData.PrefixNotify));
 
       // record toggle state and apply lockout (if applicable)
@@ -1535,7 +1547,7 @@ public class PlayerBasePvpZones : RustPlugin
     }
 
     // else zone was previously toggled off
-    SendReply(player, string.Format(lang.GetMessage("NotifyToggleCreate",
+    SendReply(player, string.Format(lang.GetMessage("ToggleCreate",
       this, player.UserIDString), _configData.PrefixNotify));
 
     // record toggle state and apply lockout (if applicable)
@@ -1554,17 +1566,16 @@ public class PlayerBasePvpZones : RustPlugin
   {
     var noPerms = true;
 
-    if (iPlayer.IsAdmin ||
-        iPlayer.HasPermission(GetPermission(TogglePermission)))
+    if (iPlayer.HasPermission(GetPermission(TogglePermission)))
     {
-      SendReply(player, string.Format(lang.GetMessage("NotifyCommandToggle",
+      SendReply(player, string.Format(lang.GetMessage("HelpToggle",
         this, player.UserIDString), CommandRoot, CommandToggle));
       noPerms = false;
     }
 
     if (noPerms)
     {
-      SendReply(player, lang.GetMessage("NotifyNoPerms",
+      SendReply(player, lang.GetMessage("HelpNoPerms",
         this, player.UserIDString));
     }
   }
@@ -1606,7 +1617,7 @@ public class PlayerBasePvpZones : RustPlugin
       return;
     }
 
-    SendReply(player, string.Format(lang.GetMessage("NotifyToggleFail",
+    SendReply(player, string.Format(lang.GetMessage("ToggleFail",
       this, player.UserIDString), _configData.PrefixNotify));
   }
 
@@ -1621,7 +1632,7 @@ public class PlayerBasePvpZones : RustPlugin
 
     if (args.Length < 1)
     {
-      SendReply(player, string.Format(lang.GetMessage("NotifyNoParams",
+      SendReply(player, string.Format(lang.GetMessage("CmdNoParams",
         this, player.UserIDString), CommandRoot, CommandHelp));
       return;
     }
@@ -1633,16 +1644,19 @@ public class PlayerBasePvpZones : RustPlugin
         return;
 
       case CommandToggle:
-        if (!iPlayer.IsAdmin &&
-            !iPlayer.HasPermission(GetPermission(TogglePermission)))
+        if (iPlayer.HasPermission(GetPermission(TogglePermission)))
         {
-          break;
+          HandleCommandToggle(player);
         }
-        HandleCommandToggle(player);
+        else
+        {
+          SendReply(player, string.Format(lang.GetMessage("CmdNoPerm",
+            this, player.UserIDString), CommandRoot, CommandHelp));
+        }
         return;
     }
 
-    SendReply(player, string.Format(lang.GetMessage("NotifyNoParams",
+    SendReply(player, string.Format(lang.GetMessage("CmdUnknown",
       this, player.UserIDString), CommandRoot, CommandHelp));
   }
 
@@ -2299,7 +2313,7 @@ public class PlayerBasePvpZones : RustPlugin
     return deadKeys.Count;
   }
 
-  private readonly (bool, LockoutReason, double) _defaultToggleStates =
+  private readonly (bool, LockoutReason, float) _defaultToggleStates =
     (true, LockoutReason.None, 0.0f);
 
   // get zone enable state and lockout reason
@@ -2310,7 +2324,7 @@ public class PlayerBasePvpZones : RustPlugin
   // - lockout expired
   //
   // schedules data file save if something changed
-  private (bool, LockoutReason, double) GetToggleStates(
+  private (bool, LockoutReason, float) GetToggleStates(
     Dictionary<ulong, ToggleData> toggleDict, NetworkableId netId)
   {
     // if no toggle entry, zone should be enabled
@@ -2337,7 +2351,7 @@ public class PlayerBasePvpZones : RustPlugin
     }
 
     var lockoutRemainingSeconds = LockoutReason.None == toggleData.LockReason ?
-      0.0f : (toggleData.UnlockTime - curTime).TotalSeconds;
+      0.0f : (float)(toggleData.UnlockTime - curTime).TotalSeconds;
     if (lockoutRemainingSeconds < 0.0f) lockoutRemainingSeconds = 0.0f;
 
     return
