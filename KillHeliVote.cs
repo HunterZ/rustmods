@@ -4,17 +4,19 @@ using Oxide.Core.Plugins;
 using Oxide.Core;
 using System.Collections.Generic;
 using System;
+using System.Collections;
 using Facepunch;
 using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Kill Heli Vote", "HunterZ/Snaplatack", "2.0.1")]
+[Info("Kill Heli Vote", "HunterZ/Snaplatack", "2.0.2")]
 [Description("Players can vote to kill all Patrol Helicopters")]
 public class KillHeliVote : RustPlugin
 {
   [PluginReference]
   private readonly Plugin HeliSignals, LootDefender;
+
   private readonly HashSet<string> _bannedPlayers = new();
   private readonly HashSet<string> _eligiblePlayers = new();
   private readonly HashSet<string> _votedPlayers = new();
@@ -23,6 +25,7 @@ public class KillHeliVote : RustPlugin
   private string _adminPerm;  // backing for AdminPerm
   private string _bannedPerm; // backing for BannedPerm
   private string _votePerm;   // backing for VotePerm
+  private Coroutine _broadcastCoroutine;
 
   #region Setup
 
@@ -66,14 +69,13 @@ public class KillHeliVote : RustPlugin
         _heliCache.Add(heli);
       }
     }
-    if (_heliCache.Count > 0)
-    {
-      StartHeliAnnouncements();
-    }
+
+    CheckStartAnnounce();
   }
 
   private void Unload()
   {
+    StopBroadcast();
     _bannedPlayers.Clear();
     _eligiblePlayers.Clear();
     _votedPlayers.Clear();
@@ -92,8 +94,7 @@ public class KillHeliVote : RustPlugin
 
     _heliCache.Add(heli);
 
-    // only start announcing on 0->1 helis
-    if (_heliCache.Count == 1) StartHeliAnnouncements();
+    CheckStartAnnounce();
   }
 
   private object OnEntityTakeDamage(PatrolHelicopter heli, HitInfo hitInfo)
@@ -122,7 +123,7 @@ public class KillHeliVote : RustPlugin
     if (!heli) return;
 
     _heliCache.Remove(heli);
-    if (_heliCache.Count != 0) return;
+    if (_heliCache.Count > 0) return;
 
     // that was the only heli, so clear votes and stop announcing
     _votedPlayers.Clear();
@@ -318,14 +319,16 @@ public class KillHeliVote : RustPlugin
     return votesRequired;
   }
 
-  private void StartHeliAnnouncements()
+  // delay 5 seconds to give vanilla spawn toast time to end
+  private void CheckStartAnnounce() => timer.Once(5.0f, () =>
   {
-    DoHeliAnnouncement();
-    DestroyTimer(_msgTimer);
-    _msgTimer = timer.Every(_config.Settings.AnnounceTime, DoHeliAnnouncement);
-  }
+    // abort if no helis or already announcing
+    if (_heliCache.Count == 0 || TimerValid(_msgTimer)) return;
+    Announce();
+    _msgTimer = timer.Every(_config.Settings.AnnounceTime, Announce);
+  });
 
-  private void DoHeliAnnouncement()
+  private void Announce()
   {
     SendGlobalMsg(MsgKeys.HeliAnnouncement,
       _votedPlayers.Count, NumVotesRequired(),
@@ -547,12 +550,13 @@ public class KillHeliVote : RustPlugin
       "gametip.showtoast", settings.Type, message, string.Empty, false);
   }
 
-  private void SendGlobalMsg(MsgKeys msgKey, params object[] formatParams)
+  private IEnumerator BroadcastRoutine(
+    MsgKeys msgKey, params object[] formatParams)
   {
     var msgName = GetMessageName(msgKey);
     if (!_config.MsgSettings.Messages.TryGetValue(msgName, out var settings))
     {
-      return;
+      yield break;
     }
     var message = GetMessage(msgName, null, formatParams);
 
@@ -561,9 +565,8 @@ public class KillHeliVote : RustPlugin
       Server.Broadcast(message, _config.MsgSettings.ChatMsgID);
     }
 
-    if (!settings.UseToast) return;
-    // TODO: this should probably be a coroutine, as it could cause hitches on
-    //  high pop servers
+    if (!settings.UseToast) yield break;
+
     // use a temporary dict to cache the formatted message for each language
     //  encountered, so that we only have to retrieve and format it once
     var msgDict = Pool.Get<Dictionary<string, string>>();
@@ -572,6 +575,9 @@ public class KillHeliVote : RustPlugin
     msgDict[lang.GetLanguage(null)] = message;
     foreach (var player in BasePlayer.activePlayerList)
     {
+      // do the shortest coroutine yield possible
+      yield return null;
+
       if (!player) continue;
       var playerID = GetID(player);
       if (string.IsNullOrEmpty(playerID) || _bannedPlayers.Contains(playerID))
@@ -586,9 +592,25 @@ public class KillHeliVote : RustPlugin
       }
       // player.ShowToast((GameTip.Styles)settings.Type, playerMsg);
       player.SendConsoleCommand(
-        "gametip.showtoast", settings.Type, message, string.Empty, false);
+        "gametip.showtoast", settings.Type, playerMsg, string.Empty, false);
     }
     Pool.FreeUnmanaged(ref msgDict);
+    _broadcastCoroutine = null;
+  }
+
+  private void StopBroadcast()
+  {
+    if (null == _broadcastCoroutine) return;
+    PrintWarning("Interrupting in-progress broadcast");
+    ServerMgr.Instance.StopCoroutine(_broadcastCoroutine);
+    _broadcastCoroutine = null;
+  }
+
+  private void SendGlobalMsg(MsgKeys msgKey, params object[] formatParams)
+  {
+    StopBroadcast();
+    _broadcastCoroutine =
+      ServerMgr.Instance.StartCoroutine(BroadcastRoutine(msgKey, formatParams));
   }
 
   private string GetMessage(
