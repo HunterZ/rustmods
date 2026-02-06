@@ -98,13 +98,6 @@ public class SuperPVxInfo : RustPlugin
 
   private StoredData _storedData;
 
-  // TODO: the fields below can be removed after December 2025 force update, as
-  //  Carbon's zombie timers issue has been fixed
-  // whether OnServerInitialized() has been called yet
-  private bool _initialized = false;
-  // whether something requested a data save before OnServerInitialized()
-  private bool _delayedSave = false;
-
   private const string UIName = "SuperPVxInfoUI";
 
   #endregion Plugin Data
@@ -157,10 +150,9 @@ public class SuperPVxInfo : RustPlugin
     }
 
     // remove timer entry if present, and destroy it if needed
-    if (excludeTimers.Remove(pluginName, out var removedTimer) &&
-        TimerValid(removedTimer))
+    if (excludeTimers.Remove(pluginName, out var removedTimer))
     {
-      removedTimer.Destroy();
+      DestroyTimer(removedTimer);
     }
 
     // abort if timers-by-plugin is still not empty for this player
@@ -174,7 +166,9 @@ public class SuperPVxInfo : RustPlugin
     }
   }
 
-  private bool TimerValid(Timer t) => false == t?.Destroyed;
+  private static bool DestroyTimer(Timer t) => TimerValid(t) && t.Destroy();
+
+  private static bool TimerValid(Timer t) => false == t?.Destroyed;
 
   #endregion Utility Methods
 
@@ -185,8 +179,6 @@ public class SuperPVxInfo : RustPlugin
 
   private void Init()
   {
-    _initialized = false;
-    _delayedSave = false;
     LoadData();
     PlayerWatcher.AllowForceUpdate =
       null == _configData || _configData.ForceUpdates;
@@ -203,8 +195,6 @@ public class SuperPVxInfo : RustPlugin
 
   private void OnServerInitialized(bool isStartup)
   {
-    _initialized = true;
-
     if (Convert.ToBoolean(DynamicPVP?.Call("IsUsingExcludePlayer")))
     {
       Puts("OnServerInitialized(): Detected DynamicPVP support for TruePVE PVP delays");
@@ -224,7 +214,7 @@ public class SuperPVxInfo : RustPlugin
       PrintWarning("ZoneManager is outdated or not running; this plugin may not work properly");
     }
 
-    var saveData = _delayedSave;
+    var saveData = false;
     if (null != _storedData)
     {
       // sync with TruePVE mappings in case of reload
@@ -309,10 +299,7 @@ public class SuperPVxInfo : RustPlugin
     {
       foreach (var excludeTimer in excludeTimers.Values)
       {
-        if (TimerValid(excludeTimer))
-        {
-          excludeTimer.Destroy();
-        }
+        DestroyTimer(excludeTimer);
       }
       excludeTimers.Clear();
     }
@@ -330,7 +317,6 @@ public class SuperPVxInfo : RustPlugin
     }
 
     _saveDataTimer = null;
-    _initialized = _delayedSave = false;
   }
 
   private void OnPlayerConnected(BasePlayer player)
@@ -1650,14 +1636,6 @@ public class SuperPVxInfo : RustPlugin
   //  data file writes
   private void SaveData()
   {
-    // don't allow timer to be created before OnServerInitialized() because
-    //  Carbon sucks and will make it a zombie forever
-    if (!_initialized)
-    {
-      PrintWarning("Delaying data save because OnServerInitialized() has not been called yet");
-      _delayedSave = true;
-      return;
-    }
     // abort if save already pending
     if (TimerValid(_saveDataTimer)) return;
     // start a save timer
@@ -1668,10 +1646,7 @@ public class SuperPVxInfo : RustPlugin
 
   private void WriteData()
   {
-    if (TimerValid(_saveDataTimer))
-    {
-      _saveDataTimer.Destroy();
-    }
+    DestroyTimer(_saveDataTimer);
     Interface.Oxide.DataFileSystem.WriteObject(Name, _storedData);
   }
 
