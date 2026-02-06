@@ -12,7 +12,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Super PVx Info", "HunterZ", "1.8.2")]
+[Info("Super PVx Info", "HunterZ", "1.9.0")]
 [Description("Displays PvE/PvP/etc. status on player's HUD")]
 public class SuperPVxInfo : RustPlugin
 {
@@ -63,7 +63,7 @@ public class SuperPVxInfo : RustPlugin
 
   [PluginReference] Plugin
     AbandonedBases, DynamicPVP, DangerousTreasures, PlayerBasePvpZones,
-    PopupNotifications, RaidableBases, SimpleStatus, ZoneManager;
+    PopupNotifications, RaidableBases, SimpleStatus, TruePVE, ZoneManager;
 
   private ConfigData _configData;
 
@@ -91,19 +91,16 @@ public class SuperPVxInfo : RustPlugin
     ["PVP Depth Entry"] =
       "{0}WARNING: Entering Train Tunnels PVP Zone",
     ["PVP Depth Exit"] =
-      "{0}Leaving Train Tunnels PVP Zone"
+      "{0}Leaving Train Tunnels PVP Zone",
+    ["PVP Deep Sea Entry"] =
+      "{0}WARNING: Entering Deep Sea PVP Zone",
+    ["PVP Deep Sea Exit"] =
+      "{0}Leaving Deep Sea PVP Zone"
   };
 
   private Timer _saveDataTimer;
 
   private StoredData _storedData;
-
-  // TODO: the fields below can be removed after December 2025 force update, as
-  //  Carbon's zombie timers issue has been fixed
-  // whether OnServerInitialized() has been called yet
-  private bool _initialized = false;
-  // whether something requested a data save before OnServerInitialized()
-  private bool _delayedSave = false;
 
   private const string UIName = "SuperPVxInfoUI";
 
@@ -157,10 +154,9 @@ public class SuperPVxInfo : RustPlugin
     }
 
     // remove timer entry if present, and destroy it if needed
-    if (excludeTimers.Remove(pluginName, out var removedTimer) &&
-        TimerValid(removedTimer))
+    if (excludeTimers.Remove(pluginName, out var removedTimer))
     {
-      removedTimer.Destroy();
+      DestroyTimer(removedTimer);
     }
 
     // abort if timers-by-plugin is still not empty for this player
@@ -174,7 +170,12 @@ public class SuperPVxInfo : RustPlugin
     }
   }
 
-  private bool TimerValid(Timer t) => false == t?.Destroyed;
+  private static void DestroyTimer(Timer t)
+  {
+    if (TimerValid(t)) t.Destroy();
+  }
+
+  private static bool TimerValid(Timer t) => false == t?.Destroyed;
 
   #endregion Utility Methods
 
@@ -185,14 +186,13 @@ public class SuperPVxInfo : RustPlugin
 
   private void Init()
   {
-    _initialized = false;
-    _delayedSave = false;
     LoadData();
     PlayerWatcher.AllowForceUpdate =
       null == _configData || _configData.ForceUpdates;
     PlayerWatcher.Instance = this;
-    PlayerWatcher.PvpAboveHeight = _configData?.PvpAboveHeight ?? 1000.0f;
-    PlayerWatcher.PvpBelowHeight = _configData?.PvpBelowHeight ?? -500.0f;
+    var deepSeaBounds = DeepSeaManager.DeepSeaBounds;
+    PlayerWatcher.DeepSeaMin = deepSeaBounds.center - deepSeaBounds.extents;
+    PlayerWatcher.DeepSeaMax = deepSeaBounds.center + deepSeaBounds.extents;
     PlayerWatcher.UpdateIntervalSeconds =
       _configData?.UpdateIntervalSeconds ?? 1.0f;
     if (null != _configData && !string.IsNullOrEmpty(_configData.ToggleCommand))
@@ -203,8 +203,6 @@ public class SuperPVxInfo : RustPlugin
 
   private void OnServerInitialized(bool isStartup)
   {
-    _initialized = true;
-
     if (Convert.ToBoolean(DynamicPVP?.Call("IsUsingExcludePlayer")))
     {
       Puts("OnServerInitialized(): Detected DynamicPVP support for TruePVE PVP delays");
@@ -224,7 +222,31 @@ public class SuperPVxInfo : RustPlugin
       PrintWarning("ZoneManager is outdated or not running; this plugin may not work properly");
     }
 
-    var saveData = _delayedSave;
+    if (true == _configData?.SyncAssumptions && true == TruePVE?.IsLoaded)
+    {
+      Puts("Querying TruePVE for assumptions...");
+      if (TruePVE?.Call("GetAboveworld") is float pvpAboveHeight)
+      {
+        _configData.PvpAboveHeight = pvpAboveHeight;
+        Puts($" - PVP above height: {pvpAboveHeight}");
+      }
+      if (TruePVE?.Call("GetUnderworld") is float pvpBelowHeight)
+      {
+        _configData.PvpBelowHeight = pvpBelowHeight;
+        Puts($" - PVP below height: {pvpBelowHeight}");
+      }
+      if (TruePVE?.Call("GetDeepSea") is bool pvpDeepSea)
+      {
+        _configData.PvpDeepSea = pvpDeepSea;
+        Puts($" - PVP deep sea: {pvpDeepSea}");
+      }
+      Puts("...Done");
+    }
+    PlayerWatcher.PvpAboveHeight = _configData?.PvpAboveHeight ?? 1000.0f;
+    PlayerWatcher.PvpBelowHeight = _configData?.PvpBelowHeight ?? -500.0f;
+    PlayerWatcher.PvpDeepSea     = _configData?.PvpDeepSea     ?? false;
+
+    var saveData = false;
     if (null != _storedData)
     {
       // sync with TruePVE mappings in case of reload
@@ -309,10 +331,7 @@ public class SuperPVxInfo : RustPlugin
     {
       foreach (var excludeTimer in excludeTimers.Values)
       {
-        if (TimerValid(excludeTimer))
-        {
-          excludeTimer.Destroy();
-        }
+        DestroyTimer(excludeTimer);
       }
       excludeTimers.Clear();
     }
@@ -330,7 +349,6 @@ public class SuperPVxInfo : RustPlugin
     }
 
     _saveDataTimer = null;
-    _initialized = _delayedSave = false;
   }
 
   private void OnPlayerConnected(BasePlayer player)
@@ -1411,6 +1429,12 @@ public class SuperPVxInfo : RustPlugin
     [JsonProperty(PropertyName = "Assume PVP Above Height")]
     public float PvpAboveHeight = 1000.0f;
 
+    [JsonProperty(PropertyName = "Assume PVP In Deep Sea")]
+    public bool PvpDeepSea = false;
+
+    [JsonProperty(PropertyName = "Prefer TruePVE Config Over Assumptions")]
+    public bool SyncAssumptions = true;
+
     [JsonProperty(PropertyName = "Toggle UI Command (empty string to disable)")]
     public string ToggleCommand = "pvxui";
 
@@ -1650,14 +1674,6 @@ public class SuperPVxInfo : RustPlugin
   //  data file writes
   private void SaveData()
   {
-    // don't allow timer to be created before OnServerInitialized() because
-    //  Carbon sucks and will make it a zombie forever
-    if (!_initialized)
-    {
-      PrintWarning("Delaying data save because OnServerInitialized() has not been called yet");
-      _delayedSave = true;
-      return;
-    }
     // abort if save already pending
     if (TimerValid(_saveDataTimer)) return;
     // start a save timer
@@ -1668,10 +1684,7 @@ public class SuperPVxInfo : RustPlugin
 
   private void WriteData()
   {
-    if (TimerValid(_saveDataTimer))
-    {
-      _saveDataTimer.Destroy();
-    }
+    DestroyTimer(_saveDataTimer);
     Interface.Oxide.DataFileSystem.WriteObject(Name, _storedData);
   }
 
@@ -1692,6 +1705,12 @@ public class SuperPVxInfo : RustPlugin
     public static float PvpAboveHeight { get; set; }
     // consider at/below this height to be PvP
     public static float PvpBelowHeight { get; set; }
+    // consider Deep Sea to be PvP
+    public static bool PvpDeepSea { get; set; }
+    // minimum x/y/z coordinate values from Deep Sea bounds
+    public static Vector3 DeepSeaMin { get; set; }
+    // maximum x/y/z coordinate values from Deep Sea bounds
+    public static Vector3 DeepSeaMax { get; set; }
     // config-based update interval
     public static float UpdateIntervalSeconds { get; set; }
 
@@ -1756,10 +1775,12 @@ public class SuperPVxInfo : RustPlugin
 
     // true if check delay should be preempted
     private bool _forceUpdate;
-    // true if in height was within PvP thresholds on last check
+    // true if height was within PvP-above thresholds on last check
     private bool? _heightAbovePvp;
-    // true if in height was within PvP thresholds on last check
+    // true if height was within PvP-below thresholds on last check
     private bool? _heightBelowPvp;
+    // true if in Deep Sea PVP on last check
+    private bool? _inDeepSeaPvp;
     // true if in PVP start/stop event on last check
     private bool _inPvpEvent;
     // true if in safe zone on last check
@@ -1815,6 +1836,7 @@ public class SuperPVxInfo : RustPlugin
       _forceUpdate = false;
       _heightAbovePvp = null;
       _heightBelowPvp = null;
+      _inDeepSeaPvp = null;
       _inPvpEvent = false;
       _inSafeZone = null;
       _inTutorial = null;
@@ -1861,15 +1883,14 @@ public class SuperPVxInfo : RustPlugin
       // determine new state
       var currentPvxState = GetPVxState();
 
-      // check for change from old/no state
-      if (currentPvxState != _pvxState)
-      {
-        // (re)create GUI for new state
-        Instance.CreateUI(_player, currentPvxState, _pvxState);
+      // abort if no state change
+      if (currentPvxState == _pvxState) return;
 
-        // record new state
-        _pvxState = currentPvxState;
-      }
+      // (re)create GUI for new state
+      Instance.CreateUI(_player, currentPvxState, _pvxState);
+
+      // record new state
+      _pvxState = currentPvxState;
     }
 
     // private methods
@@ -1918,6 +1939,7 @@ public class SuperPVxInfo : RustPlugin
       if (PVxType.PVP == _inZoneType)               return PVxType.PVP;
       if (true == _heightAbovePvp)                  return PVxType.PVP;
       if (true == _heightBelowPvp)                  return PVxType.PVP;
+      if (true == _inDeepSeaPvp)                    return PVxType.PVP;
       if (_pvpDelays.Count > 0)                     return PVxType.PVPDelay;
       if (PVxType.PVE == _inBaseType)               return PVxType.PVE;
       if (PVxType.PVE == _inPVxEventType)           return PVxType.PVE;
@@ -1942,6 +1964,11 @@ public class SuperPVxInfo : RustPlugin
 
       Instance.SendCannedMessage(_player, message);
     }
+
+    private static bool InDeepSeaPvp(Vector3 position) =>
+      position.x >= DeepSeaMin.x && position.x <= DeepSeaMax.x &&
+      position.y >= DeepSeaMin.y && position.y <= DeepSeaMax.y &&
+      position.z >= DeepSeaMin.z && position.z <= DeepSeaMax.z;
 
     // perform any requested and/or periodic flag update checks that could
     //  affect PVx state
@@ -2015,17 +2042,28 @@ public class SuperPVxInfo : RustPlugin
         ref _inTutorial, _player.IsInTutorial,
         "", "");
 
+      var playerPos = _player.transform.position;
+
       // height check
       CheckPeriodic(
-        ref _heightAbovePvp, _player.transform.position.y > PvpAboveHeight,
+        ref _heightAbovePvp, playerPos.y > PvpAboveHeight,
         "PVP Height Entry", "PVP Height Exit"
       );
 
       // depth check
       CheckPeriodic(
-        ref _heightBelowPvp, _player.transform.position.y < PvpBelowHeight,
+        ref _heightBelowPvp, playerPos.y < PvpBelowHeight,
         "PVP Depth Entry", "PVP Depth Exit"
       );
+
+      // deap sea check
+      if (PvpDeepSea)
+      {
+        CheckPeriodic(
+          ref _inDeepSeaPvp, InDeepSeaPvp(playerPos),
+          "PVP Deep Sea Entry", "PVP Deep Sea Exit"
+        );
+      }
     }
   }
 

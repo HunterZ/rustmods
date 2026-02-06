@@ -2,6 +2,7 @@
 #  server install)
 *.cs
 !DynamicPVP.cs
+!KillHeliVote.cs
 !MagicTravelingVendorPanel.cs
 !PlayerBasePvpZones.cs
 !ScarecrowWrangler.cs
