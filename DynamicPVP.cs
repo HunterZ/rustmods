@@ -16,7 +16,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "5.0.0", ResourceId = 2728)]
+[Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "5.0.1", ResourceId = 2728)]
 [Description("Creates temporary PvP zones on certain actions/events")]
 public class DynamicPVP : RustPlugin
 {
@@ -41,7 +41,7 @@ public class DynamicPVP : RustPlugin
     "assets/bundled/prefabs/modding/events/twitch/br_sphere_purple.prefab";
   private const string ZoneName = "DynamicPVP";
 
-  private readonly Dictionary<string, Timer> _eventTimers = new();
+  private readonly Dictionary<string, Timer> _eventDeleteTimers = new();
   private readonly Dictionary<ulong, LeftZone> _pvpDelays = new();
 
   // Map of event names + base events by ZoneID
@@ -320,21 +320,14 @@ public class DynamicPVP : RustPlugin
     {
       Subscribe(nameof(OnEntityDeath));
     }
-    if ((_configData.GeneralEvents.TimedSupply.Enabled &&
-         _configData.GeneralEvents.TimedSupply.StopWhenKilled) ||
-        (_configData.GeneralEvents.SupplySignal.Enabled &&
-         _configData.GeneralEvents.SupplySignal.StopWhenKilled) ||
-        (_configData.GeneralEvents.HackableCrate.Enabled &&
-         _configData.GeneralEvents.HackableCrate.StopWhenKilled) ||
+    if (_configData.GeneralEvents.TimedSupply.Enabled ||
+        _configData.GeneralEvents.SupplySignal.Enabled ||
+        _configData.GeneralEvents.HackableCrate.Enabled ||
         _configData.GeneralEvents.CargoShip.Enabled)
     {
       Subscribe(nameof(OnEntityKill));
     }
-    if ((_configData.GeneralEvents.TimedSupply.Enabled &&
-         _configData.GeneralEvents.TimedSupply.StartWhenSpawned) ||
-        (_configData.GeneralEvents.SupplySignal.Enabled &&
-         _configData.GeneralEvents.SupplySignal.StartWhenSpawned) ||
-        (_configData.GeneralEvents.HackableCrate.Enabled &&
+    if ((_configData.GeneralEvents.HackableCrate.Enabled &&
          _configData.GeneralEvents.HackableCrate.StartWhenSpawned) ||
         _configData.GeneralEvents.CargoShip.Enabled)
     {
@@ -503,7 +496,7 @@ public class DynamicPVP : RustPlugin
 
   private void TryRemoveEventTimer(string zoneId)
   {
-    if (_eventTimers.Remove(zoneId, out var value))
+    if (_eventDeleteTimers.Remove(zoneId, out var value))
     {
       value?.Destroy();
     }
@@ -947,20 +940,25 @@ public class DynamicPVP : RustPlugin
 
   private void OnEntitySpawned(HackableLockedCrate hackableLockedCrate)
   {
+    var baseEvent = _configData.GeneralEvents.HackableCrate;
+    if (!baseEvent.Enabled)
+    {
+      return;
+    }
+
     if (!hackableLockedCrate || null == hackableLockedCrate.net)
     {
-      PrintDebug("StartupHackableLockedCrate(): ERROR: Crate or Net is null", DebugLevel.Error);
+      PrintDebug("OnEntitySpawned(): ERROR: HackableLockedCrate or Net is null", DebugLevel.Error);
       return;
     }
 
-    var baseEvent = _configData.GeneralEvents.HackableCrate;
-    if (!baseEvent.Enabled || !baseEvent.StartWhenSpawned)
+    if (!baseEvent.StartWhenSpawned)
     {
-      PrintDebug("OnEntitySpawned(HackableLockedCrate): Ignoring due to event or spawn start disabled");
+      PrintDebug("OnEntitySpawned(HackableLockedCrate): Ignoring due to start-when-spawned false");
       return;
     }
 
-    PrintDebug("StartupHackableLockedCrate(): Trying to create hackable crate spawn event");
+    PrintDebug("OnEntitySpawned(): Trying to create HackableCrate spawn event");
     NextTick(() => LockedCrateEvent(hackableLockedCrate));
   }
 
@@ -1016,40 +1014,51 @@ public class DynamicPVP : RustPlugin
 
   private void OnEntityKill(HackableLockedCrate hackableLockedCrate)
   {
+    // all overloads of this hook are called if any of them are needed, so abort
+    //  quickly for performance
+    if (!_configData.GeneralEvents.HackableCrate.Enabled)
+    {
+      PrintDebug("OnEntityKill(HackableLockedCrate): Ignoring due to event disabled");
+      return;
+    }
+
     if (!hackableLockedCrate || null == hackableLockedCrate.net)
     {
       PrintDebug("OnEntityKill(HackableLockedCrate): ERROR: Crate or Net is null", DebugLevel.Error);
       return;
     }
 
-    var baseEvent = _configData.GeneralEvents.HackableCrate;
-    if (!baseEvent.Enabled || !baseEvent.StopWhenKilled)
-    {
-      PrintDebug("OnEntityKill(HackableLockedCrate): Ignoring due to event or kill stop disabled");
-      return;
-    }
-
     var zoneId = hackableLockedCrate.net.ID.ToString();
-    if (!_activeDynamicZones.ContainsKey(zoneId))
+    if (!_activeDynamicZones.TryGetValue(zoneId, out var baseEvent))
     {
-      // no active zone for this hackable locked crate
+      PrintDebug($"OnEntityKill(HackableLockedCrate): Ignoring due to no event for ID={zoneId}");
       return;
     }
 
-    // untether everything that we may have parented to the
-    //  HackableLockedCrate so that they don't get killed along with it
+    if (baseEvent is not HackableCrateEvent hackableCrateEvent)
+    {
+      // pathological
+      PrintDebug($"OnEntityKill(HackableLockedCrate): Unknown HackableLockedCrate eventName={baseEvent.GetName()} for zoneId={zoneId}", DebugLevel.Warning);
+      return;
+    }
+
+    // untether everything parented to the crate so that it doesn't get killed
+    //  along with it
     ZM_GetZoneByID(zoneId)?.transform.SetParent(null, true);
     ParentDome(zoneId, Vector3.zero);
 
-    //When the timer starts, don't stop the event immediately
-    if (_eventTimers.ContainsKey(zoneId))
+    if (!hackableCrateEvent.StopWhenKilled)
     {
-      PrintDebug(
-        $"OnEntityKill(HackableLockedCrate): Ignoring due to event timer already active for zoneId={zoneId}");
+      PrintDebug($"OnEntityKill(HackableLockedCrate): Not requesting delete of zoneId={zoneId} because stop-when-killed is false");
       return;
     }
 
-    PrintDebug($"OnEntityKill(HackableLockedCrate): Scheduling delete of zoneId={zoneId}");
+    if (_eventDeleteTimers.ContainsKey(zoneId))
+    {
+      PrintDebug($"OnEntityKill(HackableLockedCrate): Not requesting delete of zoneId={zoneId} because a delete timer is already active");
+      return;
+    }
+
     HandleDeleteDynamicZone(zoneId);
   }
 
@@ -1146,6 +1155,11 @@ public class DynamicPVP : RustPlugin
 
   private void OnEntityDeath(PatrolHelicopter patrolHelicopter, HitInfo info)
   {
+    if (!_configData.GeneralEvents.PatrolHelicopter.Enabled)
+    {
+      return;
+    }
+
     if (!patrolHelicopter || null == patrolHelicopter.net)
     {
       return;
@@ -1156,6 +1170,11 @@ public class DynamicPVP : RustPlugin
 
   private void OnEntityDeath(BradleyAPC bradleyApc, HitInfo info)
   {
+    if (!_configData.GeneralEvents.BradleyApc.Enabled)
+    {
+      return;
+    }
+
     if (!bradleyApc || null == bradleyApc.net)
     {
       return;
@@ -1306,6 +1325,15 @@ public class DynamicPVP : RustPlugin
 
   private void OnEntityKill(SupplyDrop supplyDrop)
   {
+    // all overloads of this hook are called if any of them are needed, so abort
+    //  quickly for performance
+    if (!_configData.GeneralEvents.SupplySignal.Enabled &&
+        !_configData.GeneralEvents.TimedSupply.Enabled)
+    {
+      PrintDebug("OnEntityKill(SupplyDrop): Ignoring due to both SupplyDrop events disabled");
+      return;
+    }
+
     if (!supplyDrop || null == supplyDrop.net)
     {
       PrintDebug("OnEntityKill(SupplyDrop): ERROR: Drop or Net is null", DebugLevel.Error);
@@ -1318,7 +1346,7 @@ public class DynamicPVP : RustPlugin
     var zoneId = supplyDropID.ToString();
     if (!_activeDynamicZones.TryGetValue(zoneId, out var baseEvent))
     {
-      // no active zone for this supply drop
+      PrintDebug($"OnEntityKill(SupplyDrop): Ignoring due to no event for ID={zoneId}");
       return;
     }
 
@@ -1329,31 +1357,39 @@ public class DynamicPVP : RustPlugin
       return;
     }
 
-    // untether everything that we may have parented to the SupplyDrop so that
-    //  they don't get killed along with it
+    // untether everything parented to the drop so that it doesn't get killed
+    //  along with it
     ZM_GetZoneByID(zoneId)?.transform.SetParent(null, true);
     ParentDome(zoneId, Vector3.zero);
 
+    // abort if specific drop event flavor is disabled, or not configured to
+    //  stop on kill
     if (supplyDropEvent is not { Enabled: true } ||
         !supplyDropEvent.StopWhenKilled)
     {
+      PrintDebug($"OnEntityKill(SupplyDrop): Not requesting delete of zoneId={zoneId} because event {supplyDropEvent.GetName()} is disabled, or stop-when-killed is false");
       return;
     }
 
-    // When the timer starts, don't stop the event immediately
-    if (_eventTimers.ContainsKey(zoneId))
+    if (_eventDeleteTimers.ContainsKey(zoneId))
     {
-      PrintDebug(
-        $"OnEntityKill(SupplyDrop): Ignoring due to event timer already active for zoneId={zoneId}");
+      PrintDebug($"OnEntityKill(SupplyDrop): Not requesting delete of zoneId={zoneId} because a delete timer is already active");
       return;
     }
 
-    PrintDebug($"OnEntityKill(SupplyDrop): Scheduling delete of zoneId={zoneId}");
     HandleDeleteDynamicZone(zoneId);
   }
 
   private void OnEntityKill(CargoPlane plane)
   {
+    // all overloads of this hook are called if any of them are needed, so abort
+    //  quickly for performance
+    if (!_configData.GeneralEvents.SupplySignal.Enabled &&
+        !_configData.GeneralEvents.TimedSupply.Enabled)
+    {
+      return;
+    }
+
     if (!plane || null == plane.net)
     {
       return;
@@ -1570,22 +1606,27 @@ public class DynamicPVP : RustPlugin
 
   private void OnEntitySpawned(CargoShip cargoShip)
   {
+    var baseEvent = _configData.GeneralEvents.CargoShip;
+    if (!baseEvent.Enabled)
+    {
+      return;
+    }
+
     if (!cargoShip || null == cargoShip.net)
     {
-      // bad entity
+      PrintDebug("OnEntitySpawned(CargoShip): ERROR: CargoShip or Net is null", DebugLevel.Error);
       return;
     }
 
-    var baseEvent = _configData.GeneralEvents.CargoShip;
-    if (!baseEvent.Enabled || !baseEvent.SpawnState)
+    if (!baseEvent.SpawnState)
     {
-      // not configured to create event on spawn
+      PrintDebug("OnEntitySpawned(CargoShip): Ignoring due to start-when-spawned false");
       return;
     }
 
-    PrintDebug("OnEntitySpawned(CargoShip): Trying to create CargoShip spawn event");
     if (!CheckEntityOwner(cargoShip))
     {
+      PrintDebug("OnEntitySpawned(CargoShip): Ignoring due to entity owner");
       return;
     }
 
@@ -1593,25 +1634,32 @@ public class DynamicPVP : RustPlugin
     //  it exactly once
     if (!CanCreateDynamicPVP(baseEvent.GetName(), cargoShip))
     {
+      // this is logged elsewhere
       return;
     }
 
+    PrintDebug("OnEntitySpawned(CargoShip): Trying to create CargoShip spawn event");
     NextTick(() =>
       HandleParentedEntityEvent(baseEvent, cargoShip, parentOnCreate: true));
   }
 
   private void OnEntityKill(CargoShip cargoShip)
   {
-    if (!cargoShip || null == cargoShip.net)
-    {
-      return;
-    }
-
+    // all overloads of this hook are called if any of them are needed, so abort
+    //  quickly for performance
     if (!_configData.GeneralEvents.CargoShip.Enabled)
     {
+      PrintDebug("OnEntityKill(CargoShip): Ignoring due to event disabled");
       return;
     }
 
+    if (!cargoShip || null == cargoShip.net)
+    {
+      PrintDebug("OnEntityKill(CargoShip): ERROR: Crate or Net is null", DebugLevel.Error);
+      return;
+    }
+
+    // no need to untether here, because this event doesn't support stop delays
     HandleDeleteDynamicZone(cargoShip.net.ID.ToString());
   }
 
@@ -3150,7 +3198,7 @@ public class DynamicPVP : RustPlugin
 
     TryRemoveEventTimer(zoneId);
     PrintDebug($"HandleDeleteDynamicZone(): Scheduling deletion of zoneId={zoneId} for eventName={eventName} in {duration} seconds");
-    _eventTimers.Add(zoneId, timer.Once(
+    _eventDeleteTimers.Add(zoneId, timer.Once(
       duration, () => HandleDeleteDynamicZone(zoneId)));
   }
 
@@ -3187,7 +3235,7 @@ public class DynamicPVP : RustPlugin
       // also untether any domes
       ParentDome(zoneId, Vector3.zero);
     }
-    _eventTimers.Add(zoneId, timer.Once(
+    _eventDeleteTimers.Add(zoneId, timer.Once(
       baseEvent.EventStopDelay, () => DeleteDynamicZone(zoneId)));
   }
 
@@ -4705,9 +4753,11 @@ public class DynamicPVP : RustPlugin
 
   // Hackable Crate general event
   // NOTE: reserve order 70-79
-  public class HackableCrateEvent :
-    SphereCubeTimedEvent, ITimedDisable, IGeneralEvent
+  public class HackableCrateEvent : BaseTimedEvent, ITimedDisable, IGeneralEvent
   {
+    [JsonProperty(PropertyName = "Dynamic PVP Zone Settings", Order = 70)]
+    public SphereCubeParentDynamicZone DynamicZone { get; set; } = new();
+
     [JsonProperty(PropertyName = "Start Event When Spawned (If false, the event starts when unlocking)", Order = 71)]
     public bool StartWhenSpawned { get; set; } = true;
 
@@ -4731,6 +4781,8 @@ public class DynamicPVP : RustPlugin
 
     [JsonIgnore] public GeneralEventType GeneralEventType =>
       GeneralEventType.HackableCrate;
+
+    public override BaseDynamicZone GetDynamicZone() => DynamicZone;
 
     public override string GetName() => nameof(GeneralEventType.HackableCrate);
 
@@ -4991,7 +5043,8 @@ public class DynamicPVP : RustPlugin
   }
 
   // NOTE: reserve order 300-399
-  public class SphereCubeDynamicZone : BaseDynamicZone, ISphereZone, ICubeZone, IRotateZone
+  public class SphereCubeDynamicZone
+    : BaseDynamicZone, ISphereZone, ICubeZone, IRotateZone
   {
     [JsonProperty(PropertyName = "Zone Radius", Order = 300)]
     public float Radius { get; set; }
@@ -5068,8 +5121,7 @@ public class DynamicPVP : RustPlugin
   }
 
   // NOTE: reserve order 500-599
-  public class SphereCubeAutoGeoDynamicZone
-    : SphereCubeDynamicZone
+  public class SphereCubeAutoGeoDynamicZone : SphereCubeDynamicZone
   {
     [JsonProperty(PropertyName = "Auto-calculate zone geometry (overwrites existing values)", Order = 500)]
     public bool DoAutoGeo { get; set; }
