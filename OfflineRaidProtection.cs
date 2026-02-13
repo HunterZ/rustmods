@@ -742,7 +742,7 @@ namespace
         InterimDamage = 0f,
         ProtectAll = false,
         ProtectAi = false,
-        ProtectBaseBoats = true,
+        ProtectBaseBoats = false,
         ProtectVehicles = true,
         ProtectTwigs = false,
         ProtectDecayingBase = true,
