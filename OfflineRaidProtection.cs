@@ -15,7 +15,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text;
-// using ConVar;
 
 namespace
 #if CARBON
@@ -2052,29 +2051,30 @@ namespace
       Rust.Layers.Mask.Vehicle_World | // modular cars
       Rust.Layers.Mask.Vehicle_Large;  // buildable boats
 
+#if !CARBON
+    private static bool CheckChatCmdPerm(BasePlayer player, string perm)
+    {
+      if (player.HasPermission(perm))
+        return true;
+
+      player.ChatMessage(LANG_MESSAGE_NOPERMISSION);
+        return false;
+    }
+#endif
 
     private void cmdStatus(BasePlayer player, string _command, string[] args)
     {
       if (!player)
         return;
-
+#if !CARBON
+      if (!CheckChatCmdPerm(player, Configuration.Permission.Check))
+        return;
+#endif
       if (args?.Length is not 0)
       {
-#if CARBON
         player.ChatMessage(GetStatusText(args));
-#else
-        player.ChatMessage(
-          player.HasPermission(Configuration.Permission.Check) ?
-            GetStatusText(args) : LANG_MESSAGE_NOPERMISSION);
-#endif
         return;
       }
-#if !CARBON
-      else if (!player.HasPermission(Configuration.Permission.Check))
-      {
-        player.ChatMessage(LANG_MESSAGE_NOPERMISSION);
-      }
-#endif
 /*
       var maskDict = new Dictionary<string, int>
       {
@@ -2208,13 +2208,11 @@ namespace
     private void cmdFillOnlineTimes(
       BasePlayer player, string command, string[] args)
     {
-#if !CARBON
-      if (!player || !player.HasPermission(Configuration.Permission.Admin))
-      {
-        if (player)
-          player.ChatMessage(LANG_MESSAGE_NOPERMISSION);
+      if (!player)
         return;
-      }
+#if !CARBON
+      if (!CheckChatCmdPerm(player, Configuration.Permission.Admin))
+        return;
 #endif
       var currentTime = System.DateTime.UtcNow;
       var playerCount = 0;
@@ -2227,9 +2225,6 @@ namespace
 
       SaveData();
 
-      if (!player)
-        return;
-
       var msg = $"Updated the {nameof(LastOnlineData)}.json file for {playerCount} players.";
       player.ChatMessage(msg);
     }
@@ -2237,18 +2232,15 @@ namespace
     private void cmdTestOffline(
       BasePlayer player, string _command, string[] args)
     {
-#if !CARBON
-      if (!player || !player.HasPermission(Configuration.Permission.Admin))
-      {
-        if (player)
-          player.ChatMessage(LANG_MESSAGE_NOPERMISSION);
+      if (!player)
         return;
-      }
+#if !CARBON
+      if (!CheckChatCmdPerm(player, Configuration.Permission.Admin))
+        return;
 #endif
-      if (!player || args is null || args.Length is 0 || args.Length > 2)
+      if (args is null || args.Length is 0 || args.Length > 2)
       {
-        if (player)
-          player.ChatMessage(MESSAGE_INVALID_SYNTAX);
+        player.ChatMessage(MESSAGE_INVALID_SYNTAX);
         return;
       }
 
@@ -2287,19 +2279,16 @@ namespace
     private void cmdTestOnline(
       BasePlayer player, string _command, string[] args)
     {
-#if !CARBON
-      if (!player || !player.HasPermission(Configuration.Permission.Admin))
-      {
-        if (player)
-          player.ChatMessage(LANG_MESSAGE_NOPERMISSION);
+      if (!player)
         return;
-      }
+#if !CARBON
+      if (!CheckChatCmdPerm(player, Configuration.Permission.Admin))
+        return;
 #endif
-      if (!player || args is null || args.Length is 0 || args.Length > 1)
+      if (args is null || args.Length is 0 || args.Length > 1)
       {
         if (player)
           player.ChatMessage(MESSAGE_INVALID_SYNTAX);
-
         return;
       }
 
@@ -2314,16 +2303,14 @@ namespace
         }
       }
 
-      if (_lastOnline.TryGetValue(userID, out var target))
-      {
-        target.LastOnlineDT = System.DateTime.UtcNow;
-        player.ChatMessage($"{target.UserName} | {System.TimeZoneInfo.ConvertTimeFromUtc(target.LastOnlineDT, _timeZone)}");
-      }
-      else
+      if (!_lastOnline.TryGetValue(userID, out var target))
       {
         player.ChatMessage(MESSAGE_PLAYER_NOT_FOUND);
         return;
       }
+      target.LastOnlineDT = System.DateTime.UtcNow;
+      player.ChatMessage(
+        $"{target.UserName} | {System.TimeZoneInfo.ConvertTimeFromUtc(target.LastOnlineDT, _timeZone)}");
 
       CacheDamageScale(userID, -1f);
     }
@@ -2331,15 +2318,13 @@ namespace
     private void cmdTestPenalty(
       BasePlayer player, string _command, string[] args)
     {
-#if !CARBON
-      if (!player || !player.HasPermission(Configuration.Permission.Admin))
-      {
-        if (player)
-          player.ChatMessage(LANG_MESSAGE_NOPERMISSION);
+      if (!player)
         return;
-      }
+#if !CARBON
+      if (!CheckChatCmdPerm(player, Configuration.Permission.Admin))
+        return;
 #endif
-      if (!player || args is null || args.Length is 0 || args.Length > 2)
+      if (args is null || args.Length is 0 || args.Length > 2)
       {
         if (player)
           player.ChatMessage(MESSAGE_INVALID_SYNTAX);
@@ -2389,16 +2374,28 @@ namespace
 
     #region ConsoleCommands
 
-    // TODO: de-duplicate from chat command logic -HZ
+#if !CARBON
+    private bool CheckConCmdPerm(ConsoleSystem.Arg arg, string perm)
+    {
+      if (arg.IsAdmin || arg.Connection?.userid.HasPermission(perm) is true)
+        return true;
+
+      SendReply(arg, LANG_MESSAGE_NOPERMISSION);
+      return false;
+    }
+#endif
+
+    // TODO: de-duplicate from chat command logic (code is debt) -HZ
     private void ccFillOnlineTimes(ConsoleSystem.Arg arg)
     {
-#if !CARBON
-      if (arg is null || arg.Connection is null ||
-          !arg.Connection.userid.HasPermission(Configuration.Permission.Admin))
+      if (arg is null)
       {
-        SendReply(arg, LANG_MESSAGE_NOPERMISSION);
-          return;
+        PrintError("ccFillOnlineTimes(): arg is null");
+        return;
       }
+#if !CARBON
+      if (!CheckConCmdPerm(arg, Configuration.Permission.Admin))
+        return;
 #endif
       var currentTime = System.DateTime.UtcNow;
       var playerCount = 0;
@@ -2417,13 +2414,14 @@ namespace
 
     private void ccUpdatePermissions(ConsoleSystem.Arg arg)
     {
-#if !CARBON
-      if (arg is null || arg.Connection is null ||
-          !arg.Connection.userid.HasPermission(Configuration.Permission.Admin))
+      if (arg is null)
       {
-        SendReply(arg, LANG_MESSAGE_NOPERMISSION);
-          return;
+        PrintError("ccUpdatePermissions(): arg is null");
+        return;
       }
+#if !CARBON
+      if (!CheckConCmdPerm(arg, Configuration.Permission.Admin))
+        return;
 #endif
       foreach (var key in _scaleCache.Keys)
       {
@@ -2435,20 +2433,22 @@ namespace
 
     private void ccUpdatePrefabList(ConsoleSystem.Arg arg)
     {
-#if !CARBON
-      if (arg is null || arg.Connection is null ||
-          !arg.Connection.userid.HasPermission(Configuration.Permission.Admin))
+      if (arg is null)
       {
-        SendReply(arg, LANG_MESSAGE_NOPERMISSION);
-          return;
+        PrintError("ccUpdatePermissions(): arg is null");
+        return;
       }
+#if !CARBON
+      if (!CheckConCmdPerm(arg, Configuration.Permission.Admin))
+        return;
 #endif
       var count = Configuration.RaidProtection.Prefabs.Count;
 
-      if (arg.Args.Length is 1 && arg.Args[0] is "true")
+      if (arg.Args?.Length is 1 && arg.Args[0] is "true")
         Configuration.RaidProtection.Prefabs = GetPrefabNames();
+      else
+        Configuration.RaidProtection.Prefabs.UnionWith(GetPrefabNames());
 
-      Configuration.RaidProtection.Prefabs.UnionWith(GetPrefabNames());
       count = Configuration.RaidProtection.Prefabs.Count - count;
       CachePrefabs();
       SaveConfig();
@@ -2458,13 +2458,14 @@ namespace
 
     private void ccDumpPrefabList(ConsoleSystem.Arg arg)
     {
-#if !CARBON
-      if (arg is null || arg.Connection is null ||
-          !arg.Connection.userid.HasPermission(Configuration.Permission.Admin))
+      if (arg is null)
       {
-        SendReply(arg, LANG_MESSAGE_NOPERMISSION);
-          return;
+        PrintError("ccFillOnlineTimes(): arg is null");
+        return;
       }
+#if !CARBON
+      if (!CheckConCmdPerm(arg, Configuration.Permission.Admin))
+        return;
 #endif
       Configuration.RaidProtection.Prefabs.Clear();
       CachePrefabs();
