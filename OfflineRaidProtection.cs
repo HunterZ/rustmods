@@ -15,6 +15,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text;
+// using ConVar;
 
 namespace
 #if CARBON
@@ -48,11 +49,14 @@ namespace
     private readonly List<int> _absolutTimeScaleKeys = new();
 
 #pragma warning disable IDE0044
-    private System.TimeZoneInfo _timeZone = System.TimeZoneInfo.Utc; // Default timezone
+    // default to UTC
+    private System.TimeZoneInfo _timeZone = System.TimeZoneInfo.Utc;
 #pragma warning restore IDE0044
 
     #region Temp
 
+    // TODO: Refactor; some of these seem to be used to pass ephemeral state
+    //  across methods, which is prone to bugs -HZ
     private readonly List<ulong> _tmpList = new();
     private readonly HashSet<ulong> _tmpHashSet = new();
     private readonly HashSet<ulong> _tmpHashSet2 = new();
@@ -63,7 +67,11 @@ namespace
 
     #region Constants
 
-    private const string COMMAND_HIDEGAMETIP = "gametip.hidegametip",
+    private const string
+      // NOTE: Facepunch has broken this implementation, so we will just show
+      //  normal toasts for now; these expire on their own, but I've kept the
+      //  timing code in effect so that players can't generate console spam -HZ
+      // COMMAND_HIDEGAMETIP = "gametip.hidegametip",
       // COMMAND_SHOWGAMETIP = "gametip.showgametip",
       COMMAND_SHOWTOAST = "gametip.showtoast",
 #if !CARBON
@@ -79,7 +87,8 @@ namespace
 
     #region Colors
 
-    private const string COLOR_AQUA = "#1ABC9C",
+    private const string
+      COLOR_AQUA = "#1ABC9C",
       COLOR_BLUE = "#3498DB",
       COLOR_DARK_GREEN = "#1F8B4C",
       COLOR_GREEN = "#57F287",
@@ -146,6 +155,9 @@ namespace
 
         [JsonProperty(PropertyName = "Protect AI (animals, NPCs, Bradley and attack helicopters etc.) if 'Protect all Prefabs' is enabled")]
         public bool ProtectAi { get; set; }
+
+        [JsonProperty(PropertyName = "Protect modular and tug boats")]
+        public bool ProtectBaseBoats { get; set; }
 
         [JsonProperty(PropertyName = "Protect vehicles")]
         public bool ProtectVehicles { get; set; }
@@ -388,7 +400,9 @@ namespace
       }
 
       [JsonConstructor]
-      public LastOnlineData(in ulong userid, in string userName, in long lastOnline, in long lastConnect)
+      public LastOnlineData(
+        in ulong userid, in string userName, in long lastOnline,
+        in long lastConnect)
       {
         UserID = userid;
         UserName = userName;
@@ -397,30 +411,36 @@ namespace
       }
 
       [MethodImpl(MethodImplOptions.AggressiveInlining)]
-      public LastOnlineData(in BasePlayer player, in System.DateTime currentTime, in bool connected = false) : this(player.userID.Get(), player.displayName, 0, 0)
+      public LastOnlineData(
+        in BasePlayer player, in System.DateTime currentTime,
+        in bool connected = false) :
+        this(player.userID.Get(), player.displayName, 0, 0)
       {
-        UserID = player.userID.Get();
-        UserName = player.displayName;
         LastOnlineDT = currentTime;
         LastConnectDT = connected ? currentTime : LastConnectDT;
       }
 
       // [JsonIgnore] public float Days => (float)TimeSpanSinceLastOnline.TotalDays;
 
-      [JsonIgnore] public float Minutes => (float)TimeSpanSinceLastOnline.TotalMinutes;
+      [JsonIgnore] public float Minutes =>
+        (float)TimeSpanSinceLastOnline.TotalMinutes;
 
-      [JsonIgnore] public float Hours => (float)TimeSpanSinceLastOnline.TotalHours;
+      [JsonIgnore] public float Hours =>
+        (float)TimeSpanSinceLastOnline.TotalHours;
 
-      [JsonIgnore] private System.TimeSpan TimeSpanSinceLastOnline => System.DateTime.UtcNow - (!IsOnline ? LastOnlineDT : System.DateTime.UtcNow);
+      [JsonIgnore] private System.TimeSpan TimeSpanSinceLastOnline =>
+        System.DateTime.UtcNow - (!IsOnline ? LastOnlineDT : System.DateTime.UtcNow);
 
       [JsonIgnore] private BasePlayer Player => PlayerManager.GetPlayer(UserID);
 
       [JsonIgnore] public bool IsOnline => true == Player?.IsConnected;
 
-      [JsonIgnore] public bool IsOffline => !IsOnline && Minutes >= Configuration.RaidProtection.CooldownMinutes;
+      [JsonIgnore] public bool IsOffline =>
+        !IsOnline && Minutes >= Configuration.RaidProtection.CooldownMinutes;
 
       [MethodImpl(MethodImplOptions.AggressiveInlining)]
-      public void EnablePenalty(in float duration) => PenaltyEndDT = System.DateTime.UtcNow.AddHours(duration);
+      public void EnablePenalty(in float duration) =>
+        PenaltyEndDT = System.DateTime.UtcNow.AddHours(duration);
 
       [MethodImpl(MethodImplOptions.AggressiveInlining)]
       public void DisablePenalty() => PenaltyEnd = 0L;
@@ -493,7 +513,8 @@ namespace
       }
 
       [MethodImpl(MethodImplOptions.AggressiveInlining)]
-      public PlayerScaleCache(System.DateTime expires, float scale, bool hasPermission)
+      public PlayerScaleCache(
+        System.DateTime expires, float scale, bool hasPermission)
       {
         ExpiresDT = expires;
         Scale = scale;
@@ -510,19 +531,22 @@ namespace
       }
 
       [MethodImpl(MethodImplOptions.AggressiveInlining)]
-      public void CacheAction(BasePlayer player) => HideGameTipAction = GetAction(player, this);
+      public void CacheAction(BasePlayer player) =>
+        HideGameTipAction = GetAction(player, this);
 
       private void ClearAction() => HideGameTipAction = null;
 
       [MethodImpl(MethodImplOptions.AggressiveInlining)]
-      private static System.Action GetAction(BasePlayer player, PlayerScaleCache playerScaleCache)
+      private static System.Action GetAction(
+        BasePlayer player, PlayerScaleCache playerScaleCache)
       {
         return () =>
         {
           playerScaleCache.ActiveGameTipMessage = false;
-          if (player)
-            player.SendConsoleCommand(COMMAND_HIDEGAMETIP);
-          else
+          // if (player)
+          //   player.SendConsoleCommand(COMMAND_HIDEGAMETIP);
+          // else
+          if (!player)
             playerScaleCache.ClearAction();
         };
       }
@@ -530,15 +554,20 @@ namespace
       [MethodImpl(MethodImplOptions.AggressiveInlining)]
       public void CacheMessages(in string userID)
       {
-        ProtectionMessageBuilding = Instance.Msg(LANG_PROTECTION_MESSAGE_BUILDING, userID);
-        ProtectionMessageVehicle = Instance.Msg(LANG_PROTECTION_MESSAGE_VEHICLE, userID);
+        ProtectionMessageBuilding =
+          Instance.Msg(LANG_PROTECTION_MESSAGE_BUILDING, userID);
+        ProtectionMessageVehicle =
+          Instance.Msg(LANG_PROTECTION_MESSAGE_VEHICLE, userID);
       }
     }
 
+    // TODO: Refactor - MrBlue says static data in plugins is terrifying -HZ
     private static class PlayerManager
     {
-      private static readonly Dictionary<ulong, BasePlayer> PlayersByUserID = new();
-      private static readonly Dictionary<string, BasePlayer> PlayersByName = new();
+      private static readonly Dictionary<ulong, BasePlayer> PlayersByUserID =
+        new();
+      private static readonly Dictionary<string, BasePlayer> PlayersByName =
+        new();
 
       [MethodImpl(MethodImplOptions.AggressiveInlining)]
       public static void AddPlayer(in BasePlayer player)
@@ -549,12 +578,13 @@ namespace
 
       // public static void RemovePlayer(in BasePlayer player)
       // {
-      //     PlayersByUserID.Remove(player.userID.Get());
-      //     PlayersByName.Remove(player.displayName);
+      //   PlayersByUserID.Remove(player.userID.Get());
+      //   PlayersByName.Remove(player.displayName);
       // }
 
       [MethodImpl(MethodImplOptions.AggressiveInlining)]
-      public static BasePlayer GetPlayer(in ulong userID) => PlayersByUserID.GetValueOrDefault(userID, null);
+      public static BasePlayer GetPlayer(in ulong userID) =>
+        PlayersByUserID.GetValueOrDefault(userID, null);
 
       [MethodImpl(MethodImplOptions.AggressiveInlining)]
       public static BasePlayer GetPlayer(in string displayName) =>
@@ -572,14 +602,16 @@ namespace
 
     private sealed class CupboardPrivilege
     {
-      public BuildingPrivlidge BuildingPrivlidge { get; set; }
-      public float LastProtectedMinutes { get; set; }
+      // public BuildingPrivlidge BuildingPrivlidge { get; set; }
+      // public float LastProtectedMinutes { get; set; }
       public bool IsDecaying { get; set; }
 
-      public CupboardPrivilege(in BuildingPrivlidge buildingPrivlidge, in float lastProtectedMinutes, in bool isDecaying = false)
+      public CupboardPrivilege(
+        in BuildingPrivlidge buildingPrivlidge, in float lastProtectedMinutes,
+        in bool isDecaying = false)
       {
-        BuildingPrivlidge = buildingPrivlidge;
-        LastProtectedMinutes = lastProtectedMinutes;
+        // BuildingPrivlidge = buildingPrivlidge;
+        // LastProtectedMinutes = lastProtectedMinutes;
         IsDecaying = isDecaying;
       }
     }
@@ -588,7 +620,9 @@ namespace
 
     #region Data
 
-    private void SaveData() => Interface.Oxide.DataFileSystem.WriteObject($"{Name}/{nameof(LastOnlineData)}", _lastOnline);
+    private void SaveData() =>
+      Interface.Oxide.DataFileSystem.WriteObject(
+        $"{Name}/{nameof(LastOnlineData)}", _lastOnline);
 
     private void Save()
     {
@@ -600,7 +634,9 @@ namespace
     {
       try
       {
-        var data = Interface.Oxide.DataFileSystem.ReadObject<Dictionary<ulong, LastOnlineData>>($"{Name}/{nameof(LastOnlineData)}");
+        var data =
+          Interface.Oxide.DataFileSystem.ReadObject<Dictionary<ulong, LastOnlineData>>(
+            $"{Name}/{nameof(LastOnlineData)}");
         _lastOnline.ClearAndMergeWith(data);
       }
       catch (System.Exception ex)
@@ -613,9 +649,11 @@ namespace
 
     #region Config
 
-    protected override void LoadDefaultConfig() => Configuration = GetBaseConfig();
+    protected override void LoadDefaultConfig() =>
+      Configuration = GetBaseConfig(Version);
 
-    protected override void SaveConfig() => Config.WriteObject(Configuration, true);
+    protected override void SaveConfig() =>
+      Config.WriteObject(Configuration, true);
 
     protected override void LoadConfig()
     {
@@ -641,23 +679,28 @@ namespace
     private void UpdateConfigValues()
     {
       PrintWarning("Config update detected! Update config values...");
-      var baseConfig = GetBaseConfig();
+      var baseConfig = GetBaseConfig(Version);
 
       if (Configuration.Version < new VersionNumber(1, 1, 8))
-        Configuration.Command.CommandUpdatePermissions = baseConfig.Command.CommandUpdatePermissions;
+        Configuration.Command.CommandUpdatePermissions =
+          baseConfig.Command.CommandUpdatePermissions;
 
       if (Configuration.Version < new VersionNumber(1, 1, 15))
       {
-        Configuration.Command.CommandUpdatePrefabList = baseConfig.Command.CommandUpdatePrefabList;
-        Configuration.Command.CommandDumpPrefabList = baseConfig.Command.CommandDumpPrefabList;
-        Configuration.RaidProtection.CooldownQualifyMinutes = baseConfig.RaidProtection.CooldownQualifyMinutes;
+        Configuration.Command.CommandUpdatePrefabList =
+          baseConfig.Command.CommandUpdatePrefabList;
+        Configuration.Command.CommandDumpPrefabList =
+          baseConfig.Command.CommandDumpPrefabList;
+        Configuration.RaidProtection.CooldownQualifyMinutes =
+          baseConfig.RaidProtection.CooldownQualifyMinutes;
       }
 
       if (Configuration.Version < new VersionNumber(1, 1, 16))
       {
         DeleteMessages();
         LoadDefaultMessages();
-        Configuration.RaidProtection.ProtectDecayingBase = baseConfig.RaidProtection.ProtectDecayingBase;
+        Configuration.RaidProtection.ProtectDecayingBase =
+          baseConfig.RaidProtection.ProtectDecayingBase;
       }
 
       Configuration.Version = Version;
@@ -682,82 +725,80 @@ namespace
       System.TimeZoneInfo.GetSystemTimeZones().FirstOrDefault(
         tz => tz.Id == id) ?? System.TimeZoneInfo.Utc;
 
-    private ConfigData GetBaseConfig()
+    private static ConfigData GetBaseConfig(VersionNumber version) => new()
     {
-      return new ConfigData
+      RaidProtection = new()
       {
-        RaidProtection = new()
+        OnlyPlayerDamage = false,
+        OnlineRaidProtection = false,
+        AbsoluteTimeScale = new(),
+        CooldownMinutes = 10,
+        CooldownQualifyMinutes = 0,
+        DamageScale = new()
         {
-          OnlyPlayerDamage = false,
-          OnlineRaidProtection = false,
-          AbsoluteTimeScale = new(),
-          CooldownMinutes = 10,
-          CooldownQualifyMinutes = 0,
-          DamageScale = new()
-          {
-            { 12f, 0.25f },
-            { 24f, 0.5f },
-            { 48f, 1f },
-          },
-          InterimDamage = 0f,
-          ProtectAll = false,
-          ProtectAi = false,
-          ProtectVehicles = true,
-          ProtectTwigs = false,
-          ProtectDecayingBase = true,
-          Prefabs = GetPrefabNames(),
-          PrefabsBlacklist = new()
+          { 12f, 0.25f },
+          { 24f, 0.5f },
+          { 48f, 1f },
         },
-        Team = new()
-        {
-          TeamShare = true,
-          TeamFirstOffline = false,
-          IncludeWhitelistPlayers = false,
-          TeamAvoidAbuse = false,
-          TeamEnablePenalty = false,
-          TeamPenaltyDuration = 24f
-        },
-        Command = new()
-        {
-          Commands = new[] { "ao", "orp" },
-          CommandHelp = "raidprot",
-          CommandFillOnlineTimes = "orp.fill.onlinetimes",
-          CommandUpdatePermissions = "orp.update.permissions",
-          CommandTestOffline = "orp.test.offline",
-          CommandTestOnline = "orp.test.online",
-          CommandTestPenalty = "orp.test.penalty",
-          CommandUpdatePrefabList = "orp.update.prefabs",
-          CommandDumpPrefabList = "orp.dump.prefabs",
+        InterimDamage = 0f,
+        ProtectAll = false,
+        ProtectAi = false,
+        ProtectBaseBoats = true,
+        ProtectVehicles = true,
+        ProtectTwigs = false,
+        ProtectDecayingBase = true,
+        Prefabs = GetPrefabNames(),
+        PrefabsBlacklist = new()
+      },
+      Team = new()
+      {
+        TeamShare = true,
+        TeamFirstOffline = false,
+        IncludeWhitelistPlayers = false,
+        TeamAvoidAbuse = false,
+        TeamEnablePenalty = false,
+        TeamPenaltyDuration = 24f
+      },
+      Command = new()
+      {
+        Commands = new[] { "ao", "orp" },
+        CommandHelp = "raidprot",
+        CommandFillOnlineTimes = "orp.fill.onlinetimes",
+        CommandUpdatePermissions = "orp.update.permissions",
+        CommandTestOffline = "orp.test.offline",
+        CommandTestOnline = "orp.test.online",
+        CommandTestPenalty = "orp.test.penalty",
+        CommandUpdatePrefabList = "orp.update.prefabs",
+        CommandDumpPrefabList = "orp.dump.prefabs",
 #if CARBON
-          CommandCooldown = 1
+        CommandCooldown = 1
 #endif
-        },
-        Permission = new()
-        {
-          Protect = "offlineraidprotection.protect",
-          Check = "offlineraidprotection.check",
-          Admin = "offlineraidprotection.admin"
-        },
-        Other = new()
-        {
-          PlaySound = false,
-          SoundPath = "assets/prefabs/locks/keypad/effects/lock.code.denied.prefab",
-          ShowMessage = true,
-          ShowRemainingTime = false,
-          MessageDuration = 3f
-        },
-        TimeZone = new()
-        {
+      },
+      Permission = new()
+      {
+        Protect = "offlineraidprotection.protect",
+        Check = "offlineraidprotection.check",
+        Admin = "offlineraidprotection.admin"
+      },
+      Other = new()
+      {
+        PlaySound = false,
+        SoundPath = "assets/prefabs/locks/keypad/effects/lock.code.denied.prefab",
+        ShowMessage = true,
+        ShowRemainingTime = false,
+        MessageDuration = 3f
+      },
+      TimeZone = new()
+      {
 #if CARBON
-          WinTimeZone = "W. Europe Standard Time",
-          UnixTimeZone = "Europe/Berlin"
+        WinTimeZone = "W. Europe Standard Time",
+        UnixTimeZone = "Europe/Berlin"
 #else
-          TimeZone = ""
+        TimeZone = ""
 #endif
-        },
-        Version = Version
-      };
-    }
+      },
+      Version = version
+    };
 
     private static HashSet<string> GetPrefabNames()
     {
@@ -784,6 +825,7 @@ namespace
 
     private void Loaded()
     {
+      // This seems sus; why not just overwrite unconditionally? -HZ
       Instance ??= this;
 
       Configuration.Permission.RegisterPermissions(permission, this);
@@ -801,7 +843,11 @@ namespace
       SaveData();
     }
 
-    private void OnServerSave() => ServerMgr.Instance.Invoke(Instance.Save, 10f);
+    // TODO: Refactor - this is problematic for a couple of reasons:
+    // 1. Saves even when nothing has changed
+    // 2. Saving around when the server does has a higher change of causing lag
+    private void OnServerSave() =>
+      ServerMgr.Instance.Invoke(Instance.Save, 10f);
 
     private void OnServerShutdown() => Save();
 
@@ -832,13 +878,13 @@ namespace
 
       PlayerManager.Clear();
 
-      foreach (var player in BasePlayer.activePlayerList)
-      {
-        if (!player)
-          return;
-
-        player.SendConsoleCommand(COMMAND_HIDEGAMETIP);
-      }
+      // foreach (var player in BasePlayer.activePlayerList)
+      // {
+      //   if (!player)
+      //     return;
+      //
+      //   player.SendConsoleCommand(COMMAND_HIDEGAMETIP);
+      // }
     }
 
     private void OnPluginLoaded(Plugin plugin)
@@ -864,14 +910,17 @@ namespace
 
       PlayerManager.AddPlayer(player);
 
-      if (!_scaleCache.TryGetValue(player.userID.Get(), out var scaleCache))
+      if (_scaleCache.TryGetValue(player.userID.Get(), out var scaleCache))
       {
-        scaleCache = new(currentTime, -1f, player.userID.Get().HasPermission(Configuration.Permission.Protect));
-        _scaleCache[player.userID.Get()] = scaleCache;
+        scaleCache.CacheAction(player);
       }
       else
-        scaleCache.CacheAction(player);
-
+      {
+        scaleCache = new(
+          currentTime, -1f,
+          player.userID.Get().HasPermission(Configuration.Permission.Protect));
+        _scaleCache[player.userID.Get()] = scaleCache;
+      }
       scaleCache.CacheMessages(player.UserIDString);
     }
 
@@ -890,26 +939,32 @@ namespace
         lastOnline.UserName = newName;
     }
 
-    private void OnCupboardProtectionCalculated(BuildingPrivlidge buildingPrivlidge, float cachedProtectedMinutes)
+    private void OnCupboardProtectionCalculated(
+      BuildingPrivlidge buildingPrivlidge, float cachedProtectedMinutes)
     {
       if (!buildingPrivlidge || buildingPrivlidge.buildingID is 0U)
         return;
 
       if (!_tcCache.TryGetValue(buildingPrivlidge.buildingID, out var tc))
       {
-        tc = new CupboardPrivilege(buildingPrivlidge, cachedProtectedMinutes)
-        {
-          IsDecaying = IsBuildingDecaying(buildingPrivlidge.inventory.itemList, buildingPrivlidge.GetBuilding().decayEntities)
-        };
-        _tcCache[buildingPrivlidge.buildingID] = tc;
+        _tcCache[buildingPrivlidge.buildingID] =
+          new CupboardPrivilege(buildingPrivlidge, cachedProtectedMinutes)
+          {
+            IsDecaying = IsBuildingDecaying(
+              buildingPrivlidge.inventory.itemList,
+              buildingPrivlidge.GetBuilding()?.buildingBlocks)
+          };
+        return;
       }
-      else
-      {
-// ***** This line was not in the Carbon version for some reason! -HZ *****
-        tc.BuildingPrivlidge = buildingPrivlidge;
-        tc.LastProtectedMinutes = cachedProtectedMinutes;
-        tc.IsDecaying = IsBuildingDecaying(buildingPrivlidge.inventory.itemList, buildingPrivlidge.GetBuilding().decayEntities);
-      }
+
+      // **** The following line was not in the Carbon version for some reason;
+      //  looks like it and LastProtectedMinutes aren't being used, so I've
+      //  commented them out for now -HZ
+      // tc.BuildingPrivlidge = buildingPrivlidge;
+      // tc.LastProtectedMinutes = cachedProtectedMinutes;
+      tc.IsDecaying = IsBuildingDecaying(
+        buildingPrivlidge.inventory.itemList,
+        buildingPrivlidge.GetBuilding()?.buildingBlocks);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -918,17 +973,21 @@ namespace
       if (hitInfo is null || !entity)
         return null;
 
-      // If you only want to mitigate player-caused damage, exit if it's not a player
-      if (Configuration.RaidProtection.OnlyPlayerDamage && !hitInfo.InitiatorPlayer)
+      // Abort on non-player damage if non-player damage mitigation disabled
+      if (Configuration.RaidProtection.OnlyPlayerDamage &&
+          !hitInfo.InitiatorPlayer)
         return null;
 
+      // Abort on self-damage
       if (hitInfo.Initiator == entity)
         return null;
 
-      if (!hitInfo.damageTypes.Has(Rust.DamageType.Decay) && IsProtected(entity))
-        return OnStructureAttack(entity, ref hitInfo);
+      // Abort if decay damage or non-protected entity
+      if (hitInfo.damageTypes.Has(Rust.DamageType.Decay) ||
+          !IsProtected(entity))
+        return null;
 
-      return null;
+      return OnStructureAttack(entity, ref hitInfo);
     }
 
     #endregion Hooks
@@ -961,7 +1020,7 @@ namespace
       CacheAllPlayers();
 
       if (!Configuration.RaidProtection.ProtectDecayingBase)
-        CachAllCupboards();
+        CacheAllCupboards();
     }
 
     private static readonly System.Type[] ComponentTypes =
@@ -979,7 +1038,8 @@ namespace
     {
       foreach (var itemDefinition in ItemManager.GetItemDefinitions())
       {
-        var itemModDeployable = itemDefinition.GetComponent<ItemModDeployable>();
+        var itemModDeployable =
+          itemDefinition.GetComponent<ItemModDeployable>();
         if (!itemModDeployable)
           continue;
 
@@ -1007,7 +1067,6 @@ namespace
           if (activeComponent)
             break;
         }
-
         if (!activeComponent)
           continue;
 
@@ -1017,7 +1076,9 @@ namespace
 
         var prefabId = baseEntity.prefabID;
         var shortName = baseEntity.ShortPrefabName;
-        var isAi = activeComponent is BaseNpc or NPCPlayer or BradleyAPC or AttackHelicopter or CH47Helicopter or BasePlayer;
+        var isAi = activeComponent is
+          BaseNpc or NPCPlayer or BradleyAPC or AttackHelicopter or
+          CH47Helicopter or BasePlayer;
         var isVehicle = activeComponent is BaseVehicle && !isAi;
 
         _prefabCache[prefabId] = IsEntityProtected(shortName, isVehicle, isAi);
@@ -1025,14 +1086,12 @@ namespace
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static string GetShortName(in string resourcePath)
-    {
-      var fileName = System.IO.Path.GetFileNameWithoutExtension(resourcePath);
-      return fileName ?? string.Empty;
-    }
+    private static string GetShortName(in string resourcePath) =>
+      System.IO.Path.GetFileNameWithoutExtension(resourcePath) ?? string.Empty;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool IsEntityProtected(in string shortName, in bool isVehicle = false, in bool isAi = false)
+    private static bool IsEntityProtected(
+      in string shortName, in bool isVehicle = false, in bool isAi = false)
     {
       var raidProtection = Configuration.RaidProtection;
 
@@ -1078,20 +1137,23 @@ namespace
       if (clan?["members"] is null)
         return null;
 
-      if (!_clanMemberCache.TryGetValue(tag, out var clanMemberList))
+      if (_clanMemberCache.TryGetValue(tag, out var clanMemberList))
+      {
+        clanMemberList.Clear();
+      }
+      else
       {
         clanMemberList = Facepunch.Pool.Get<List<ulong>>();
         _clanMemberCache[tag] = clanMemberList;
       }
-      else
-        clanMemberList.Clear();
 
       foreach (var memberToken in clan["members"])
       {
         if (memberToken.Type is not JTokenType.String)
           continue;
 
-        if (!ulong.TryParse(memberToken.ToString(), out var memberID) || memberID is 0)
+        if (!ulong.TryParse(memberToken.ToString(), out var memberID) ||
+            memberID is 0)
           continue;
 
         clanMemberList.Add(memberID);
@@ -1108,14 +1170,15 @@ namespace
       _damageScaleKeys.Sort();
 
       _absolutTimeScaleKeys.Clear();
-      _absolutTimeScaleKeys.AddRange(Configuration.RaidProtection.AbsoluteTimeScale.Keys);
+      _absolutTimeScaleKeys.AddRange(
+        Configuration.RaidProtection.AbsoluteTimeScale.Keys);
       _absolutTimeScaleKeys.Sort();
     }
 
     private void CacheAllPlayerScale()
     {
-      foreach (var lastOnline in _lastOnline)
-        CacheDamageScale(lastOnline.Value.UserID, -1f);
+      foreach (var lastOnline in _lastOnline.Values)
+        CacheDamageScale(lastOnline.UserID, -1f);
     }
 
     private void CacheDamageScale(in ulong targetID, in float scale)
@@ -1129,7 +1192,9 @@ namespace
       }
       else
       {
-        scaleCache = new(currentTime, scale, targetID.HasPermission(Configuration.Permission.Protect));
+        scaleCache = new(
+          currentTime, scale,
+          targetID.HasPermission(Configuration.Permission.Protect));
         _scaleCache[targetID] = scaleCache;
       }
 
@@ -1142,14 +1207,23 @@ namespace
         PlayerManager.AddPlayer(player);
     }
 
-    private void CachAllCupboards()
+    private void CacheAllCupboards()
     {
-      foreach (var entity in BaseNetworkable.serverEntities)
+      // scan all buildings
+      foreach (var (buildingID, building)
+               in BuildingManager.server.buildingDictionary)
       {
-        if (entity is not BuildingPrivlidge privlidge)
-          continue;
+        // scan all TCs whose build privileges overlap building
+        foreach (var toolCupboard in building.buildingPrivileges)
+        {
+          // skip any TC that is not the physically connected to building
+          if (toolCupboard?.buildingID != buildingID)
+            continue;
 
-        _tcCache[privlidge.buildingID] = new(privlidge, 0f);
+          _tcCache[toolCupboard.buildingID] = new(toolCupboard, 0f);
+          // only one TC can be physically connected
+          break;
+        }
       }
     }
 
@@ -1168,7 +1242,8 @@ namespace
       }
     }
 
-    private void UpdateLastOnline(in BasePlayer player, in System.DateTime currentTime)
+    private void UpdateLastOnline(
+      in BasePlayer player, in System.DateTime currentTime)
     {
       if (_lastOnline.TryGetValue(player.userID.Get(), out var lastOnline))
       {
@@ -1179,7 +1254,8 @@ namespace
         _lastOnline[player.userID.Get()] = new(player, currentTime);
     }
 
-    private void UpdateLastConnect(in BasePlayer player, in System.DateTime currentTime)
+    private void UpdateLastConnect(
+      in BasePlayer player, in System.DateTime currentTime)
     {
       if (_lastOnline.TryGetValue(player.userID.Get(), out var lastOnline))
         lastOnline.LastConnectDT = currentTime;
@@ -1190,49 +1266,105 @@ namespace
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private bool IsProtected(in BaseCombatEntity entity)
     {
-      // If the entity is a BuildingBlock, it's protected
-      if (entity is BuildingBlock buildingBlock && (Configuration.RaidProtection.ProtectTwigs || buildingBlock.grade is not BuildingGrade.Enum.Twigs))
-        return true;
+      // Boat building block is protected if associated with a boat, and boat
+      //  protection is enabled
+      // NOTE: Boat building blocks in edit mode will not be associated with a
+      //  boat, and will thus not be protected
+      if (entity is BoatBuildingBlock && PlayerBoat.GetParentPlayerBoat(entity))
+      {
+        return Configuration.RaidProtection.ProtectBaseBoats;
+      }
+
+      // BuildingBlock is protected, except twig when twig protection disabled
+      if (entity is BuildingBlock buildingBlock and not BoatBuildingBlock)
+      {
+        return buildingBlock.grade != BuildingGrade.Enum.Twigs ||
+               Configuration.RaidProtection.ProtectTwigs;
+      }
 
       // If ProtectAll is enabled, only check the blacklist
       if (Configuration.RaidProtection.ProtectAll)
-        return !_prefabCache.TryGetValue(entity.prefabID, out var isNotProtected) || isNotProtected;
+      {
+        return
+          !_prefabCache.TryGetValue(entity.prefabID, out var isNotProtected) ||
+          isNotProtected;
+      }
 
-      // If the entity's ID is in the cache, return it's protection status
+      // If the entity's ID is in the cache, return its cached protection status
       if (_prefabCache.TryGetValue(entity.prefabID, out var isProtected))
         return isProtected;
 
-      // If none of the above conditions are met
-      var result = Configuration.RaidProtection.Prefabs.Contains(entity.ShortPrefabName);
+      // Check the whitelist
+      var result =
+        Configuration.RaidProtection.Prefabs.Contains(entity.ShortPrefabName);
+
+      // Cache and return result
       _prefabCache[entity.prefabID] = result;
       return result;
     }
 
+    // TODO: Refactor; some of these seem to be used to pass ephemeral state
+    //  across methods, which is prone to bugs -HZ
     private bool _isVehicle;
     private LastOnlineData _targetLastOnline;
     private PlayerScaleCache _targetScaleCache;
     private System.DateTime _currentDateTime;
     private BuildingPrivlidge _privilege;
 
-    private object OnStructureAttack(in BaseCombatEntity entity, ref HitInfo hitInfo)
+    // return reference to appropriate vehicle type associated with entity
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static (Tugboat, PlayerBoat, BaseVehicle) GetVehicle(
+      in BaseCombatEntity entity) => entity switch
+    {
+      Tugboat tugboat =>
+        (tugboat, null, null),
+      PlayerBoat playerBoat =>
+        (null, playerBoat, null),
+      BaseVehicle vehicle =>
+        (null, null, vehicle),
+      _ => entity.GetParentEntity() switch
+      {
+        Tugboat tugboatParent =>
+          (tugboatParent, null, null),
+        PlayerBoat playerBoatParent =>
+          (null, playerBoatParent, null),
+        BaseVehicle vehicleParent =>
+          (null, null, vehicleParent),
+        _ =>
+          (null, PlayerBoat.GetParentPlayerBoat(entity), null)
+      }
+    };
+
+    private object OnStructureAttack(
+      in BaseCombatEntity entity, ref HitInfo hitInfo)
     {
       // Get authorized players for the entity
-      _isVehicle = entity is BaseVehicle || entity.GetParentEntity() is BaseVehicle;
-      var authorizedPlayers = GetAuthorizedPlayers(entity);
+      var (tugboat, modularBoat, vehicle) = GetVehicle(entity);
+      _isVehicle = vehicle;
+      var authorizedPlayers =
+        GetAuthorizedPlayers(entity, tugboat, modularBoat, vehicle);
+
+      // Abort if no authorized players
       if (authorizedPlayers is null)
         return null;
 
-      // Check if the TC is player-owned or NPC-owned
+      // Abort if the TC has either no players authed, or an NPC authed
+      // Note: Mixed auth is possible, but we still want to ignore it, because
+      //  it probably indicates a Raidable Bases base or something
       using var e = authorizedPlayers.GetEnumerator();
       if (!e.MoveNext() || !e.Current.IsSteamID())
         return null;
 
-      // Check if InitiatorPlayer is an authorized player
-      if (hitInfo.InitiatorPlayer && authorizedPlayers.Contains(hitInfo.InitiatorPlayer.userID.Get()))
+      // Abort if damage is from is an authorized player
+      if (hitInfo.InitiatorPlayer &&
+          authorizedPlayers.Contains(hitInfo.InitiatorPlayer.userID.Get()))
         return null;
 
-      // Check if the building is decaying
-      if (!Configuration.RaidProtection.ProtectDecayingBase && !_isVehicle && _tcCache.TryGetValue(_privilege.buildingID, out var tc) && tc.IsDecaying)
+      // Abort if the building is decaying
+      if (!Configuration.RaidProtection.ProtectDecayingBase &&
+          !_isVehicle && !tugboat && !modularBoat &&
+          _tcCache.TryGetValue(_privilege.buildingID, out var tc) &&
+          tc.IsDecaying)
         return null;
 
       // Determine targetID (either the entity's owner or an authorized player)
@@ -1242,108 +1374,113 @@ namespace
 
       // Get the most recent team member based on the configuration setting
       targetID = GetRecentActiveMemberAll(targetID, authorizedPlayers);
-      if (_targetLastOnline?.UserID != targetID && !_lastOnline.TryGetValue(targetID, out _targetLastOnline))
+      if (_targetLastOnline?.UserID != targetID &&
+          !_lastOnline.TryGetValue(targetID, out _targetLastOnline))
         return null;
 
+      // TOOD: refactor GetCachedDamageScale() to take current time as a
+      //  parameter, and evaporate _currentDateTime as a cross-method variable
       _currentDateTime = System.DateTime.UtcNow;
-      var isOnlineRaidProtectionEnabled = Configuration.RaidProtection.OnlineRaidProtection;
-      var isUnderPenalty = _targetLastOnline.PenaltyEnd >= _currentDateTime.Ticks;
+      var isOnlineRaidProtectionEnabled =
+        Configuration.RaidProtection.OnlineRaidProtection;
 
-      if ((!isOnlineRaidProtectionEnabled && _targetLastOnline.IsOnline) || isUnderPenalty)
+      if ((!isOnlineRaidProtectionEnabled && _targetLastOnline.IsOnline) ||
+          _currentDateTime.Ticks <= _targetLastOnline.PenaltyEnd)
         return null;
 
       if (!isOnlineRaidProtectionEnabled && AnyPlayersOnline(authorizedPlayers))
         return null;
 
-      return MitigateDamage(ref hitInfo, GetCachedDamageScale(targetID), targetID);
+      return
+        MitigateDamage(ref hitInfo, GetCachedDamageScale(targetID), targetID);
     }
 
-    private HashSet<ulong> GetAuthorizedPlayers(in BaseCombatEntity entity)
+    private HashSet<ulong> GetAuthorizedPlayers(
+      in BaseCombatEntity entity, in Tugboat tugboat, in PlayerBoat modularBoat,
+      in BaseVehicle vehicle)
     {
+      _privilege = null;
       _tmpHashSet.Clear();
-      // 1. Vehicle-based checks
-      if (Configuration.RaidProtection.ProtectVehicles)
+
+      // 1. Base boat checks
+      if (tugboat || modularBoat)
       {
-        // If it's a ModularCar, add players from its CarLock whitelist
-        if (entity is ModularCar modularCar)
+        // Abort if base boat protection disabled
+        if (!Configuration.RaidProtection.ProtectBaseBoats)
+          return null;
+
+        // Wheel authed players check
+        var vehiclePrivilege =
+          tugboat ? tugboat.GetChildPrivilege() :
+          modularBoat ? modularBoat.GetChildPrivilege() :
+          null;
+        if (!vehiclePrivilege)
+          return null;
+        AddAuthorizedPlayers(vehiclePrivilege.authorizedPlayers, _tmpHashSet);
+
+        // Abort if code lock checks disabled
+        if (!Configuration.Team.IncludeWhitelistPlayers)
+          return ReturnPopulatedOrNull(_tmpHashSet);
+
+        // Deployable code locks check
+        var boatChildren =
+          tugboat ? tugboat.children :
+          modularBoat ? modularBoat.Deployables.Cached :
+          null;
+        if (boatChildren is null)
+          return ReturnPopulatedOrNull(_tmpHashSet);
+        AddCodeLockWhitelistPlayers(boatChildren, _tmpHashSet);
+
+        // Don't fall through to TC check, because boats are their own base
+        return ReturnPopulatedOrNull(_tmpHashSet);
+      }
+
+      // 2. Vehicle checks
+      if (vehicle)
+      {
+        // Abort if vehicle protection disabled
+        if (!Configuration.RaidProtection.ProtectVehicles)
+          return null;
+
+        // Modular car code lock check
+        if (vehicle is ModularCar modularCar)
         {
           foreach (var whitelistPlayer in modularCar.CarLock.WhitelistPlayers)
             _tmpHashSet.Add(whitelistPlayer);
-        }
-        // Otherwise, check if the entity or its parent is a BaseVehicle
-        else if (_isVehicle)
-        {
-          // Try to find a VehiclePrivilege in either the entity or its parent's children
-          var vehiclePrivilege = FindVehiclePrivilege(entity);
-          if (vehiclePrivilege is not null)
-          {
-            AddAuthorizedPlayers(vehiclePrivilege.authorizedPlayers, _tmpHashSet);
-            // Optionally include code-lock whitelist players
-            if (Configuration.Team.IncludeWhitelistPlayers)
-            {
-              var vpParent = vehiclePrivilege.GetParentEntity();
-              if (vpParent?.children is not null)
-                AddCodeLockWhitelistPlayers(vpParent.children, _tmpHashSet);
-            }
-          }
+          // Don't fall through to TC check if we found player(s)
+          if (_tmpHashSet.Count is not 0)
+            return _tmpHashSet;
+          // Else fall through to TC check
         }
 
-        if (_tmpHashSet.Count is not 0)
-          return _tmpHashSet;
+        // Fall through to TC privilege check for unlocked/unlockable vehicles
       }
 
-      // 2. Building privilege (Tool Cupboard)
+      // 3. Building privilege (Tool Cupboard) checks
       _privilege = entity.GetBuildingPrivilege();
       if (!_privilege)
-        return _tmpHashSet.Count is not 0 ? _tmpHashSet : null;
+        return ReturnPopulatedOrNull(_tmpHashSet);
 
+      // TC-authed players check
       AddAuthorizedPlayers(_privilege.authorizedPlayers, _tmpHashSet);
 
+      // Abort if code lock checks disabled
       if (!Configuration.Team.IncludeWhitelistPlayers)
-        return _tmpHashSet.Count is not 0 ? _tmpHashSet : null;
+        return ReturnPopulatedOrNull(_tmpHashSet);
 
       // Check for code locks in the building's decay entities
+      // could do just doors, but I guess it's good to check boxes too? -HZ
       var decayEntities = _privilege.GetBuilding()?.decayEntities;
       if (decayEntities is not null)
         AddCodeLockWhitelistPlayers(decayEntities, _tmpHashSet);
 
-      return _tmpHashSet.Count is not 0 ? _tmpHashSet : null;
+      return ReturnPopulatedOrNull(_tmpHashSet);
 
 
-      static VehiclePrivilege FindVehiclePrivilege(in BaseEntity entity)
+      static void AddAuthorizedPlayers(
+        in HashSet<ulong> authorizedPlayers, in HashSet<ulong> targetSet)
       {
-        var children = entity.children;
-        if (children is not null)
-        {
-          foreach (var child in children)
-          {
-            if (child is not VehiclePrivilege vp)
-              continue;
-
-            return vp;
-          }
-        }
-
-        // If not found, check the parent's children
-        var parent = entity.GetParentEntity();
-        var parentChildren = parent?.children;
-        if (parentChildren is null)
-          return null;
-
-        foreach (var child in parentChildren)
-        {
-          if (child is not VehiclePrivilege vp)
-            continue;
-
-          return vp;
-        }
-
-        return null;
-      }
-
-      static void AddAuthorizedPlayers(in HashSet<ulong> authorizedPlayers, in HashSet<ulong> targetSet)
-      {
-        if (authorizedPlayers is null || authorizedPlayers.Count is 0)
+        if (authorizedPlayers is null)
           return;
 
         foreach (var userid in authorizedPlayers)
@@ -1363,7 +1500,8 @@ namespace
 
           foreach (var doorChild in door.children)
           {
-            if (doorChild is not CodeLock codeLock || codeLock.whitelistPlayers is null)
+            if (doorChild is not CodeLock codeLock ||
+                codeLock.whitelistPlayers is null)
               continue;
 
             foreach (var playerId in codeLock.whitelistPlayers)
@@ -1371,9 +1509,14 @@ namespace
           }
         }
       }
+
+      [MethodImpl(MethodImplOptions.AggressiveInlining)]
+      static HashSet<ulong> ReturnPopulatedOrNull(HashSet<ulong> hashSet) =>
+        hashSet.Count is not 0 ? hashSet : null;
     }
 
-    private ulong GetRecentActiveMemberAll(in ulong targetID, in HashSet<ulong> players = null)
+    private ulong GetRecentActiveMemberAll(
+      in ulong targetID, in HashSet<ulong> players = null)
     {
       if (!Configuration.Team.TeamShare)
         return targetID;
@@ -1396,7 +1539,6 @@ namespace
             _tmpHashSet2.Add(playerID);
             continue;
           }
-
 
           var clanMembers = GetClanMembers(tag);
           if (clanMembers is null || clanMembers.Count is 0)
@@ -1474,71 +1616,70 @@ namespace
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private bool IsOffline(in ulong playerID)
-    {
-      if (_lastOnline.TryGetValue(playerID, out var lastOnlinePlayer))
-        return lastOnlinePlayer.IsOffline;
-
-      var player = PlayerManager.GetPlayer(playerID);
-
-      return !player || !player.IsConnected;
-    }
+    private bool IsOffline(in ulong playerID) =>
+      _lastOnline.TryGetValue(playerID, out var lastOnlinePlayer) ?
+        lastOnlinePlayer.IsOffline :
+        PlayerManager.GetPlayer(playerID)?.IsConnected is not true;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private bool IsOnline(in ulong playerID)
-    {
-      if (_lastOnline.TryGetValue(playerID, out var lastOnlinePlayer))
-        return lastOnlinePlayer.IsOnline;
-
-      var player = PlayerManager.GetPlayer(playerID);
-
-      return true == player?.IsConnected;
-    }
+    private bool IsOnline(in ulong playerID) =>
+      _lastOnline.TryGetValue(playerID, out var lastOnlinePlayer) ?
+        lastOnlinePlayer.IsOnline :
+        PlayerManager.GetPlayer(playerID)?.IsConnected is true;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private float GetCachedDamageScale(in ulong targetID)
     {
-      if (!_scaleCache.TryGetValue(targetID, out _targetScaleCache) || _currentDateTime.Ticks > _targetScaleCache.Expires)
-        return CacheDamageScaleTarget(_targetScaleCache, _currentDateTime, _targetScaleCache?.HasPermission is true ? GetDamageScale(targetID) : -1f);
-
-      return _targetScaleCache.Scale;
+      return !_scaleCache.TryGetValue(targetID, out _targetScaleCache) ||
+             _currentDateTime.Ticks > _targetScaleCache.Expires ?
+        CacheDamageScaleTarget(
+          _targetScaleCache, _currentDateTime,
+          _targetScaleCache?.HasPermission is true ?
+            GetDamageScale(targetID) : -1f) :
+        _targetScaleCache.Scale;
 
       [MethodImpl(MethodImplOptions.AggressiveInlining)]
-      static float CacheDamageScaleTarget(in PlayerScaleCache scaleCache, in System.DateTime currentTime, in float scale)
+      static float CacheDamageScaleTarget(
+        in PlayerScaleCache scaleCache, in System.DateTime currentTime,
+        in float scale)
       {
         scaleCache.ExpiresDT = currentTime.AddTicks(System.TimeSpan.TicksPerMinute);
         scaleCache.Scale = scale;
-
         return scale;
       }
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private float GetDamageScale(in ulong targetID, in PlayerScaleCache scaleCache = null)
+    private float GetDamageScale(
+      in ulong targetID, in PlayerScaleCache scaleCache = null)
     {
       _currentDateTime = System.DateTime.UtcNow;
 
       if (!_lastOnline.TryGetValue(targetID, out _targetLastOnline))
         return -1f;
 
-      if (!Configuration.RaidProtection.OnlineRaidProtection && _targetLastOnline.IsOnline)
+      if (!Configuration.RaidProtection.OnlineRaidProtection &&
+          _targetLastOnline.IsOnline)
         return -1f;
 
       if (_targetLastOnline?.UserID != targetID &&
           (!_lastOnline.TryGetValue(targetID, out _targetLastOnline) ||
-           (!Configuration.RaidProtection.OnlineRaidProtection && !_targetLastOnline.IsOffline)))
+           (!Configuration.RaidProtection.OnlineRaidProtection &&
+            !_targetLastOnline.IsOffline)))
         return -1f;
 
       UpdateRemainingTime(scaleCache ?? _targetScaleCache);
 
-      if (Configuration.RaidProtection.AbsoluteTimeScale.Count > 0 && _absolutTimeScaleKeys.Count > 0)
+      if (Configuration.RaidProtection.AbsoluteTimeScale.Count > 0 &&
+          _absolutTimeScaleKeys.Count > 0)
       {
         var absoluteTimeScale = GetAbsoluteTimeScale();
         if (absoluteTimeScale is not -1f)
           return absoluteTimeScale;
       }
 
-      if (Configuration.RaidProtection.DamageScale.Count > 0 && _damageScaleKeys.Count > 0)
+      if (Configuration.RaidProtection.DamageScale.Count > 0 &&
+          _damageScaleKeys.Count > 0)
         return GetOfflineTimeScale();
 
       return -1f;
@@ -1552,7 +1693,8 @@ namespace
         if (_damageScaleKeys.Count > 0)
         {
           var remainingHours = _damageScaleKeys[^1] - _targetLastOnline.Hours;
-          scaleCache.RemainingTime = System.TimeSpan.FromHours(remainingHours > 0 ? remainingHours : 0d);
+          scaleCache.RemainingTime =
+            System.TimeSpan.FromHours(remainingHours > 0 ? remainingHours : 0d);
         }
         else
           scaleCache.RemainingTime = System.TimeSpan.Zero;
@@ -1563,17 +1705,20 @@ namespace
         if (!_targetLastOnline.IsOffline)
           return -1f;
 
-        var duration = System.DateTime.FromBinary(_targetLastOnline.LastOnline - _targetLastOnline.LastConnect);
+        var duration = System.DateTime.FromBinary(
+          _targetLastOnline.LastOnline - _targetLastOnline.LastConnect);
         var minutes = duration.Minute;
         var hours = _targetLastOnline.Hours;
 
-        if (minutes < Configuration.RaidProtection.CooldownQualifyMinutes && _targetLastOnline.LastConnect <= 0L)
+        if (minutes < Configuration.RaidProtection.CooldownQualifyMinutes &&
+            _targetLastOnline.LastConnect <= 0L)
           return -1f;
 
         if (hours < _damageScaleKeys[0])
           return Configuration.RaidProtection.InterimDamage;
 
-        var lastValidScale = Configuration.RaidProtection.DamageScale[_damageScaleKeys[0]];
+        var lastValidScale =
+          Configuration.RaidProtection.DamageScale[_damageScaleKeys[0]];
 
         foreach (var key in _damageScaleKeys)
         {
@@ -1585,21 +1730,25 @@ namespace
       }
 
       [MethodImpl(MethodImplOptions.AggressiveInlining)]
-      float GetAbsoluteTimeScale()
-      {
-        var currentHour = System.TimeZoneInfo.ConvertTimeFromUtc(_currentDateTime, _timeZone).Hour;
-        return Configuration.RaidProtection.AbsoluteTimeScale.GetValueOrDefault(currentHour, -1f);
-      }
+      float GetAbsoluteTimeScale() =>
+        Configuration.RaidProtection.AbsoluteTimeScale.GetValueOrDefault(
+          System.TimeZoneInfo.ConvertTimeFromUtc(
+            _currentDateTime, _timeZone).Hour,
+          -1f);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private object MitigateDamage(ref HitInfo hitInfo, in float scale, in ulong targetID)
+    private object MitigateDamage(
+      ref HitInfo hitInfo, in float scale, in ulong targetID)
     {
       if (scale is <= -1f or 1f)
         return null;
 
-      var isFire = hitInfo.damageTypes.GetMajorityDamageType() is Rust.DamageType.Heat or Rust.DamageType.Fun_Water;
-      var showMessage = Configuration.Other.ShowMessage && ((isFire && hitInfo.WeaponPrefab is not null) || !isFire);
+      var isFire = hitInfo.damageTypes.GetMajorityDamageType()
+        is Rust.DamageType.Heat or Rust.DamageType.Fun_Water;
+      var showMessage =
+        Configuration.Other.ShowMessage &&
+        (!isFire || hitInfo.WeaponPrefab is not null);
       var playSound = Configuration.Other.PlaySound && !isFire;
       bool initiatorValid = hitInfo.InitiatorPlayer;
 
@@ -1628,8 +1777,13 @@ namespace
       [MethodImpl(MethodImplOptions.AggressiveInlining)]
       void PlaySound(ref HitInfo hitInfo)
       {
-        if (playSound && initiatorValid)
-          Effect.server.Run(Configuration.Other.SoundPath, hitInfo.InitiatorPlayer.transform.position, UnityEngine.Vector3.zero);
+        if (!playSound || !initiatorValid)
+          return;
+
+        Effect.server.Run(
+          Configuration.Other.SoundPath,
+          hitInfo.InitiatorPlayer.transform.position,
+          UnityEngine.Vector3.zero);
       }
     }
 
@@ -1637,12 +1791,16 @@ namespace
 
     #region Game Tip Message
 
-    private void SendMessage(in HitInfo hitInfo, in ulong targetID, in float amount = 100f)
+    private void SendMessage(
+      in HitInfo hitInfo, in ulong targetID, in float amount = 100f)
     {
       var initiator = hitInfo.InitiatorPlayer;
-      if (!_scaleCache.TryGetValue(initiator.userID.Get(), out var playerScaleCache))
+      if (!_scaleCache.TryGetValue(
+            initiator.userID.Get(), out var playerScaleCache))
       {
-        playerScaleCache = new(_currentDateTime, -1f, targetID.HasPermission(Configuration.Permission.Protect));
+        playerScaleCache = new(
+          _currentDateTime, -1f,
+          targetID.HasPermission(Configuration.Permission.Protect));
         _scaleCache[initiator.userID.Get()] = playerScaleCache;
       }
 
@@ -1681,23 +1839,21 @@ namespace
 
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        static System.Action ShowGameTipAction(BasePlayer player, string msg)
-        {
-          return () =>
+        static System.Action ShowGameTipAction(BasePlayer player, string msg) =>
+          () =>
           {
             // if (player)
             //     player.SendConsoleCommand(COMMAND_SHOWGAMETIP, msg);
-            if (player) player.SendConsoleCommand(
-              COMMAND_SHOWTOAST, GameTip.Styles.Blue_Short, msg, string.Empty, false);
+            player?.SendConsoleCommand(
+              COMMAND_SHOWTOAST, GameTip.Styles.Blue_Short, msg, string.Empty,
+              false);
           };
-        }
       }
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private string GetColor(in float amount)
-    {
-      return amount switch
+    private static string GetColor(in float amount) =>
+      amount switch
       {
         100f             => COLOR_RED,
         > 50f and < 100f => COLOR_ORANGE,
@@ -1706,7 +1862,6 @@ namespace
         0f               => COLOR_GREEN,
         _                => COLOR_WHITE
       };
-    }
 
     #endregion Game Tip Message
 
@@ -1736,7 +1891,8 @@ namespace
       CacheClan(tag);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private RelationshipManager.PlayerTeam GetTeam(in ulong userID) => RelationshipManager.ServerInstance.FindPlayersTeam(userID);
+    private static RelationshipManager.PlayerTeam GetTeam(in ulong userID) =>
+      RelationshipManager.ServerInstance.FindPlayersTeam(userID);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private List<ulong> GetTeamMembers(in ulong userID)
@@ -1749,13 +1905,17 @@ namespace
       return _tmpList.Count > 0 ? _tmpList : null;
     }
 
-    private ulong GetOfflineMember(in IEnumerable<ulong> members)
+    // TODO: This seems to currently be the busiest method in this plugin
+    //  according to Carbon's profiler - possibly due to being called a lot as
+    //  much as due to anything it's actually doing -HZ
+    private ulong GetOfflineMember(in IReadOnlyCollection<ulong> members)
     {
-      if (members is null || members.Count() is 0)
+      if (members is null || members.Count is 0)
         return 0UL;
 
       var result = 0UL;
-      var comparisonValue = Configuration.Team.TeamFirstOffline ? float.MinValue : float.MaxValue;
+      var comparisonValue =
+        Configuration.Team.TeamFirstOffline ? float.MinValue : float.MaxValue;
 
       foreach (var memberID in members)
       {
@@ -1766,8 +1926,10 @@ namespace
 
         // If ClanFirstOffline is true, find the member who has been offline the longest
         // Else, find the member who has been offline the shortest
-        if ((!Configuration.Team.TeamFirstOffline || memberMinutes <= comparisonValue) &&
-            (Configuration.Team.TeamFirstOffline || memberMinutes >= comparisonValue))
+        if ((!Configuration.Team.TeamFirstOffline ||
+             memberMinutes <= comparisonValue) &&
+            (Configuration.Team.TeamFirstOffline ||
+             memberMinutes >= comparisonValue))
           continue;
 
         comparisonValue = memberMinutes;
@@ -1775,12 +1937,6 @@ namespace
       }
 
       return result;
-    }
-
-    private void FreeClanPoolList(in string tag)
-    {
-      if (_clanMemberCache.TryGetValue(tag, out var list))
-        Facepunch.Pool.FreeUnmanaged(ref list);
     }
 
     private void FreeAllClanPoolLists()
@@ -1817,16 +1973,15 @@ namespace
         CacheClan(tag);
     }
 
-    private void OnClanDisbanded(string tag, List<string> _memberUserIDs)
-    {
-      FreeClanPoolList(tag);
-      _ = _clanMemberCache.Remove(tag);
-    }
+    private void OnClanDisbanded(string tag, List<string> _memberUserIDs) =>
+      OnClanDestroy(tag);
 
     private void OnClanDestroy(string tag)
     {
-      FreeClanPoolList(tag);
-      _ = _clanMemberCache.Remove(tag);
+      if (_clanMemberCache.Remove(tag, out var list))
+      {
+        Facepunch.Pool.FreeUnmanaged(ref list);
+      }
     }
 
     #endregion Clans Hooks
@@ -1853,27 +2008,12 @@ namespace
       return null;
     }
 
-    private object OnTeamKick(RelationshipManager.PlayerTeam team, BasePlayer _player, ulong _target)
-    {
-      if (team is null || team.members.Count is 0)
-        return null;
+    private object OnTeamKick(
+      RelationshipManager.PlayerTeam team, BasePlayer player, ulong _target) =>
+      OnTeamLeave(team, player);
 
-      if (Configuration.Team.TeamAvoidAbuse && AnyPlayersOffline(team.members))
-        return true;
-
-      if (!Configuration.Team.TeamEnablePenalty)
-        return null;
-
-      foreach (var memberID in team.members)
-      {
-        if (_lastOnline.TryGetValue(memberID, out var member))
-          member.EnablePenalty(Configuration.Team.TeamPenaltyDuration);
-      }
-
-      return null;
-    }
-
-    private object OnTeamLeave(RelationshipManager.PlayerTeam team, BasePlayer _player)
+    private object OnTeamLeave(
+      RelationshipManager.PlayerTeam team, BasePlayer _player)
     {
       if (team is null || team.members.Count is 0)
         return null;
@@ -1901,8 +2041,17 @@ namespace
 
     #region ChatCommands
 
-    private static readonly UnityEngine.RaycastHit[] RaycastHits = new UnityEngine.RaycastHit[1];
+    private static readonly UnityEngine.RaycastHit[] RaycastHits =
+      new UnityEngine.RaycastHit[1];
+
     private static UnityEngine.Ray _ray;
+
+    private const int LayerMask =
+      Rust.Layers.Mask.Construction |  // building blocks
+      Rust.Layers.Mask.Deployed |      // deployable items
+      Rust.Layers.Mask.Vehicle_World | // modular cars
+      Rust.Layers.Mask.Vehicle_Large;  // buildable boats
+
 
     private void cmdStatus(BasePlayer player, string _command, string[] args)
     {
@@ -1914,7 +2063,9 @@ namespace
 #if CARBON
         player.ChatMessage(GetStatusText(args));
 #else
-        player.ChatMessage(player.HasPermission(Configuration.Permission.Check) ? GetStatusText(args) : LANG_MESSAGE_NOPERMISSION);
+        player.ChatMessage(
+          player.HasPermission(Configuration.Permission.Check) ?
+            GetStatusText(args) : LANG_MESSAGE_NOPERMISSION);
 #endif
         return;
       }
@@ -1924,43 +2075,126 @@ namespace
         player.ChatMessage(LANG_MESSAGE_NOPERMISSION);
       }
 #endif
-
+/*
+      var maskDict = new Dictionary<string, int>
+      {
+        {"Default", Rust.Layers.Mask.Default},
+        {"TransparentFX", Rust.Layers.Mask.TransparentFX},
+        {"Ignore_Raycast", Rust.Layers.Mask.Ignore_Raycast},
+        {"Reserved1", Rust.Layers.Mask.Reserved1},
+        {"Water", Rust.Layers.Mask.Water},
+        {"UI", Rust.Layers.Mask.UI},
+        {"Reserved2", Rust.Layers.Mask.Reserved2},
+        {"Reserved3", Rust.Layers.Mask.Reserved3},
+        {"Deployed", Rust.Layers.Mask.Deployed},
+        {"Ragdoll", Rust.Layers.Mask.Ragdoll},
+        {"Invisible", Rust.Layers.Mask.Invisible},
+        {"AI", Rust.Layers.Mask.AI},
+        {"Player_Movement", Rust.Layers.Mask.Player_Movement},
+        {"Vehicle_Detailed", Rust.Layers.Mask.Vehicle_Detailed},
+        {"Game_Trace", Rust.Layers.Mask.Game_Trace},
+        {"Vehicle_World", Rust.Layers.Mask.Vehicle_World},
+        {"World", Rust.Layers.Mask.World},
+        {"Player_Server", Rust.Layers.Mask.Player_Server},
+        {"Trigger", Rust.Layers.Mask.Trigger},
+        {"Harvestable", Rust.Layers.Mask.Harvestable},
+        {"Physics_Projectile", Rust.Layers.Mask.Physics_Projectile},
+        {"Construction", Rust.Layers.Mask.Construction},
+        {"Construction_Socket", Rust.Layers.Mask.Construction_Socket},
+        {"Terrain", Rust.Layers.Mask.Terrain},
+        {"Transparent", Rust.Layers.Mask.Transparent},
+        {"Clutter", Rust.Layers.Mask.Clutter},
+        {"Bush", Rust.Layers.Mask.Bush},
+        {"Vehicle_Large", Rust.Layers.Mask.Vehicle_Large},
+        {"Prevent_Movement", Rust.Layers.Mask.Prevent_Movement},
+        {"Prevent_Building", Rust.Layers.Mask.Prevent_Building},
+        {"Tree", Rust.Layers.Mask.Tree},
+        {"Physics_Debris", Rust.Layers.Mask.Physics_Debris},
+      };
+      foreach (var (maskName, maskValue) in maskDict)
+      {
+        _ray.origin = player.eyes.position;
+        _ray.direction = player.eyes.HeadForward();
+        var hc = UnityEngine.Physics.RaycastNonAlloc(
+          _ray, RaycastHits, 50f, maskValue);
+        if (hc <= 0)
+        {
+          Puts($"***** {maskName}: None");
+        }
+        else if (RaycastHits[0].GetEntity() is { } tempEntity)
+        {
+          Puts($"***** {maskName}: {tempEntity}");
+        }
+        else
+        {
+          Puts($"***** {maskName}: Null");
+        }
+      }
+*/
       _ray.origin = player.eyes.position;
       _ray.direction = player.eyes.HeadForward();
-      var hitCount = UnityEngine.Physics.RaycastNonAlloc(_ray, RaycastHits, 50f, Rust.Layers.Solid);
-
-      if (hitCount > 0)
+      var hitCount = UnityEngine.Physics.RaycastNonAlloc(
+        _ray, RaycastHits, 50f, LayerMask);
+      if (hitCount <= 0)
       {
-        var entity = RaycastHits[0].GetEntity();
-        if (entity is null || !IsProtected((BaseCombatEntity)entity))
-        {
-          player.ChatMessage("Not a protected player structure.");
-          return;
-        }
-
-        _isVehicle = entity is BaseVehicle || entity.GetParentEntity() is BaseVehicle;
-        var authorizedPlayers = GetAuthorizedPlayers((BaseCombatEntity)entity);
-        var firstPlayer = authorizedPlayers?.FirstOrDefault();
-
-        if (firstPlayer?.IsSteamID() is not true)
-        {
-          player.ChatMessage("Ownerless structure.");
-          return;
-        }
-
-        var targetID = entity.OwnerID;
-        if (entity.OwnerID is 0UL || !authorizedPlayers.Contains(entity.OwnerID))
-          targetID = (ulong)firstPlayer;
-
-        targetID = GetRecentActiveMemberAll(targetID, authorizedPlayers);
-
-        if (!Configuration.RaidProtection.ProtectDecayingBase && !_isVehicle && _tcCache.TryGetValue(_privilege.buildingID, out var tc))
-          player.ChatMessage(GetStatusText(new[] { targetID.ToString() }, tc.IsDecaying));
-        else
-          player.ChatMessage(GetStatusText(new[] { targetID.ToString() }));
+        player.ChatMessage("You are looking at nothing or you are too far away");
+        return;
       }
-      else
-        player.ChatMessage("You are looking at nothing or you are too far away.");
+
+      var baseEntity = RaycastHits[0].GetEntity();
+      if (!baseEntity)
+      {
+        player.ChatMessage("You are not looking at an entity");
+        return;
+      }
+
+      if (baseEntity is not BaseCombatEntity entity)
+      {
+        player.ChatMessage($"{baseEntity.GetType()}/{baseEntity} is not a combat entity");
+        return;
+      }
+
+      if (!IsProtected(entity))
+      {
+        player.ChatMessage($"{entity.GetType()}/{entity} is not a protected player entity");
+        return;
+      }
+
+      // TODO: this is mostly a duplicate of OnStructureAttack()...maybe move
+      //  that logic into an intermediate method that returns an enum, and have
+      //  both OnStructureAttack() and this call it for consistency
+      var (tugboat, modularBoat, vehicle) = GetVehicle(entity);
+      // player.ChatMessage($"***** tugobat={tugboat}, modularBoat={modularBoat}, vehicle={vehicle}");
+      _isVehicle = vehicle;
+      var authorizedPlayers =
+        GetAuthorizedPlayers(entity, tugboat, modularBoat, vehicle);
+      var firstPlayer = authorizedPlayers?.FirstOrDefault() ?? 0;
+
+      if (null == authorizedPlayers || !firstPlayer.IsSteamID())
+      {
+        player.ChatMessage($"{entity.GetType()}/{entity} has no owner");
+        return;
+      }
+
+      player.ChatMessage($"{entity.GetType()}/{entity} report:");
+
+      var targetID = entity.OwnerID;
+      if (entity.OwnerID is 0UL ||
+          !authorizedPlayers.Contains(entity.OwnerID))
+        targetID = firstPlayer;
+
+      targetID = GetRecentActiveMemberAll(targetID, authorizedPlayers);
+
+      if (!Configuration.RaidProtection.ProtectDecayingBase &&
+          !_isVehicle && !tugboat && !modularBoat &&
+          _tcCache.TryGetValue(_privilege.buildingID, out var tc))
+      {
+        player.ChatMessage(
+          GetStatusText(new[] { targetID.ToString() }, tc.IsDecaying));
+        return;
+      }
+
+      player.ChatMessage(GetStatusText(new[] { targetID.ToString() }));
     }
 
     private void cmdHelp(BasePlayer player, string _command, string[] _args)
@@ -1971,7 +2205,8 @@ namespace
       player.ChatMessage(GetHelpText(player.userID.Get()));
     }
 
-    private void cmdFillOnlineTimes(BasePlayer player, string command, string[] args)
+    private void cmdFillOnlineTimes(
+      BasePlayer player, string command, string[] args)
     {
 #if !CARBON
       if (!player || !player.HasPermission(Configuration.Permission.Admin))
@@ -1999,7 +2234,8 @@ namespace
       player.ChatMessage(msg);
     }
 
-    private void cmdTestOffline(BasePlayer player, string _command, string[] args)
+    private void cmdTestOffline(
+      BasePlayer player, string _command, string[] args)
     {
 #if !CARBON
       if (!player || !player.HasPermission(Configuration.Permission.Admin))
@@ -2013,7 +2249,6 @@ namespace
       {
         if (player)
           player.ChatMessage(MESSAGE_INVALID_SYNTAX);
-
         return;
       }
 
@@ -2036,7 +2271,8 @@ namespace
 
       if (_lastOnline.TryGetValue(userID, out var target))
       {
-        target.LastOnlineDT = target.LastOnlineDT.Subtract(System.TimeSpan.FromHours(hours));
+        target.LastOnlineDT =
+          target.LastOnlineDT.Subtract(System.TimeSpan.FromHours(hours));
         player.ChatMessage($"{target.UserName} | {System.TimeZoneInfo.ConvertTimeFromUtc(target.LastOnlineDT, _timeZone)}");
       }
       else
@@ -2048,7 +2284,8 @@ namespace
       CacheDamageScale(userID, -1f);
     }
 
-    private void cmdTestOnline(BasePlayer player, string _command, string[] args)
+    private void cmdTestOnline(
+      BasePlayer player, string _command, string[] args)
     {
 #if !CARBON
       if (!player || !player.HasPermission(Configuration.Permission.Admin))
@@ -2091,7 +2328,8 @@ namespace
       CacheDamageScale(userID, -1f);
     }
 
-    private void cmdTestPenalty(BasePlayer player, string _command, string[] args)
+    private void cmdTestPenalty(
+      BasePlayer player, string _command, string[] args)
     {
 #if !CARBON
       if (!player || !player.HasPermission(Configuration.Permission.Admin))
@@ -2126,23 +2364,22 @@ namespace
         return;
       }
 
-      if (_lastOnline.TryGetValue(userID, out var target))
-      {
-        if (duration > 0f)
-        {
-          target.EnablePenalty(duration);
-          player.ChatMessage($"{target.UserName} | Penalty until {System.TimeZoneInfo.ConvertTimeFromUtc(target.PenaltyEndDT, _timeZone)}");
-        }
-        else
-        {
-          target.DisablePenalty();
-          player.ChatMessage($"{target.UserName} | Penalty disabled");
-        }
-      }
-      else
+      if (!_lastOnline.TryGetValue(userID, out var target))
       {
         player.ChatMessage(MESSAGE_PLAYER_NOT_FOUND);
         return;
+      }
+
+      if (duration > 0f)
+      {
+        target.EnablePenalty(duration);
+        player.ChatMessage(
+          $"{target.UserName} | Penalty until {System.TimeZoneInfo.ConvertTimeFromUtc(target.PenaltyEndDT, _timeZone)}");
+      }
+      else
+      {
+        target.DisablePenalty();
+        player.ChatMessage($"{target.UserName} | Penalty disabled");
       }
 
       CacheDamageScale(userID, -1f);
@@ -2152,10 +2389,12 @@ namespace
 
     #region ConsoleCommands
 
+    // TODO: de-duplicate from chat command logic -HZ
     private void ccFillOnlineTimes(ConsoleSystem.Arg arg)
     {
 #if !CARBON
-      if (arg is null || arg.Connection is null || !arg.Connection.userid.HasPermission(Configuration.Permission.Admin))
+      if (arg is null || arg.Connection is null ||
+          !arg.Connection.userid.HasPermission(Configuration.Permission.Admin))
       {
         SendReply(arg, LANG_MESSAGE_NOPERMISSION);
           return;
@@ -2179,22 +2418,26 @@ namespace
     private void ccUpdatePermissions(ConsoleSystem.Arg arg)
     {
 #if !CARBON
-      if (arg is null || arg.Connection is null || !arg.Connection.userid.HasPermission(Configuration.Permission.Admin))
+      if (arg is null || arg.Connection is null ||
+          !arg.Connection.userid.HasPermission(Configuration.Permission.Admin))
       {
         SendReply(arg, LANG_MESSAGE_NOPERMISSION);
           return;
       }
 #endif
       foreach (var key in _scaleCache.Keys)
-        _scaleCache[key].HasPermission = key.HasPermission(Configuration.Permission.Protect);
-
+      {
+        _scaleCache[key].HasPermission =
+          key.HasPermission(Configuration.Permission.Protect);
+      }
       SendReply(arg, "Updated the permission status for all players.");
     }
 
     private void ccUpdatePrefabList(ConsoleSystem.Arg arg)
     {
 #if !CARBON
-      if (arg is null || arg.Connection is null || !arg.Connection.userid.HasPermission(Configuration.Permission.Admin))
+      if (arg is null || arg.Connection is null ||
+          !arg.Connection.userid.HasPermission(Configuration.Permission.Admin))
       {
         SendReply(arg, LANG_MESSAGE_NOPERMISSION);
           return;
@@ -2216,7 +2459,8 @@ namespace
     private void ccDumpPrefabList(ConsoleSystem.Arg arg)
     {
 #if !CARBON
-      if (arg is null || arg.Connection is null || !arg.Connection.userid.HasPermission(Configuration.Permission.Admin))
+      if (arg is null || arg.Connection is null ||
+          !arg.Connection.userid.HasPermission(Configuration.Permission.Admin))
       {
         SendReply(arg, LANG_MESSAGE_NOPERMISSION);
           return;
@@ -2414,7 +2658,8 @@ namespace
       if (!System.IO.Directory.Exists(langDirectory))
         return;
 
-      foreach (var langFolder in System.IO.Directory.GetDirectories(langDirectory))
+      foreach (
+        var langFolder in System.IO.Directory.GetDirectories(langDirectory))
       {
         var langFilePath = System.IO.Path.Combine(langFolder, $"{Name}.json");
         if (!System.IO.File.Exists(langFilePath))
@@ -2448,22 +2693,30 @@ namespace
 
       AppendTeamOrClanMembersStatus(userID);
 
-      var penaltyEnabled = lastOnline.PenaltyEnd >= System.DateTime.UtcNow.Ticks;
+      var penaltyEnabled =
+        lastOnline.PenaltyEnd >= System.DateTime.UtcNow.Ticks;
       if (Configuration.Team.TeamEnablePenalty)
         _sb.AppendLine($"<color={COLOR_YELLOW}>Penalty Status</color> {(penaltyEnabled ? $"<color={COLOR_RED}>Enabled</color> {System.TimeZoneInfo.ConvertTimeFromUtc(lastOnline.PenaltyEndDT, _timeZone)}" : $"<color={COLOR_GREEN}>Disabled</color>")}");
 
       if (penaltyEnabled)
         return _sb.ToString();
 
-      if (!isDecaying)
+      if (isDecaying)
       {
-        var scale = GetDamageScale(GetRecentActiveMemberAll(userID), _scaleCache.GetValueOrDefault(userID, null));
-        var prot = scale.ToPercent();
-        if (scale is not -1)
-          _sb.AppendLine($"<color={COLOR_AQUA}>Scale</color> {scale} ({(prot >= 0f ? $"{prot}% Protection" : $"+{-prot}% Damage")})");
+        _sb.AppendLine($"<color={COLOR_AQUA}>Scale</color> 0 (Decaying)");
       }
       else
-        _sb.AppendLine($"<color={COLOR_AQUA}>Scale</color> 0 (Decaying)");
+      {
+        var scale = GetDamageScale(
+          GetRecentActiveMemberAll(userID),
+          _scaleCache.GetValueOrDefault(userID, null));
+        var prot = scale.ToPercent();
+        if (scale is not -1)
+        {
+          _sb.AppendLine(
+            $"<color={COLOR_AQUA}>Scale</color> {scale} ({(prot >= 0f ? $"{prot}% Protection" : $"+{-prot}% Damage")})");
+        }
+      }
 
       return _sb.ToString();
     }
@@ -2474,7 +2727,8 @@ namespace
         return;
 
       var tag = Clans is not null ? GetClanTag(userID) : null;
-      var members = !string.IsNullOrEmpty(tag) ? GetClanMembers(tag) : GetTeamMembers(userID);
+      var members = string.IsNullOrEmpty(tag) ?
+        GetTeamMembers(userID) : GetClanMembers(tag);
 
       if (!(members?.Count > 1))
         return;
@@ -2516,7 +2770,8 @@ namespace
 
       if (Configuration.RaidProtection.DamageScale.Keys.Count > 0)
       {
-        var interimDamageScalePercent = Configuration.RaidProtection.InterimDamage.ToPercent();
+        var interimDamageScalePercent =
+          Configuration.RaidProtection.InterimDamage.ToPercent();
         if (Configuration.RaidProtection.CooldownMinutes > 0)
         {
           _sb.AppendLine($"<color={COLOR_ORANGE}>First {Configuration.RaidProtection.CooldownMinutes} minutes</color>: 0% Protection")
@@ -2532,10 +2787,12 @@ namespace
         }
       }
 
-      if (!Configuration.Team.TeamEnablePenalty || !_lastOnline.TryGetValue(userID, out var lastOnline))
+      if (!Configuration.Team.TeamEnablePenalty ||
+          !_lastOnline.TryGetValue(userID, out var lastOnline))
         return _sb.ToString();
 
-      var penaltyEnabled = lastOnline.PenaltyEnd >= System.DateTime.UtcNow.Ticks;
+      var penaltyEnabled =
+        lastOnline.PenaltyEnd >= System.DateTime.UtcNow.Ticks;
       _sb.AppendLine($"<color={COLOR_YELLOW}>Penalty Status</color> {(penaltyEnabled ? $"<color={COLOR_RED}>Enabled</color> {System.TimeZoneInfo.ConvertTimeFromUtc(lastOnline.PenaltyEndDT, _timeZone):HH:mm:ss}" : $"<color={COLOR_GREEN}>Disabled</color>")}");
 
       return _sb.ToString();
@@ -2545,96 +2802,96 @@ namespace
 
     #region Helper Methods
 
-    private string Msg(in string key, in string userID = null) => lang.GetMessage(key, this, userID);
+    private string Msg(in string key, in string userID = null) =>
+      lang.GetMessage(key, this, userID);
 
-    private static bool IsBuildingDecaying(in List<Item> items, in ListHashSet<DecayEntity> entities)
+    private static bool IsBuildingDecaying(
+      in List<Item> items, in ListHashSet<BuildingBlock> buildingBlocks)
     {
       var requiresWood = false;
       var requiresStone = false;
       var requiresMetal = false;
       var requiresHqMetal = false;
 
-      var totalBlocks = 0;
+      var totalBlocks = buildingBlocks.Count;
       var damagedBlocks = 0;
       const float damageThreshold = 0.9f; // e.g., below 90% health is "damaged"
 
-      foreach (var entity in entities)
+      // scan building's blocks to see which building grades are present
+      foreach (var block in buildingBlocks)
       {
-        if (entity is BuildingBlock block)
+        if (block.healthFraction < damageThreshold)
+          damagedBlocks++;
+
+        // skip grade checks if all grades found
+        if (requiresWood && requiresStone && requiresMetal && requiresHqMetal)
+          continue;
+
+        switch (block.grade)
         {
-          totalBlocks++;
-          if (block.healthFraction < damageThreshold)
-            damagedBlocks++;
+          case BuildingGrade.Enum.Twigs when !requiresWood:
+          case BuildingGrade.Enum.Wood when !requiresWood:
+            requiresWood = true;
+            break;
 
-          if (requiresWood && requiresStone && requiresMetal && requiresHqMetal)
-            continue;
+          case BuildingGrade.Enum.Stone when !requiresStone:
+            requiresStone = true;
+            break;
 
-          switch (block.grade)
-          {
-            case BuildingGrade.Enum.Twigs when !requiresWood:
-            case BuildingGrade.Enum.Wood when !requiresWood:
-              requiresWood = true;
-              break;
+          case BuildingGrade.Enum.Metal when !requiresMetal:
+            requiresMetal = true;
+            break;
 
-            case BuildingGrade.Enum.Stone when !requiresStone:
-              requiresStone = true;
-              break;
+          case BuildingGrade.Enum.TopTier when !requiresHqMetal:
+            requiresHqMetal = true;
+            break;
 
-            case BuildingGrade.Enum.Metal when !requiresMetal:
-              requiresMetal = true;
-              break;
-
-            case BuildingGrade.Enum.TopTier when !requiresHqMetal:
-              requiresHqMetal = true;
-              break;
-
-            case BuildingGrade.Enum.None:
-            case BuildingGrade.Enum.Count:
-              break;
-
-            default:
-              continue;
-          }
+          case BuildingGrade.Enum.None:
+          case BuildingGrade.Enum.Count:
+          default:
+            break;
         }
       }
 
-      var amountWood = 0;
-      var amountStone = 0;
-      var amountMetal = 0;
-      var amountHqMetal = 0;
+      var satisfiedWood    = !requiresWood;
+      var satisfiedStone   = !requiresStone;
+      var satisfiedMetal   = !requiresMetal;
+      var satisfiedHqMetal = !requiresHqMetal;
 
+      // check for each required resource in the building TC's inventory
       foreach (var item in items)
       {
+        // abort if all needs satisfied
+        if (satisfiedWood && satisfiedStone && satisfiedMetal &&
+            satisfiedHqMetal)
+          break;
+
         switch (item.info.itemid)
         {
           case -151838493: // wood
-            amountWood += item.amount;
+            satisfiedWood = true;
             break;
 
           case -2099697608: // stone
-            amountStone += item.amount;
+            satisfiedStone = true;
             break;
 
           case 69511070: // metal fragments
-            amountMetal += item.amount;
+            satisfiedMetal = true;
             break;
 
           case 317398316: // hq metal
-            amountHqMetal += item.amount;
+            satisfiedHqMetal = true;
             break;
         }
       }
 
-      var upkeepMissing = !(requiresWood && amountWood > 0);
+      var upkeepMissing =
+        !satisfiedWood || !satisfiedStone || !satisfiedMetal ||
+        !satisfiedHqMetal;
 
-      if (requiresStone && amountStone > 0)
-        upkeepMissing = false;
-      if (requiresMetal && amountMetal > 0)
-        upkeepMissing = false;
-      if (requiresHqMetal && amountHqMetal > 0)
-        upkeepMissing = false;
-
-      var majorityDamaged = totalBlocks > 0 && (float)damagedBlocks / totalBlocks > 0.5f;
+      var majorityDamaged =
+        totalBlocks > 0 && (float)damagedBlocks / totalBlocks > 0.5f;
 
       return upkeepMissing || majorityDamaged;
     }
@@ -2657,16 +2914,23 @@ namespace Oxide.Plugins.OfflineRaidProtectionEx
 
     static ExtensionMethods() => P = Interface.Oxide.GetLibrary<Permission>();
 
-    private static bool HasPermission(this string userID, in string permission) => !string.IsNullOrEmpty(userID) && P.UserHasPermission(userID, permission);
+    private static bool HasPermission(this string userID, in string permission)
+      => !string.IsNullOrEmpty(userID) &&
+         P.UserHasPermission(userID, permission);
 
-    public static bool HasPermission(this BasePlayer player, in string permission) => player.UserIDString.HasPermission(permission);
+    public static bool HasPermission(
+      this BasePlayer player, in string permission) =>
+      player.UserIDString.HasPermission(permission);
 
-    public static bool HasPermission(this in ulong userID, in string permission) => userID.ToString().HasPermission(permission);
+    public static bool HasPermission(this in ulong userID, in string permission)
+      => userID.ToString().HasPermission(permission);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static float ToPercent(this in float value) => 100f - value * 100f;
 
-    public static void ClearAndMergeWith<TKey, TValue>(this Dictionary<TKey, TValue> first, params Dictionary<TKey, TValue>[] others)
+    public static void ClearAndMergeWith<TKey, TValue>(
+      this Dictionary<TKey, TValue> first,
+      params Dictionary<TKey, TValue>[] others)
     {
       if (first is null)
         return;
