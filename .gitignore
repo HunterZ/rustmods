@@ -3,6 +3,7 @@
 *.cs
 !DynamicPVP.cs
 !KillHeliVote.cs
+!MagicDeepSeaPanel.cs
 !MagicTravelingVendorPanel.cs
 !OfflineRaidProtection.cs
 !PlayerBasePvpZones.cs

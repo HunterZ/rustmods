@@ -181,7 +181,7 @@ public class ScarecrowWrangler : RustPlugin
   private void DestroyWatcher(ScarecrowWatcher watcher)
   {
     if (!watcher || watcher.Destroying) return;
-    Puts($"Destroying watcher {watcher.GetInstanceID()} on scarecrow {Print(watcher.GetScarecrow())}");
+    // Puts($"Destroying watcher {watcher.GetInstanceID()} on scarecrow {Print(watcher.GetScarecrow())}");
     // remove watcher from valid location data if present
     // this avoids the location getting stuck on a defunct scarecrow
     foreach (var validLoc in _validLocations)
@@ -387,7 +387,7 @@ public class ScarecrowWrangler : RustPlugin
       Destroying = true;
       CancelInvoke();
       if (!Instance) return;
-      Instance.Puts($"Watcher {GetInstanceID()}: Destroying from scarecrow {Print(GetScarecrow())}");
+      // Instance.Puts($"Watcher {GetInstanceID()}: Destroying from scarecrow {Print(GetScarecrow())}");
       Instance._watchers.Remove(this);
       Instance = null;
     }
@@ -397,7 +397,7 @@ public class ScarecrowWrangler : RustPlugin
     public void StartWatching(float repeatRate = 2.0f)
     {
       if (Destroying || !Instance) return;
-      Instance.Puts($"Watcher {GetInstanceID()}: Watching scarecrow {Print(GetScarecrow())} with repeatRate={repeatRate}");
+      // Instance.Puts($"Watcher {GetInstanceID()}: Watching scarecrow {Print(GetScarecrow())} with repeatRate={repeatRate}");
       Instance._watchers.Add(this);
       InvokeRepeating(nameof(Watch), 0.0f, repeatRate);
     }
