@@ -23,7 +23,7 @@ namespace
   Oxide.Plugins
 #endif
 {
-  [Info("Offline Raid Protection", "realedwin/HunterZ", "1.2.0"), Description("Prevents/reduces offline raids by other players")]
+  [Info("Offline Raid Protection", "realedwin/HunterZ", "1.3.0"), Description("Prevents/reduces offline raids by other players")]
   public sealed class OfflineRaidProtection :
 #if CARBON
     CarbonPlugin
@@ -166,6 +166,9 @@ namespace
 
         [JsonProperty(PropertyName = "Protect decaying buildings")]
         public bool ProtectDecayingBase { get; set; }
+
+        [JsonProperty(PropertyName = "Ignore wood decay if only due to twig")]
+        public bool DecayIgnoreTwig { get; set; }
 
         [JsonProperty(PropertyName = "Prefabs to protect")]
         public HashSet<string> Prefabs { get; set; }
@@ -746,6 +749,7 @@ namespace
         ProtectVehicles = true,
         ProtectTwigs = false,
         ProtectDecayingBase = true,
+        DecayIgnoreTwig = false,
         Prefabs = GetPrefabNames(),
         PrefabsBlacklist = new()
       },
@@ -949,9 +953,8 @@ namespace
         _tcCache[buildingPrivlidge.buildingID] =
           new CupboardPrivilege(buildingPrivlidge, cachedProtectedMinutes)
           {
-            IsDecaying = IsBuildingDecaying(
-              buildingPrivlidge.inventory.itemList,
-              buildingPrivlidge.GetBuilding()?.buildingBlocks)
+            IsDecaying =
+              IsBuildingDecaying(buildingPrivlidge, cachedProtectedMinutes > 0)
           };
         return;
       }
@@ -961,9 +964,8 @@ namespace
       //  commented them out for now -HZ
       // tc.BuildingPrivlidge = buildingPrivlidge;
       // tc.LastProtectedMinutes = cachedProtectedMinutes;
-      tc.IsDecaying = IsBuildingDecaying(
-        buildingPrivlidge.inventory.itemList,
-        buildingPrivlidge.GetBuilding()?.buildingBlocks);
+      tc.IsDecaying =
+        IsBuildingDecaying(buildingPrivlidge, cachedProtectedMinutes > 0);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1219,7 +1221,13 @@ namespace
           if (toolCupboard?.buildingID != buildingID)
             continue;
 
-          _tcCache[toolCupboard.buildingID] = new(toolCupboard, 0f);
+          var protectedMinutes = toolCupboard.GetProtectedMinutes();
+          _tcCache[toolCupboard.buildingID] =
+            new(toolCupboard, protectedMinutes)
+            {
+              IsDecaying =
+                IsBuildingDecaying(toolCupboard, protectedMinutes > 0)
+            };
           // only one TC can be physically connected
           break;
         }
@@ -2806,95 +2814,148 @@ namespace
     private string Msg(in string key, in string userID = null) =>
       lang.GetMessage(key, this, userID);
 
-    private static bool IsBuildingDecaying(
-      in List<Item> items, in ListHashSet<BuildingBlock> buildingBlocks)
-    {
-      var requiresWood = false;
-      var requiresStone = false;
-      var requiresMetal = false;
-      var requiresHqMetal = false;
+    private const int ItemIdWood  = -151838493;
+    private const int ItemIdStone = -2099697608;
+    private const int ItemIdMetal =  69511070;
+    private const int ItemIdHqm   =  317398316;
 
-      var totalBlocks = buildingBlocks.Count;
+    private bool IsBuildingDecaying(
+        in BuildingPrivlidge toolCupboard, in bool hasProtectedMinutes)
+    {
+      if (!toolCupboard)
+        return true;
+
+      var itemList = toolCupboard.inventory?.itemList;
+      var building = toolCupboard.GetBuilding();
+      var buildingBlocks = building?.buildingBlocks;
+      var decayEntities = building?.decayEntities;
+      if (itemList is null || buildingBlocks is null || decayEntities is null)
+        return true;
+
+      var hasBlockTwig = false;
+      var hasBlockWood = false;
+      var hasBlockStone = false;
+      var hasBlockMetal = false;
+      var hasBlockHqm = false;
+
+      var totalBlocks = 0;
       var damagedBlocks = 0;
       const float damageThreshold = 0.9f; // e.g., below 90% health is "damaged"
 
-      // scan building's blocks to see which building grades are present
+      // scan building's blocks to see which building grades are present, and
+      //  how many are of interest to damage threshold calculations
       foreach (var block in buildingBlocks)
       {
-        if (block.healthFraction < damageThreshold)
-          damagedBlocks++;
-
-        // skip grade checks if all grades found
-        if (requiresWood && requiresStone && requiresMetal && requiresHqMetal)
-          continue;
-
+        // NOTE: `break` versus `continue` determines whether this block should
+        //  be counted in damage calculations
         switch (block.grade)
         {
-          case BuildingGrade.Enum.Twigs when !requiresWood:
-          case BuildingGrade.Enum.Wood when !requiresWood:
-            requiresWood = true;
-            break;
-
-          case BuildingGrade.Enum.Stone when !requiresStone:
-            requiresStone = true;
-            break;
-
-          case BuildingGrade.Enum.Metal when !requiresMetal:
-            requiresMetal = true;
-            break;
-
-          case BuildingGrade.Enum.TopTier when !requiresHqMetal:
-            requiresHqMetal = true;
-            break;
-
           case BuildingGrade.Enum.None:
+            continue;
+          case BuildingGrade.Enum.Twigs:
+            hasBlockTwig = true;
+            // don't count twig block damage, because these can be added to a
+            //  base by players without build privilege
+            continue;
+          case BuildingGrade.Enum.Wood:
+            hasBlockWood = true;
+            break;
+          case BuildingGrade.Enum.Stone:
+            hasBlockStone = true;
+            break;
+          case BuildingGrade.Enum.Metal:
+            hasBlockMetal = true;
+            break;
+          case BuildingGrade.Enum.TopTier:
+            hasBlockHqm = true;
+            break;
           case BuildingGrade.Enum.Count:
           default:
-            break;
+            continue;
         }
+
+        ++totalBlocks;
+        if (block.healthFraction < damageThreshold)
+          ++damagedBlocks;
       }
 
-      var satisfiedWood    = !requiresWood;
-      var satisfiedStone   = !requiresStone;
-      var satisfiedMetal   = !requiresMetal;
-      var satisfiedHqMetal = !requiresHqMetal;
+      // if over 50% of eligible blocks have health below the damage threshold,
+      //  consider the building to be decaying
+      if (totalBlocks > 0 && (float)damagedBlocks / totalBlocks > 0.5f)
+        return true;
+
+      // if the building is not actually decaying, report that
+      if (hasProtectedMinutes)
+        return false;
+
+      // at this point the building is decaying; report that unless there's a
+      //  possibility that decay is due to twig, and the config option to ignore
+      //  twig is enabled
+      if (!hasBlockTwig || hasBlockWood ||
+          !Configuration.RaidProtection.DecayIgnoreTwig)
+        return true;
 
       // check for each required resource in the building TC's inventory
-      foreach (var item in items)
-      {
-        // abort if all needs satisfied
-        if (satisfiedWood && satisfiedStone && satisfiedMetal &&
-            satisfiedHqMetal)
-          break;
+      // NOTE: remember that the building is decaying, so at least one resource
+      //  is missing!
+      var satisfiedStone = !hasBlockStone;
+      var satisfiedMetal = !hasBlockMetal;
+      var satisfiedHqm   = !hasBlockHqm;
 
+      foreach (var item in itemList)
+      {
         switch (item.info.itemid)
         {
-          case -151838493: // wood
-            satisfiedWood = true;
-            break;
+          case ItemIdWood: // wood
+            // there is wood in the TC, so the building is not decaying due to
+            //  twig, and we can immediately report that the building is
+            //  decaying here
+            return true;
 
-          case -2099697608: // stone
+          case ItemIdStone: // stone
             satisfiedStone = true;
             break;
 
-          case 69511070: // metal fragments
+          case ItemIdMetal: // metal fragments
             satisfiedMetal = true;
             break;
 
-          case 317398316: // hq metal
-            satisfiedHqMetal = true;
+          case ItemIdHqm: // high quality metal
+            satisfiedHqm = true;
             break;
         }
       }
 
-      var upkeepMissing =
-        !satisfiedWood || !satisfiedStone || !satisfiedMetal ||
-        !satisfiedHqMetal;
+      // if something other than wood is missing, the building is not decaying
+      //  solely due to twig, so we can immediately report that the building is
+      //  decaying here
+      if (!satisfiedStone || !satisfiedMetal || !satisfiedHqm)
+        return true;
 
-      var majorityDamaged =
-        totalBlocks > 0 && (float)damagedBlocks / totalBlocks > 0.5f;
+      // at this point the building has twig, no upgraded wood blocks, and only
+      //  decay is solely due to a lack of wood in the TC; determine whether
+      //  there are any other wood-based decay entities in the building
+      foreach (var decayEntity in decayEntities)
+      {
+        if (decayEntity is BuildingBlock)
+          continue;
 
-      return upkeepMissing || majorityDamaged;
+        if (decayEntity.Upkeep?.upkeepMultiplier is not > 0)
+          continue;
+
+        var buildCost = decayEntity.BuildCost();
+        if (buildCost is null)
+          continue;
+
+        foreach (var itemAmount in buildCost)
+        {
+          if (ItemIdWood == itemAmount.itemid)
+            return true; // found another item requiring wood upkeep
+        }
+      }
+
+      // twig is solely responsible for decay, so ignore that
+      return false;
     }
 
     #endregion Helper Methods
