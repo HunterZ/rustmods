@@ -12,7 +12,6 @@ using Oxide.Core;
 using Oxide.Core.Libraries;
 using Oxide.Core.Plugins;
 using System.Collections.Generic;
-using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text;
 
@@ -23,7 +22,7 @@ namespace
   Oxide.Plugins
 #endif
 {
-  [Info("Offline Raid Protection", "realedwin/HunterZ", "1.3.0"), Description("Prevents/reduces offline raids by other players")]
+  [Info("Offline Raid Protection", "realedwin/HunterZ", "1.3.1"), Description("Prevents/reduces offline raids by other players")]
   public sealed class OfflineRaidProtection :
 #if CARBON
     CarbonPlugin
@@ -723,9 +722,14 @@ namespace
       if (!string.IsNullOrEmpty(id)) _timeZone = GetTimeZoneByID(id);
     }
 
-    private static System.TimeZoneInfo GetTimeZoneByID(string id) =>
-      System.TimeZoneInfo.GetSystemTimeZones().FirstOrDefault(
-        tz => tz.Id == id) ?? System.TimeZoneInfo.Utc;
+    private static System.TimeZoneInfo GetTimeZoneByID(string id)
+    {
+      foreach (var tz in System.TimeZoneInfo.GetSystemTimeZones())
+      {
+        if (tz.Id == id) return tz;
+      }
+      return System.TimeZoneInfo.Utc;
+    }
 
     private static ConfigData GetBaseConfig(VersionNumber version) => new()
     {
@@ -805,19 +809,27 @@ namespace
 
     private static HashSet<string> GetPrefabNames()
     {
-      var prefabNames = new HashSet<string>(
-        ItemManager.GetItemDefinitions()
-          .Select(itemDefinition => itemDefinition.GetComponent<ItemModDeployable>())
-          .Where(itemModDeployable => itemModDeployable is not null)
-          .Select(itemModDeployable => GetShortName(itemModDeployable.entityPrefab.resourcePath))
-          .OrderBy(name => name));
+      var prefabNames = new HashSet<string>();
+      foreach (var itemDef in ItemManager.GetItemDefinitions())
+      {
+        var shortName = GetShortName(
+          itemDef?.GetComponent<ItemModDeployable>()?.entityPrefab?.resourcePath);
+        if (!string.IsNullOrEmpty(shortName))
+          prefabNames.Add(shortName);
+      }
 
       var manifest = GameManifest.Current;
-      prefabNames.UnionWith(manifest.entities
-        .Select(entity => GameManager.server.FindPrefab(entity).GetComponent<BaseVehicle>())
-        .Where(vehicle => vehicle is not null)
-        .Select(vehicle => vehicle.ShortPrefabName)
-        .OrderBy(name => name));
+      if (!manifest)
+        return prefabNames;
+      foreach (var entity in manifest.entities)
+      {
+        if (string.IsNullOrEmpty(entity))
+          continue;
+        var shortName =
+          GameManager.server.FindPrefab(entity)?.GetComponent<BaseVehicle>()?.ShortPrefabName;
+        if (!string.IsNullOrEmpty(shortName))
+          prefabNames.Add(shortName);
+      }
 
       return prefabNames;
     }
@@ -2176,7 +2188,15 @@ namespace
       _isVehicle = vehicle;
       var authorizedPlayers =
         GetAuthorizedPlayers(entity, tugboat, modularBoat, vehicle);
-      var firstPlayer = authorizedPlayers?.FirstOrDefault() ?? 0;
+      var firstPlayer = 0UL;
+      if (authorizedPlayers is not null)
+      {
+        foreach (var aPlayer in authorizedPlayers)
+        {
+          firstPlayer = aPlayer;
+          break;
+        }
+      }
 
       if (null == authorizedPlayers || !firstPlayer.IsSteamID())
       {
