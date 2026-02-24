@@ -40,7 +40,7 @@ namespace
 
     private readonly Dictionary<ulong, LastOnlineData> _lastOnline = new();
     private readonly Dictionary<ulong, PlayerScaleCache> _scaleCache = new();
-    private readonly Dictionary<string, List<ulong>> _clanMemberCache = new();
+    private readonly Dictionary<string, HashSet<ulong>> _clanMemberCache = new();
     private readonly Dictionary<ulong, string> _clanTagCache = new();
     private readonly Dictionary<uint, bool> _prefabCache = new();
     private readonly Dictionary<uint, CupboardPrivilege> _tcCache = new();
@@ -56,8 +56,6 @@ namespace
 
     // TODO: Refactor; some of these seem to be used to pass ephemeral state
     //  across methods, which is prone to bugs -HZ
-    private readonly List<ulong> _tmpList = new();
-    private readonly HashSet<ulong> _tmpHashSet = new();
     private readonly HashSet<ulong> _tmpHashSet2 = new();
     private readonly StringBuilder _sb = new();
     private readonly TextTable _textTable = new();
@@ -167,7 +165,7 @@ namespace
         [JsonProperty(PropertyName = "Protect decaying buildings")]
         public bool ProtectDecayingBase { get; set; }
 
-        [JsonProperty(PropertyName = "Ignore wood decay if only due to twig")]
+        [JsonProperty(PropertyName = "Ignore decay if due solely to twig")]
         public bool DecayIgnoreTwig { get; set; }
 
         [JsonProperty(PropertyName = "Prefabs to protect")]
@@ -869,8 +867,6 @@ namespace
       _absolutTimeScaleKeys.Clear();
       _tcCache.Clear();
 
-      _tmpList.Clear();
-      _tmpHashSet.Clear();
       _tmpHashSet2.Clear();
       _sb.Clear();
       _textTable.Clear();
@@ -974,7 +970,7 @@ namespace
       if (hitInfo is null || !entity)
         return null;
 
-      // Abort on non-player damage if non-player damage mitigation disabled
+      // Abort on non-player damage if only mitigation of player damage enabled
       if (Configuration.RaidProtection.OnlyPlayerDamage &&
           !hitInfo.InitiatorPlayer)
         return null;
@@ -988,7 +984,12 @@ namespace
           !IsProtected(entity))
         return null;
 
-      return OnStructureAttack(entity, ref hitInfo);
+      var (mitigateResult, targetID) = ShouldMitigateDamage(
+        entity, hitInfo.InitiatorPlayer?.userID.Get() ?? 0UL);
+      var result = ShouldMitigateResult.Mitigate == mitigateResult ?
+        MitigateDamage(ref hitInfo, GetCachedDamageScale(targetID), targetID) :
+        null;
+      return result;
     }
 
     #endregion Hooks
@@ -1128,7 +1129,7 @@ namespace
       }
     }
 
-    private List<ulong> CacheClan(in string tag)
+    private HashSet<ulong> CacheClan(in string tag)
     {
       if (string.IsNullOrEmpty(tag))
         return null;
@@ -1138,14 +1139,14 @@ namespace
       if (clan?["members"] is null)
         return null;
 
-      if (_clanMemberCache.TryGetValue(tag, out var clanMemberList))
+      if (_clanMemberCache.TryGetValue(tag, out var clanMembers))
       {
-        clanMemberList.Clear();
+        clanMembers.Clear();
       }
       else
       {
-        clanMemberList = Facepunch.Pool.Get<List<ulong>>();
-        _clanMemberCache[tag] = clanMemberList;
+        clanMembers = Facepunch.Pool.Get<HashSet<ulong>>();
+        _clanMemberCache[tag] = clanMembers;
       }
 
       foreach (var memberToken in clan["members"])
@@ -1157,11 +1158,11 @@ namespace
             memberID is 0)
           continue;
 
-        clanMemberList.Add(memberID);
+        clanMembers.Add(memberID);
         _clanTagCache[memberID] = tag;
       }
 
-      return clanMemberList;
+      return clanMembers;
     }
 
     private void CacheDamageScaleKeys()
@@ -1342,40 +1343,62 @@ namespace
       }
     };
 
-    private object OnStructureAttack(
-      in BaseCombatEntity entity, ref HitInfo hitInfo)
+    private enum ShouldMitigateResult
     {
-      // Get authorized players for the entity
+      // these results indicate why damage should be allowed (not mitigated)
+
+      // no owning/authorized players found
+      Unowned,
+      // damage being done by an authorized player
+      AttackerAuthorized,
+      // associated structure not protected due to decay
+      Decaying,
+      // no suitable victim found
+      NoTarget,
+      // target under penalty
+      TargetPenalty,
+      // target online (online protection disabled)
+      TargetOnline,
+
+      // this result indicates that damage mitigation should occur
+      Mitigate
+    }
+
+    // check whether damage to the given entity by the given attacker should be
+    //  mitigated
+    private (ShouldMitigateResult, ulong) ShouldMitigateDamage(
+      in BaseCombatEntity entity, in ulong attackerID = 0UL)
+    {
+      // Get associated vehicle (if any)
       var (tugboat, modularBoat, vehicle) = GetVehicle(entity);
       _isVehicle = vehicle;
-      var authorizedPlayers =
-        GetAuthorizedPlayers(entity, tugboat, modularBoat, vehicle);
 
-      // Abort if no authorized players
-      if (authorizedPlayers is null)
-        return null;
+      // Get authorized players for the entity
+      var authorizedPlayers = Facepunch.Pool.Get<HashSet<ulong>>();
+      GetAuthorizedPlayers(
+        authorizedPlayers, entity, tugboat, modularBoat, vehicle);
+      var targetID = 0UL;
 
       // Abort if the TC has either no players authed, or an NPC authed
       // Note: Mixed auth is possible, but we still want to ignore it, because
       //  it probably indicates a Raidable Bases base or something
       using var e = authorizedPlayers.GetEnumerator();
       if (!e.MoveNext() || !e.Current.IsSteamID())
-        return null;
+        return FreeAndReturn(ShouldMitigateResult.Unowned);
 
       // Abort if damage is from is an authorized player
-      if (hitInfo.InitiatorPlayer &&
-          authorizedPlayers.Contains(hitInfo.InitiatorPlayer.userID.Get()))
-        return null;
+      if (attackerID is not 0UL && authorizedPlayers.Contains(attackerID))
+        return FreeAndReturn(ShouldMitigateResult.AttackerAuthorized);
 
       // Abort if the building is decaying
       if (!Configuration.RaidProtection.ProtectDecayingBase &&
           !_isVehicle && !tugboat && !modularBoat &&
           _tcCache.TryGetValue(_privilege.buildingID, out var tc) &&
           tc.IsDecaying)
-        return null;
+        return FreeAndReturn(ShouldMitigateResult.Decaying);
 
       // Determine targetID (either the entity's owner or an authorized player)
-      var targetID = entity.OwnerID;
+      targetID = entity.OwnerID;
       if (targetID is 0UL || !authorizedPlayers.Contains(targetID))
         targetID = e.Current;
 
@@ -1383,38 +1406,42 @@ namespace
       targetID = GetRecentActiveMemberAll(targetID, authorizedPlayers);
       if (_targetLastOnline?.UserID != targetID &&
           !_lastOnline.TryGetValue(targetID, out _targetLastOnline))
-        return null;
+        return FreeAndReturn(ShouldMitigateResult.NoTarget);
 
       // TOOD: refactor GetCachedDamageScale() to take current time as a
       //  parameter, and evaporate _currentDateTime as a cross-method variable
       _currentDateTime = System.DateTime.UtcNow;
-      var isOnlineRaidProtectionEnabled =
-        Configuration.RaidProtection.OnlineRaidProtection;
+      if (_currentDateTime.Ticks <= _targetLastOnline.PenaltyEnd)
+        return FreeAndReturn(ShouldMitigateResult.TargetPenalty);
 
-      if ((!isOnlineRaidProtectionEnabled && _targetLastOnline.IsOnline) ||
-          _currentDateTime.Ticks <= _targetLastOnline.PenaltyEnd)
-        return null;
+      if (!Configuration.RaidProtection.OnlineRaidProtection &&
+          (_targetLastOnline.IsOnline || AnyPlayersOnline(authorizedPlayers)))
+        return FreeAndReturn(ShouldMitigateResult.TargetOnline);
 
-      if (!isOnlineRaidProtectionEnabled && AnyPlayersOnline(authorizedPlayers))
-        return null;
+      return FreeAndReturn(ShouldMitigateResult.Mitigate);
 
-      return
-        MitigateDamage(ref hitInfo, GetCachedDamageScale(targetID), targetID);
+
+      [MethodImpl(MethodImplOptions.AggressiveInlining)]
+      (ShouldMitigateResult, ulong) FreeAndReturn(
+        in ShouldMitigateResult result)
+      {
+        Facepunch.Pool.FreeUnmanaged(ref authorizedPlayers);
+        return (result, targetID);
+      }
     }
 
-    private HashSet<ulong> GetAuthorizedPlayers(
-      in BaseCombatEntity entity, in Tugboat tugboat, in PlayerBoat modularBoat,
-      in BaseVehicle vehicle)
+    private void GetAuthorizedPlayers(
+      in HashSet<ulong> players, in BaseCombatEntity entity, in Tugboat tugboat,
+      in PlayerBoat modularBoat, in BaseVehicle vehicle)
     {
       _privilege = null;
-      _tmpHashSet.Clear();
 
       // 1. Base boat checks
       if (tugboat || modularBoat)
       {
         // Abort if base boat protection disabled
         if (!Configuration.RaidProtection.ProtectBaseBoats)
-          return null;
+          return;
 
         // Wheel authed players check
         var vehiclePrivilege =
@@ -1422,12 +1449,12 @@ namespace
           modularBoat ? modularBoat.GetChildPrivilege() :
           null;
         if (!vehiclePrivilege)
-          return null;
-        AddAuthorizedPlayers(vehiclePrivilege.authorizedPlayers, _tmpHashSet);
+          return;
+        AddAuthorizedPlayers(vehiclePrivilege.authorizedPlayers, players);
 
         // Abort if code lock checks disabled
         if (!Configuration.Team.IncludeWhitelistPlayers)
-          return ReturnPopulatedOrNull(_tmpHashSet);
+          return;
 
         // Deployable code locks check
         var boatChildren =
@@ -1435,11 +1462,11 @@ namespace
           modularBoat ? modularBoat.Deployables.Cached :
           null;
         if (boatChildren is null)
-          return ReturnPopulatedOrNull(_tmpHashSet);
-        AddCodeLockWhitelistPlayers(boatChildren, _tmpHashSet);
+          return;
+        AddCodeLockWhitelistPlayers(boatChildren, players);
 
         // Don't fall through to TC check, because boats are their own base
-        return ReturnPopulatedOrNull(_tmpHashSet);
+        return;
       }
 
       // 2. Vehicle checks
@@ -1447,16 +1474,16 @@ namespace
       {
         // Abort if vehicle protection disabled
         if (!Configuration.RaidProtection.ProtectVehicles)
-          return null;
+          return;
 
         // Modular car code lock check
         if (vehicle is ModularCar modularCar)
         {
           foreach (var whitelistPlayer in modularCar.CarLock.WhitelistPlayers)
-            _tmpHashSet.Add(whitelistPlayer);
+            players.Add(whitelistPlayer);
           // Don't fall through to TC check if we found player(s)
-          if (_tmpHashSet.Count is not 0)
-            return _tmpHashSet;
+          if (players.Count is not 0)
+            return;
           // Else fall through to TC check
         }
 
@@ -1466,22 +1493,22 @@ namespace
       // 3. Building privilege (Tool Cupboard) checks
       _privilege = entity.GetBuildingPrivilege();
       if (!_privilege)
-        return ReturnPopulatedOrNull(_tmpHashSet);
+        return;
 
       // TC-authed players check
-      AddAuthorizedPlayers(_privilege.authorizedPlayers, _tmpHashSet);
+      AddAuthorizedPlayers(_privilege.authorizedPlayers, players);
 
       // Abort if code lock checks disabled
       if (!Configuration.Team.IncludeWhitelistPlayers)
-        return ReturnPopulatedOrNull(_tmpHashSet);
+        return;
 
       // Check for code locks in the building's decay entities
       // could do just doors, but I guess it's good to check boxes too? -HZ
       var decayEntities = _privilege.GetBuilding()?.decayEntities;
       if (decayEntities is not null)
-        AddCodeLockWhitelistPlayers(decayEntities, _tmpHashSet);
+        AddCodeLockWhitelistPlayers(decayEntities, players);
 
-      return ReturnPopulatedOrNull(_tmpHashSet);
+      return;
 
 
       static void AddAuthorizedPlayers(
@@ -1516,10 +1543,6 @@ namespace
           }
         }
       }
-
-      [MethodImpl(MethodImplOptions.AggressiveInlining)]
-      static HashSet<ulong> ReturnPopulatedOrNull(HashSet<ulong> hashSet) =>
-        hashSet.Count is not 0 ? hashSet : null;
     }
 
     private ulong GetRecentActiveMemberAll(
@@ -1562,17 +1585,9 @@ namespace
 
       foreach (var playerID in players)
       {
-        if (_tmpHashSet2.Contains(playerID))
-          continue;
-
-        var teamMembers = GetTeamMembers(playerID);
-        if (teamMembers is null || teamMembers.Count is 0)
-        {
+        if (!_tmpHashSet2.Contains(playerID) &&
+            !AddTeamMembers(playerID, _tmpHashSet2))
           _tmpHashSet2.Add(playerID);
-          continue;
-        }
-
-        _tmpHashSet2.UnionWith(teamMembers);
       }
 
       return GetOfflineMember(_tmpHashSet2);
@@ -1592,11 +1607,12 @@ namespace
           return GetOfflineMember(clanMembers);
         }
 
-        var teamMembers = GetTeamMembers(targetID);
-        if (teamMembers is null || teamMembers.Count is 0)
-          return targetID;
-
-        return GetOfflineMember(teamMembers);
+        var teamMembers = Facepunch.Pool.Get<HashSet<ulong>>();
+        AddTeamMembers(targetID, teamMembers);
+        var retVal =
+          teamMembers.Count > 0 ? GetOfflineMember(teamMembers) : targetID;
+        Facepunch.Pool.FreeUnmanaged(ref teamMembers);
+        return retVal;
       }
     }
 
@@ -1892,24 +1908,29 @@ namespace
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private List<ulong> GetClanMembers(in string tag) =>
-      string.IsNullOrEmpty(tag) ? null :
-      _clanMemberCache.TryGetValue(tag, out var members) ? members :
-      CacheClan(tag);
+    private HashSet<ulong> GetClanMembers(in string tag) =>
+      string.IsNullOrEmpty(tag) ?
+        null :
+      _clanMemberCache.TryGetValue(tag, out var members) ?
+        members :
+        CacheClan(tag);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static RelationshipManager.PlayerTeam GetTeam(in ulong userID) =>
       RelationshipManager.ServerInstance.FindPlayersTeam(userID);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private List<ulong> GetTeamMembers(in ulong userID)
+    private bool AddTeamMembers(in ulong userID, in HashSet<ulong> memberSet)
     {
-      _tmpList.Clear();
-      var team = GetTeam(userID);
-      if (team?.members.Count > 0)
-        _tmpList.AddRange(team.members);
+      var members = GetTeam(userID)?.members;
+      if (members?.Count is not > 0)
+        return false;
 
-      return _tmpList.Count > 0 ? _tmpList : null;
+      var memberCount = members.Count;
+      for (var i = 0; i < memberCount; ++i)
+        memberSet.Add(members[i]);
+
+      return true;
     }
 
     // TODO: This seems to currently be the busiest method in this plugin
@@ -2168,17 +2189,8 @@ namespace
         return;
       }
 
-      // TODO: this is mostly a duplicate of OnStructureAttack()...maybe move
-      //  that logic into an intermediate method that returns an enum, and have
-      //  both OnStructureAttack() and this call it for consistency
-      var (tugboat, modularBoat, vehicle) = GetVehicle(entity);
-      // player.ChatMessage($"***** tugobat={tugboat}, modularBoat={modularBoat}, vehicle={vehicle}");
-      _isVehicle = vehicle;
-      var authorizedPlayers =
-        GetAuthorizedPlayers(entity, tugboat, modularBoat, vehicle);
-      var firstPlayer = authorizedPlayers?.FirstOrDefault() ?? 0;
-
-      if (null == authorizedPlayers || !firstPlayer.IsSteamID())
+      var (mitigateResult, targetID) = ShouldMitigateDamage(entity);
+      if (ShouldMitigateResult.Unowned == mitigateResult)
       {
         player.ChatMessage($"{entity.GetType()}/{entity} has no owner");
         return;
@@ -2186,23 +2198,11 @@ namespace
 
       player.ChatMessage($"{entity.GetType()}/{entity} report:");
 
-      var targetID = entity.OwnerID;
-      if (entity.OwnerID is 0UL ||
-          !authorizedPlayers.Contains(entity.OwnerID))
-        targetID = firstPlayer;
-
-      targetID = GetRecentActiveMemberAll(targetID, authorizedPlayers);
-
-      if (!Configuration.RaidProtection.ProtectDecayingBase &&
-          !_isVehicle && !tugboat && !modularBoat &&
-          _tcCache.TryGetValue(_privilege.buildingID, out var tc))
-      {
-        player.ChatMessage(
-          GetStatusText(new[] { targetID.ToString() }, tc.IsDecaying));
-        return;
-      }
-
-      player.ChatMessage(GetStatusText(new[] { targetID.ToString() }));
+      // TODO: figure out how to untangle GetStatusText() to take advantage of
+      //  other ShouldMitigateResult values
+      player.ChatMessage(GetStatusText(
+        new[] { targetID.ToString() },
+        ShouldMitigateResult.Decaying == mitigateResult));
     }
 
     private void cmdHelp(BasePlayer player, string _command, string[] _args)
@@ -2730,20 +2730,12 @@ namespace
       return _sb.ToString();
     }
 
-    private void AppendTeamOrClanMembersStatus(in ulong userID)
+    private void AppendTeamOrClanMembersStatus(
+      in TextTable textTable, in HashSet<ulong> members, in ulong userID,
+      in bool isTeam)
     {
-      if (!Configuration.Team.TeamShare)
-        return;
-
-      var tag = Clans is not null ? GetClanTag(userID) : null;
-      var members = string.IsNullOrEmpty(tag) ?
-        GetTeamMembers(userID) : GetClanMembers(tag);
-
-      if (!(members?.Count > 1))
-        return;
-
       _textTable.Clear();
-      _textTable.AddColumn($"<color={COLOR_DARK_GREEN}>{(Clans is not null ? TEXT_CLAN_MEMBER : TEXT_TEAM_MEMBER)}</color>");
+      _textTable.AddColumn($"<color={COLOR_DARK_GREEN}>{(isTeam ? TEXT_TEAM_MEMBER : TEXT_CLAN_MEMBER)}</color>");
 
       foreach (var member in members)
       {
@@ -2759,6 +2751,29 @@ namespace
       }
 
       _sb.AppendLine(_textTable.ToString());
+    }
+
+    private void AppendTeamOrClanMembersStatus(in ulong userID)
+    {
+      if (!Configuration.Team.TeamShare)
+        return;
+
+      var tag = Clans is null ? null : GetClanTag(userID);
+      if (string.IsNullOrEmpty(tag))
+      {
+        // report team instead
+        var teamMembers = Facepunch.Pool.Get<HashSet<ulong>>();
+        if (AddTeamMembers(userID, teamMembers) && teamMembers?.Count > 1)
+        {
+          AppendTeamOrClanMembersStatus(_textTable, teamMembers, userID, true);
+        }
+        Facepunch.Pool.FreeUnmanaged(ref teamMembers);
+        return;
+      }
+
+      var clanMembers = GetClanMembers(tag);
+      if (clanMembers?.Count is > 1)
+        AppendTeamOrClanMembersStatus(_textTable, clanMembers, userID, false);
     }
 
     private string GetHelpText(in ulong userID)
