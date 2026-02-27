@@ -13,7 +13,7 @@ public class MagicGiantExcavatorPanel : RustPlugin
 
   [PluginReference] Plugin MagicPanel;
 
-  private enum UpdateEnum
+  private enum UpdateType
   {
     // All   = 1,
     // Panel = 2,
@@ -22,7 +22,7 @@ public class MagicGiantExcavatorPanel : RustPlugin
   }
 
   private PluginConfig _pluginConfig;
-  private HashSet<ExcavatorArm> _activeExcavators = new();
+  private readonly HashSet<ExcavatorArm> _activeExcavators = new();
 
   #endregion
 
@@ -105,7 +105,7 @@ public class MagicGiantExcavatorPanel : RustPlugin
     var isEnabled = _activeExcavators.Count > 0;
     if (isEnabled == wasEnabled) return;
 
-    MagicPanel?.Call("UpdatePanel", Name, (int)UpdateEnum.Image);
+    MagicPanel?.Call("UpdatePanel", Name, (int)UpdateType.Image);
   }
 
   #endregion
@@ -137,7 +137,7 @@ public class MagicGiantExcavatorPanel : RustPlugin
 
   #region Classes
 
-  private class PluginConfig
+  private sealed class PluginConfig
   {
     [JsonProperty(PropertyName = "Active Color")]
     public string ColorEnabled { get; set; } = "#FFFFFF7F";
@@ -152,7 +152,7 @@ public class MagicGiantExcavatorPanel : RustPlugin
     public PanelLayout PanelLayout { get; set; } = new();
   }
 
-  private class PanelRegistration
+  private sealed class PanelRegistration
   {
     public string Dock { get; set; } = "center";
     public float Width { get; set; } = 0.02f;
@@ -160,7 +160,7 @@ public class MagicGiantExcavatorPanel : RustPlugin
     public string BackgroundColor { get; set; } = "#FFFFFF08";
   }
 
-  private class PanelLayout
+  private sealed class PanelLayout
   {
     public PanelImage Image { get; set; } = new();
 
@@ -181,7 +181,7 @@ public class MagicGiantExcavatorPanel : RustPlugin
   private abstract class PanelBase
   {
     public bool Enabled { get; set; } = true;
-    public int Order { get; set; } // = 0;
+    public int Order { get; set; } = 0;
     public float Width { get; set; } = 1.0f;
     public TypePadding Padding { get; set; } = new();
 
@@ -208,7 +208,7 @@ public class MagicGiantExcavatorPanel : RustPlugin
     }
   }
 
-  private class PanelImage : PanelBase
+  private sealed class PanelImage : PanelBase
   {
     public string Url { get; set; } =
       "https://i.postimg.cc/DZBNY3Tb/excavator.png";
@@ -221,7 +221,7 @@ public class MagicGiantExcavatorPanel : RustPlugin
     }
   }
 
-  private class TypePadding
+  private sealed class TypePadding
   {
     public float Left { get; set; } = 0.05f;
     public float Right { get; set; } = 0.05f;

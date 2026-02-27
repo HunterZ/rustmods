@@ -2,7 +2,6 @@
 using Newtonsoft.Json;
 using Oxide.Core.Configuration;
 using Oxide.Core.Plugins;
-using System;
 using UnityEngine;
 
 namespace Oxide.Plugins;
@@ -25,7 +24,9 @@ public class MagicDeepSeaPanel : RustPlugin
   private string _lastTextColor  = "";
   private string _lastText       = "";
 
-  private enum UpdateEnum
+  private enum DeepSeaState { Open, Rads, Closed, Busy }
+
+  private enum UpdateType
   {
     All   = 1,
     Panel = 2,
@@ -128,6 +129,14 @@ public class MagicDeepSeaPanel : RustPlugin
     return true;
   }
 
+  private static string GetColor(PanelType panel, DeepSeaState deepSeaState) =>
+    deepSeaState switch
+    {
+      DeepSeaState.Open   => panel.ColorOpened,
+      DeepSeaState.Rads   => panel.ColorRadiation,
+      _                   => panel.ColorClosed
+    };
+
   private void CheckUpdate()
   {
     var deepSeaManager = DeepSeaManager.ServerInstance;
@@ -137,31 +146,36 @@ public class MagicDeepSeaPanel : RustPlugin
       return;
     }
 
-    var isBusy = deepSeaManager.IsBusy();
-    // is Deep Sea open?
-    var isOpen = deepSeaManager.IsOpen();
-    // is Deep Sea irradiated? (about to close)
-    var isRad =
-      isOpen && deepSeaManager.HasFlag(DeepSeaManager.Flag_AboutToClose);
-    // time to open or close (as appropriate)
-    var timeSec = (int)(isOpen ?
-      deepSeaManager.TimeToWipe : deepSeaManager.TimeToNextOpening);
+    DeepSeaState deepSeaState;
+    if (deepSeaManager.IsBusy())
+    {
+      deepSeaState = DeepSeaState.Busy;
+    }
+    else if (deepSeaManager.IsOpen())
+    {
+      deepSeaState =
+        deepSeaManager.HasFlag(DeepSeaManager.Flag_AboutToClose) ?
+          DeepSeaState.Rads : DeepSeaState.Open;
+    }
+    else
+    {
+      deepSeaState = DeepSeaState.Closed;
+    }
+    var timeSec = (int)(DeepSeaState.Closed == deepSeaState ?
+      deepSeaManager.TimeToNextOpening : deepSeaManager.TimeToWipe);
     // largest relevant time denomination, and increments remaining within it
-    var (timeDenom, timeInc) =
-      timeSec >= 3600 ? ('h', timeSec / 3600) : // at least 1 hour
-      timeSec >=   60 ? ('m', timeSec /   60) : // at least 1 minute
-                        ('s', timeSec       ) ; // less than 1 minute
+    var (timeDenom, timeInc) = timeSec switch
+    {
+      >= 3600 => ('h', timeSec / 3600), // at least 1 hour
+      >=   60 => ('m', timeSec /   60), // at least 1 minute
+      _       => ('s', timeSec       )  // less than 1 minute
+    };
 
     // calculate new panel data
-    var imageColor =
-      isRad  ? _pluginConfig.Panel.Image.ColorRadiation :
-      isOpen ? _pluginConfig.Panel.Image.ColorOpened :
-               _pluginConfig.Panel.Image.ColorClosed;
-    var textColor =
-      isRad  ? _pluginConfig.Panel.Text.ColorRadiation :
-      isOpen ? _pluginConfig.Panel.Text.ColorOpened :
-               _pluginConfig.Panel.Text.ColorClosed;
-    var text = isBusy ? "..." : $"{timeInc}{timeDenom}";
+    var imageColor = GetColor(_pluginConfig.Panel.Image, deepSeaState);
+    var textColor = GetColor(_pluginConfig.Panel.Text, deepSeaState);
+    var text =
+      DeepSeaState.Busy == deepSeaState ? "..." : $"{timeInc}{timeDenom}";
 
     var imageChanged = imageColor != _lastImageColor;
     var textChanged  = textColor  != _lastTextColor ||
@@ -176,10 +190,12 @@ public class MagicDeepSeaPanel : RustPlugin
     _lastTextColor  = textColor;
     _lastText       = text;
 
-    var updateType =
-      imageChanged && textChanged ? UpdateEnum.All :
-      imageChanged                ? UpdateEnum.Image :
-                                    UpdateEnum.Text;
+    var updateType = (imageChanged, textChanged) switch
+    {
+      (false, _    ) => UpdateType.Text,
+      (true,  false) => UpdateType.Image,
+      (true,  true ) => UpdateType.All
+    };
 
     // update panel data
     if (!SetData(imageColor, textColor, text))
@@ -213,7 +229,7 @@ public class MagicDeepSeaPanel : RustPlugin
 
   #region Classes
 
-  private class PluginConfig
+  private sealed class PluginConfig
   {
     [JsonProperty(PropertyName = "Panel Settings")]
     public PanelRegistration PanelSettings { get; set; } = new();
@@ -222,7 +238,7 @@ public class MagicDeepSeaPanel : RustPlugin
     public Panel Panel { get; set; } = new();
   }
 
-  private class PanelRegistration
+  private sealed class PanelRegistration
   {
     public string Dock { get; set; } = "leftbottom";
     public float Width { get; set; } = 0.075f;
@@ -230,7 +246,7 @@ public class MagicDeepSeaPanel : RustPlugin
     public string BackgroundColor { get; set; } = "#FFF2DF08";
   }
 
-  private class Panel
+  private sealed class Panel
   {
     public PanelImage Image { get; set; } = new();
     public PanelText Text { get; set; } = new();
@@ -265,7 +281,7 @@ public class MagicDeepSeaPanel : RustPlugin
     };
   }
 
-  private class PanelImage : PanelType
+  private sealed class PanelImage : PanelType
   {
     public string Url { get; set; } =
       "https://i.postimg.cc/MZhXzvW2/anchor-512.png";
@@ -278,7 +294,7 @@ public class MagicDeepSeaPanel : RustPlugin
     }
   }
 
-  private class PanelText : PanelType
+  private sealed class PanelText : PanelType
   {
     [JsonIgnore]
     public string Text { get; set; } = "";
@@ -297,7 +313,7 @@ public class MagicDeepSeaPanel : RustPlugin
     }
   }
 
-  private class TypePadding
+  private sealed class TypePadding
   {
     public float Left { get; set; } = 0.05f;
     public float Right { get; set; } = 0.05f;
