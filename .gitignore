@@ -1,19 +1,24 @@
 # ignore all code files except for my own (allows working directly in a test
 #  server install)
 *.cs
+!CCTVGUI.cs
 !DynamicPVP.cs
 !KillHeliVote.cs
 !MagicDeepSeaPanel.cs
+!MagicGiantExcavatorPanel.cs
 !MagicTravelingVendorPanel.cs
 !OfflineRaidProtection.cs
 !PlayerBasePvpZones.cs
+!RecyclerOverride.cs
 !ScarecrowWrangler.cs
 !ShareTheRoad.cs
 !SuperPVxInfo.cs
 !TimedWorkbenchUnlock.cs
 
+/.idea/
 /backups/
 /bin/
+/Docs/
 /obj/
 /out/
 /plantuml/

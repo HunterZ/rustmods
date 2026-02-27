@@ -3,7 +3,7 @@
     <TargetFramework>net481</TargetFramework>
     <LangVersion>11.0</LangVersion>
     <ImplicitUsings>disable</ImplicitUsings>
-    <DefineConstants>CARBON;PTFIX;WIN</DefineConstants>
+    <DefineConstants>CARBON;PTFIX;WIN;RUST</DefineConstants>
     <NoWarn>CS0649</NoWarn>
     <AssemblySearchPaths>$(ProjectDir)../../RustDedicated_Data/Managed;$(ProjectDir)../managed;$(ProjectDir)../managed/lib;$(AssemblySearchPaths)</AssemblySearchPaths>
   </PropertyGroup>

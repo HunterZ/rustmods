@@ -3,7 +3,6 @@ using Newtonsoft.Json;
 using Oxide.Core.Configuration;
 using Oxide.Core.Plugins;
 using System;
-// using System.ComponentModel;
 using UnityEngine;
 
 namespace Oxide.Plugins;
@@ -14,7 +13,7 @@ public class MagicDeepSeaPanel : RustPlugin
 {
   #region Class Fields
 
-  [PluginReference] private readonly Plugin MagicPanel;
+  [PluginReference] Plugin MagicPanel;
 
   private PluginConfig _pluginConfig;
 
@@ -36,17 +35,15 @@ public class MagicDeepSeaPanel : RustPlugin
 
   #endregion
 
-  #region Setup & Loading
+  #region Oxide API
 
   private void Init()
   {
     // nothing for now
   }
 
-  protected override void LoadDefaultConfig()
-  {
-    PrintWarning("Loading Default Config");
-  }
+  protected override void LoadDefaultConfig() =>
+    _pluginConfig = new PluginConfig();
 
   protected override void LoadConfig()
   {
@@ -54,16 +51,20 @@ public class MagicDeepSeaPanel : RustPlugin
     var configFile = new DynamicConfigFile(path);
     if (!configFile.Exists())
     {
+      Puts($"No config file {path}; creating a new one");
       LoadDefaultConfig();
+      configFile.WriteObject(_pluginConfig);
+      return;
     }
+
     try
     {
       _pluginConfig = configFile.ReadObject<PluginConfig>();
     }
-    catch (Exception ex)
+    catch (System.Exception ex)
     {
-      RaiseError("Failed to load config file (is the config file corrupt?) (" + ex.Message + ")");
-      _pluginConfig = new PluginConfig();
+      RaiseError($"Exception reading config file {path}: " + ex.Message);
+      LoadDefaultConfig();
     }
 
     configFile.WriteObject(_pluginConfig);
@@ -81,18 +82,20 @@ public class MagicDeepSeaPanel : RustPlugin
     _timer = timer.Every(1.0f, CheckUpdate);
   }
 
-  private void MagicPanelRegisterPanels()
+  private void Unload()
   {
-    if (MagicPanel == null)
-    {
-      PrintError("Missing plugin dependency MagicPanel: https://umod.org/plugins/magic-panel");
-      return;
-    }
-
-    MagicPanel?.Call("RegisterGlobalPanel",
-      this, Name, JsonConvert.SerializeObject(_pluginConfig.PanelSettings),
-      nameof(GetPanel));
+    _pluginConfig = null;
+    _hash = null;
+    DestroyTimer(_timer);
+    _timer = null;
+    _lastImageColor = "";
+    _lastTextColor = "";
+    _lastText = "";
   }
+
+  #endregion
+
+  #region Helper Methods
 
   private static void DestroyTimer(Timer t)
   {
@@ -127,8 +130,6 @@ public class MagicDeepSeaPanel : RustPlugin
 
   private void CheckUpdate()
   {
-    // TODO: also handle icon change on deep sea open/close
-
     var deepSeaManager = DeepSeaManager.ServerInstance;
     if (!deepSeaManager)
     {
@@ -150,7 +151,6 @@ public class MagicDeepSeaPanel : RustPlugin
       timeSec >= 3600 ? ('h', timeSec / 3600) : // at least 1 hour
       timeSec >=   60 ? ('m', timeSec /   60) : // at least 1 minute
                         ('s', timeSec       ) ; // less than 1 minute
-    // Puts($"isOpen={isOpen}, timeSec={timeSec}, timeDenom={timeDenom}, timeInc={timeInc}, busy={deepSeaManager.IsBusy()}");
 
     // calculate new panel data
     var imageColor =
@@ -169,7 +169,6 @@ public class MagicDeepSeaPanel : RustPlugin
     // avoid requesting a Magic Panel update if nothing changed
     if (!imageChanged && !textChanged)
     {
-      // Puts("No change");
       return;
     }
     // record changes
@@ -183,30 +182,30 @@ public class MagicDeepSeaPanel : RustPlugin
                                     UpdateEnum.Text;
 
     // update panel data
-    // _hash = _pluginConfig.Panel.ToHash();
     if (!SetData(imageColor, textColor, text))
     {
       return;
     }
 
-    // ***** FIX THIS ENUM *****
     MagicPanel?.Call("UpdatePanel", Name, (int)updateType);
-  }
-
-  private void Unload()
-  {
-    _pluginConfig = null;
-    _hash = null;
-    DestroyTimer(_timer);
-    _timer = null;
-    _lastImageColor = "";
-    _lastTextColor = "";
-    _lastText = "";
   }
 
   #endregion
 
-  #region MagicPanel Hook
+  #region MagicPanel API
+
+  private void MagicPanelRegisterPanels()
+  {
+    if (MagicPanel == null)
+    {
+      PrintError("Missing plugin dependency MagicPanel: https://umod.org/plugins/magic-panel");
+      return;
+    }
+
+    MagicPanel?.Call("RegisterGlobalPanel",
+      this, Name, JsonConvert.SerializeObject(_pluginConfig.PanelSettings),
+      nameof(GetPanel));
+  }
 
   private Hash<string, object> GetPanel() => _hash;
 
@@ -247,8 +246,6 @@ public class MagicDeepSeaPanel : RustPlugin
   private abstract class PanelType
   {
     public bool Enabled { get; set; } = true;
-    [JsonIgnore]
-    public string Color { get; set; } = "";
     [JsonProperty(PropertyName = "Color When Deep Sea Closed")]
     public string ColorClosed { get; set; } = "#FFFFFFFF";
     [JsonProperty(PropertyName = "Color When Deep Sea Opened")]
@@ -262,7 +259,6 @@ public class MagicDeepSeaPanel : RustPlugin
     public virtual Hash<string, object> ToHash() => new()
     {
       [nameof(Enabled)] = Enabled,
-      [nameof(Color)] = Color,
       [nameof(Order)] = Order,
       [nameof(Width)] = Width,
       [nameof(Padding)] = Padding.ToHash()
@@ -272,7 +268,7 @@ public class MagicDeepSeaPanel : RustPlugin
   private class PanelImage : PanelType
   {
     public string Url { get; set; } =
-      "https://i.postimg.cc/zBksfzhH/582-5826004-anchor-png-image-white-anchor-icon-transparent-background.png";
+      "https://i.postimg.cc/MZhXzvW2/anchor-512.png";
 
     public override Hash<string, object> ToHash()
     {
