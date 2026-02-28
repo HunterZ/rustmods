@@ -6,12 +6,15 @@ using System.Collections.Generic;
 namespace Oxide.Plugins;
 
 [Info("Magic Giant Excavator Panel", "HunterZ", "1.0.0")]
-[Description("Displays Giant Excavator open/close countdown in Magic Panel")]
+[Description("Provides a Magic Panel that displays Giant Excavator status")]
 public class MagicGiantExcavatorPanel : RustPlugin
 {
   #region Class Fields
 
   [PluginReference] Plugin MagicPanel;
+
+  private PluginConfig _pluginConfig;
+  private readonly HashSet<ExcavatorArm> _activeExcavators = new();
 
   private enum UpdateType
   {
@@ -20,9 +23,6 @@ public class MagicGiantExcavatorPanel : RustPlugin
     Image = 3
     // Text  = 4
   }
-
-  private PluginConfig _pluginConfig;
-  private readonly HashSet<ExcavatorArm> _activeExcavators = new();
 
   #endregion
 
@@ -71,15 +71,7 @@ public class MagicGiantExcavatorPanel : RustPlugin
       if (excavatorArm.IsMining()) _activeExcavators.Add(excavatorArm);
     }
 
-    if (!_pluginConfig.PanelLayout.Image.Enabled)
-    {
-      PrintWarning("Not registering panel because all items are disabled in config");
-      return;
-    }
-
     MagicPanelRegisterPanels();
-
-    Subscribe(nameof(OnExcavatorMiningToggled));
   }
 
   private void Unload()
@@ -90,9 +82,11 @@ public class MagicGiantExcavatorPanel : RustPlugin
 
   private void OnExcavatorMiningToggled(ExcavatorArm excavatorArm)
   {
+    if (!excavatorArm) return;
+
     var wasEnabled = _activeExcavators.Count > 0;
 
-    if (excavatorArm?.IsOn() is true)
+    if (excavatorArm.IsOn())
     {
       _activeExcavators.Add(excavatorArm);
     }
@@ -104,6 +98,9 @@ public class MagicGiantExcavatorPanel : RustPlugin
     // only care about transitions between empty and nonempty HashSet
     var isEnabled = _activeExcavators.Count > 0;
     if (isEnabled == wasEnabled) return;
+
+    _pluginConfig.PanelLayout.Image.Color =
+      isEnabled ? _pluginConfig.ActiveColor : _pluginConfig.InactiveColor;
 
     MagicPanel?.Call("UpdatePanel", Name, (int)UpdateType.Image);
   }
@@ -117,6 +114,14 @@ public class MagicGiantExcavatorPanel : RustPlugin
     if (MagicPanel?.IsLoaded is not true)
     {
       PrintError("Missing plugin dependency MagicPanel: https://umod.org/plugins/magic-panel");
+      Unsubscribe(nameof(OnExcavatorMiningToggled));
+      return;
+    }
+
+    if (!_pluginConfig.PanelLayout.Image.Enabled)
+    {
+      PrintWarning("Not registering panel because all items are disabled in config");
+      Unsubscribe(nameof(OnExcavatorMiningToggled));
       return;
     }
 
@@ -124,14 +129,11 @@ public class MagicGiantExcavatorPanel : RustPlugin
     MagicPanel.Call("RegisterGlobalPanel",
       this, Name, JsonConvert.SerializeObject(_pluginConfig.PanelSettings),
       nameof(GetPanel));
+
+    Subscribe(nameof(OnExcavatorMiningToggled));
   }
 
-  private Hash<string, object> GetPanel()
-  {
-    _pluginConfig.PanelLayout.Image.Color = _activeExcavators.Count > 0 ?
-      _pluginConfig.ColorEnabled : _pluginConfig.ColorDisabled;
-    return _pluginConfig.PanelLayout.ToHash();
-  }
+  private Hash<string, object> GetPanel() => _pluginConfig.PanelLayout.ToHash();
 
   #endregion
 
@@ -140,10 +142,10 @@ public class MagicGiantExcavatorPanel : RustPlugin
   private sealed class PluginConfig
   {
     [JsonProperty(PropertyName = "Active Color")]
-    public string ColorEnabled { get; set; } = "#FFFFFF7F";
+    public string ActiveColor { get; set; } = "#FFFFFF7F";
 
     [JsonProperty(PropertyName = "Inactive Color")]
-    public string ColorDisabled { get; set; } = "#FFFFFF0F";
+    public string InactiveColor { get; set; } = "#FFFFFF0F";
 
     [JsonProperty(PropertyName = "Panel Settings")]
     public PanelRegistration PanelSettings { get; set; } = new();
@@ -177,7 +179,6 @@ public class MagicGiantExcavatorPanel : RustPlugin
     }
   }
 
-  // common base class for PanelImage and PanelText
   private abstract class PanelBase
   {
     public bool Enabled { get; set; } = true;
