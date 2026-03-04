@@ -16,7 +16,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "5.0.1", ResourceId = 2728)]
+[Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "5.0.2", ResourceId = 2728)]
 [Description("Creates temporary PvP zones on certain actions/events")]
 public class DynamicPVP : RustPlugin
 {
@@ -4996,7 +4996,7 @@ public class DynamicPVP : RustPlugin
         zoneSettings.Add("radiation");
         zoneSettings.Add(Radiation.ToString(CultureInfo.InvariantCulture));
       }
-      if (Mathf.Abs(Temperature) < 1e-8f)
+      if (!Mathf.Approximately(Temperature, 0))
       {
         zoneSettings.Add("temperature");
         zoneSettings.Add(Temperature.ToString(CultureInfo.InvariantCulture));
