@@ -22,7 +22,7 @@ namespace
   Oxide.Plugins
 #endif
 {
-  [Info("Offline Raid Protection", "realedwin/HunterZ", "1.3.1"), Description("Prevents/reduces offline raids by other players")]
+  [Info("Offline Raid Protection", "realedwin/HunterZ", "1.3.2"), Description("Prevents/reduces offline raids by other players")]
   public sealed class OfflineRaidProtection :
 #if CARBON
     CarbonPlugin
@@ -1537,10 +1537,14 @@ namespace
     private ulong GetRecentActiveMemberAll(
       in ulong targetID, in HashSet<ulong> players = null)
     {
-      if (!Configuration.Team.TeamShare)
-        return targetID;
+      var playersValid = players?.Count > 0;
 
-      if (players is null || players.Count is 0)
+      // if not considering teams/clans, consider authorized users - or targetID
+      //  if nobody authed
+      if (!Configuration.Team.TeamShare)
+        return playersValid ? GetOfflineMember(players) : targetID;
+
+      if (!playersValid)
         return GetRecentActiveMember(targetID);
 
       _tmpHashSet2.Clear();
@@ -1560,13 +1564,13 @@ namespace
           }
 
           var clanMembers = GetClanMembers(tag);
-          if (clanMembers is null || clanMembers.Count is 0)
+          if (clanMembers?.Count > 0)
           {
-            _tmpHashSet2.Add(playerID);
+            _tmpHashSet2.UnionWith(clanMembers);
             continue;
           }
 
-          _tmpHashSet2.UnionWith(clanMembers);
+          _tmpHashSet2.Add(playerID);
         }
 
         return GetOfflineMember(_tmpHashSet2);
@@ -1578,13 +1582,12 @@ namespace
           continue;
 
         var teamMembers = GetTeamMembers(playerID);
-        if (teamMembers is null || teamMembers.Count is 0)
+        if (teamMembers?.Count > 0)
         {
-          _tmpHashSet2.Add(playerID);
+          _tmpHashSet2.UnionWith(teamMembers);
           continue;
         }
-
-        _tmpHashSet2.UnionWith(teamMembers);
+        _tmpHashSet2.Add(playerID);
       }
 
       return GetOfflineMember(_tmpHashSet2);
@@ -1598,17 +1601,13 @@ namespace
             return targetID;
 
           var clanMembers = GetClanMembers(tag);
-          if (clanMembers is null || clanMembers.Count is 0)
-            return targetID;
-
-          return GetOfflineMember(clanMembers);
+          return clanMembers?.Count > 0 ?
+            GetOfflineMember(clanMembers) : targetID;
         }
 
         var teamMembers = GetTeamMembers(targetID);
-        if (teamMembers is null || teamMembers.Count is 0)
-          return targetID;
-
-        return GetOfflineMember(teamMembers);
+        return teamMembers?.Count > 0 ?
+          GetOfflineMember(teamMembers) : targetID;
       }
     }
 
