@@ -2,14 +2,14 @@ using System.Collections.Generic;
 
 namespace Oxide.Plugins;
 
-[Info("Efficient Composters", "HunterZ", "1.0.1")]
+[Info("Efficient Composters", "HunterZ", "1.0.2")]
 [Description("Composts the same number of items per update regardless of splitting")]
 public class EfficientComposters : RustPlugin
 {
   // use a custom class as return value for "return non-null to override default
   //  behavior" hooks, for a more descriptive message if Oxide reports an error
   //  for return value mismatches in violation of its own documentation
-  private class IgnoreThisError {}
+  private sealed class IgnoreThisError {}
   private readonly IgnoreThisError _overrideDefaultBehavior = new();
 
   // allocate a single list that lives for the entire plugin session, and gets
@@ -23,7 +23,7 @@ public class EfficientComposters : RustPlugin
   //  composter
   //
   // assumes the required composter data is valid
-  private (int numEmpty, int numFertilizer, int numItem) GetSlotCounts(
+  private static (int numEmpty, int numFertilizer, int numItem) GetSlotCounts(
     Composter composter)
   {
     var numFertilizer = 0;
@@ -60,9 +60,18 @@ public class EfficientComposters : RustPlugin
   {
     // defer to vanilla logic if we don't have all the needed data, or if the
     //  composter is configured to just compost everything every time
-    if (null == composter?.inventory?.itemList || composter.CompostEntireStack)
+    if (!composter ||
+        composter.CompostEntireStack ||
+        null == composter.inventory?.itemList)
     {
       return null;
+    }
+
+    // abort without deferring to vanilla logic if the composter is completely
+    //  empty
+    if (composter.inventory.itemList.Count <= 0)
+    {
+      return _overrideDefaultBehavior;
     }
 
     // calculate work capacity (maximum number of items that can be composted)
