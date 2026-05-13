@@ -2,7 +2,7 @@ using System.Collections.Generic;
 
 namespace Oxide.Plugins;
 
-[Info("Efficient Composters", "HunterZ", "1.0.0")]
+[Info("Efficient Composters", "HunterZ", "1.0.1")]
 [Description("Composts the same number of items per update regardless of splitting")]
 public class EfficientComposters : RustPlugin
 {
@@ -60,7 +60,7 @@ public class EfficientComposters : RustPlugin
   {
     // defer to vanilla logic if we don't have all the needed data, or if the
     //  composter is configured to just compost everything every time
-    if (null == composter.inventory?.itemList || composter.CompostEntireStack)
+    if (null == composter?.inventory?.itemList || composter.CompostEntireStack)
     {
       return null;
     }
