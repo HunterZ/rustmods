@@ -3,6 +3,7 @@
 *.cs
 !CCTVGUI.cs
 !DynamicPVP.cs
+!EfficientComposters.cs
 !KillHeliVote.cs
 !MagicDeepSeaPanel.cs
 !MagicGiantExcavatorPanel.cs
