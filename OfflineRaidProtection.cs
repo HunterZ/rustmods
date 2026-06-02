@@ -1,6 +1,7 @@
 #if CARBON
 using Carbon.Extensions;
 using Carbon.Plugins.OfflineRaidProtectionEx;
+using System.Runtime.InteropServices;
 #else
 using Facepunch.Extend;
 using Oxide.Plugins.OfflineRaidProtectionEx;
@@ -22,7 +23,7 @@ namespace
   Oxide.Plugins
 #endif
 {
-  [Info("Offline Raid Protection", "realedwin/HunterZ", "1.3.2"), Description("Prevents/reduces offline raids by other players")]
+  [Info("Offline Raid Protection", "realedwin/HunterZ", "1.3.3"), Description("Prevents/reduces offline raids by other players")]
   public sealed class OfflineRaidProtection :
 #if CARBON
     CarbonPlugin
@@ -712,12 +713,12 @@ namespace
     private void SetTimeZone()
     {
       var id =
-#if !CARBON
+#if CARBON
+        RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ?
+          Configuration.TimeZone.WinTimeZone :
+          Configuration.TimeZone.UnixTimeZone;
+#else
         Configuration.TimeZone.TimeZone;
-#elif WIN
-        Configuration.TimeZone.WinTimeZone;
-#elif UNIX
-        Configuration.TimeZone.UnixTimeZone;
 #endif
       if (!string.IsNullOrEmpty(id)) _timeZone = GetTimeZoneByID(id);
     }
@@ -2471,7 +2472,7 @@ namespace
 #endif
       var count = Configuration.RaidProtection.Prefabs.Count;
 
-      if (arg.Args?.Length is 1 && arg.Args[0] is "true")
+      if (arg.Args?.Length is 1 && arg.GetBool(0))
         Configuration.RaidProtection.Prefabs = GetPrefabNames();
       else
         Configuration.RaidProtection.Prefabs.UnionWith(GetPrefabNames());
