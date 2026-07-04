@@ -12,7 +12,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Super PVx Info", "HunterZ", "1.9.0")]
+[Info("Super PVx Info", "HunterZ", "1.10.0")]
 [Description("Displays PvE/PvP/etc. status on player's HUD")]
 public class SuperPVxInfo : RustPlugin
 {
@@ -92,6 +92,10 @@ public class SuperPVxInfo : RustPlugin
       "{0}WARNING: Entering Train Tunnels PVP Zone",
     ["PVP Depth Exit"] =
       "{0}Leaving Train Tunnels PVP Zone",
+    ["PVP Apartment Entry"] =
+      "{0}WARNING: Entering Apartment PVP Zone",
+    ["PVP Apartment Exit"] =
+      "{0}Leaving Apartment PVP Zone",
     ["PVP Deep Sea Entry"] =
       "{0}WARNING: Entering Deep Sea PVP Zone",
     ["PVP Deep Sea Exit"] =
@@ -235,15 +239,21 @@ public class SuperPVxInfo : RustPlugin
         _configData.PvpBelowHeight = pvpBelowHeight;
         Puts($" - PVP below height: {pvpBelowHeight}");
       }
-      if (TruePVE?.Call("GetDeepSea") is bool pvpDeepSea)
+      if (TruePVE?.Call("GetDeepSeaPVP") is bool pvpDeepSea)
       {
         _configData.PvpDeepSea = pvpDeepSea;
         Puts($" - PVP deep sea: {pvpDeepSea}");
+      }
+      else if (TruePVE?.Call("GetDeepSea") is bool pvpDeepSea2)
+      {
+        _configData.PvpDeepSea = pvpDeepSea2;
+        Puts($" - PVP deep sea: {pvpDeepSea2}");
       }
       Puts("...Done");
     }
     PlayerWatcher.PvpAboveHeight = _configData?.PvpAboveHeight ?? 1000.0f;
     PlayerWatcher.PvpBelowHeight = _configData?.PvpBelowHeight ?? -500.0f;
+    PlayerWatcher.PvpApartments  = _configData?.PvpApartments  ?? false;
     PlayerWatcher.PvpDeepSea     = _configData?.PvpDeepSea     ?? false;
 
     var saveData = false;
@@ -1332,13 +1342,13 @@ public class SuperPVxInfo : RustPlugin
             {
               new CuiPanel
               {
-                Image = { Color = BackgroundColor, FadeIn = FadeIn },
+                Image = { Color = BackgroundColor /*, FadeIn = FadeIn*/ },
                 RectTransform = {
                   AnchorMin = MinAnchor, AnchorMax = MaxAnchor,
                   OffsetMin = MinOffset, OffsetMax = MaxOffset
                 },
-                CursorEnabled = false,
-                FadeOut = FadeOut,
+                CursorEnabled = false /*,
+                FadeOut = FadeOut,*/
               },
               Layer, UIName, UIName
             },
@@ -1349,13 +1359,13 @@ public class SuperPVxInfo : RustPlugin
                   Text = Text,
                   FontSize = TextSize,
                   Align = TextAnchor.MiddleCenter,
-                  Color = TextColor,
-                  FadeIn = FadeIn,
+                  Color = TextColor /*,
+                  FadeIn = FadeIn,*/
                 },
                 RectTransform = {
                   AnchorMin = "0.05 0.05", AnchorMax = "0.95 0.95"
-                },
-                FadeOut = FadeOut,
+                } /*,
+                FadeOut = FadeOut, */
               },
               UIName, CuiHelper.GetGuid()
             }
@@ -1428,6 +1438,9 @@ public class SuperPVxInfo : RustPlugin
 
     [JsonProperty(PropertyName = "Assume PVP Above Height")]
     public float PvpAboveHeight = 1000.0f;
+
+    [JsonProperty(PropertyName = "Assume PVP In Apartments")]
+    public bool PvpApartments = false;
 
     [JsonProperty(PropertyName = "Assume PVP In Deep Sea")]
     public bool PvpDeepSea = false;
@@ -1705,6 +1718,8 @@ public class SuperPVxInfo : RustPlugin
     public static float PvpAboveHeight { get; set; }
     // consider at/below this height to be PvP
     public static float PvpBelowHeight { get; set; }
+    // consider Apartment Complex apartments to be PvP
+    public static bool PvpApartments { get; set; }
     // consider Deep Sea to be PvP
     public static bool PvpDeepSea { get; set; }
     // minimum x/y/z coordinate values from Deep Sea bounds
@@ -1779,6 +1794,8 @@ public class SuperPVxInfo : RustPlugin
     private bool? _heightAbovePvp;
     // true if height was within PvP-below thresholds on last check
     private bool? _heightBelowPvp;
+    // true if in Apartment PVP on last check
+    private bool? _inApartmentPvp;
     // true if in Deep Sea PVP on last check
     private bool? _inDeepSeaPvp;
     // true if in PVP start/stop event on last check
@@ -1836,6 +1853,7 @@ public class SuperPVxInfo : RustPlugin
       _forceUpdate = false;
       _heightAbovePvp = null;
       _heightBelowPvp = null;
+      _inApartmentPvp = null;
       _inDeepSeaPvp = null;
       _inPvpEvent = false;
       _inSafeZone = null;
@@ -1921,15 +1939,42 @@ public class SuperPVxInfo : RustPlugin
     }
 
     // derive new PVx status from current set of states
-    private PVxType GetPVxState()
-    {
+    private PVxType GetPVxState() =>
       // current order of precedence (subject to change):
-      // - in Facepunch/ZoneManager safe zone => PvE
+      // - in PvP Apartment Complex apartment => PvP (overrides safe zone)
+      // - in Facepunch/ZoneManager safe zone => Safe
       // - in PvP base/bubble/event/zone => PvP
       // - above/below PvP height => PvP
-      // - pvp exit delay active => PvP Delay
+      // - in PvP Deep Sea => PvP
+      // - PvP exit delay active => Delay
       // - in PvE base/event/tutorial/zone => PvE
       // - configured default
+           true == _inApartmentPvp
+      ? PVxType.PVP
+        :  true == _inSafeZone
+        || PVxType.SafeZone == _inZoneType
+      ? PVxType.SafeZone
+        :  PVxType.PVP == _inBaseType
+        || PvpBubbleTypes.None != _inPvpBubbleTypes
+        || _inPvpEvent
+        || PVxType.PVP == _inPVxEventType
+        || PVxType.PVP == _inZoneType
+        || true == _heightAbovePvp
+        || true == _heightBelowPvp
+        || true == _inDeepSeaPvp
+      ? PVxType.PVP
+        :  _pvpDelays.Count > 0
+      ? PVxType.PVPDelay
+        :  PVxType.PVE == _inBaseType
+        || PVxType.PVE == _inPVxEventType
+        || true == _inTutorial
+        || PVxType.PVE == _inZoneType
+      ? PVxType.PVE
+      // defer to default state (or PVE if somehow not defined)
+      : Instance?._configData?.DefaultType ?? PVxType.PVE;
+
+    /*
+      if (true == _inApartmentPvp)                  return PVxType.PVP;
       if (true == _inSafeZone)                      return PVxType.SafeZone;
       if (PVxType.SafeZone == _inZoneType)          return PVxType.SafeZone;
       if (PVxType.PVP == _inBaseType)               return PVxType.PVP;
@@ -1947,7 +1992,7 @@ public class SuperPVxInfo : RustPlugin
       if (PVxType.PVE == _inZoneType)               return PVxType.PVE;
       // defer to default state (or PVE if somehow not defined)
       return Instance?._configData?.DefaultType ?? PVxType.PVE;
-    }
+    */
 
     // send message with the given key to watcher's player if appropriate
     private void SendCannedMessage(string message)
@@ -1964,6 +2009,10 @@ public class SuperPVxInfo : RustPlugin
 
       Instance.SendCannedMessage(_player, message);
     }
+
+    private static bool InApartmentPvp(BasePlayer player) =>
+      true == player?.HasPlayerFlag(BasePlayer.PlayerFlags.CombatZone);
+      // true == player?.InSafeCombatZone();
 
     private static bool InDeepSeaPvp(Vector3 position) =>
       position.x >= DeepSeaMin.x && position.x <= DeepSeaMax.x &&
@@ -2055,6 +2104,15 @@ public class SuperPVxInfo : RustPlugin
         ref _heightBelowPvp, playerPos.y < PvpBelowHeight,
         "PVP Depth Entry", "PVP Depth Exit"
       );
+
+      // apartment check
+      if (PvpApartments)
+      {
+        CheckPeriodic(
+          ref _inApartmentPvp, InApartmentPvp(_player),
+          "PVP Apartment Entry", "PVP Apartment Exit"
+        );
+      }
 
       // deap sea check
       if (PvpDeepSea)
