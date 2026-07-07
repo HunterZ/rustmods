@@ -23,7 +23,7 @@ namespace
   Oxide.Plugins
 #endif
 {
-  [Info("Offline Raid Protection", "realedwin/HunterZ", "1.3.3"), Description("Prevents/reduces offline raids by other players")]
+  [Info("Offline Raid Protection", "realedwin/HunterZ", "1.4.0"), Description("Prevents/reduces offline raids by other players")]
   public sealed class OfflineRaidProtection :
 #if CARBON
     CarbonPlugin
@@ -109,6 +109,9 @@ namespace
       [JsonProperty(PropertyName = "Raid Protection Options")]
       public RaidProtectionOptions RaidProtection { get; set; }
 
+      [JsonProperty(PropertyName = "Apartment Complex Options")]
+      public ApartmentOptions ApartmentProtection { get; set; }
+
       [JsonProperty(PropertyName = "Team Options")]
       public TeamOptions Team { get; set; }
 
@@ -175,6 +178,27 @@ namespace
 
         [JsonProperty(PropertyName = "Prefabs blacklist")]
         public HashSet<string> PrefabsBlacklist { get; set; }
+      }
+
+      public sealed class ApartmentOptions
+      {
+        [JsonProperty(PropertyName = "Protect apartments from break-ins")]
+        public bool ProtectApartments { get; set; }
+
+        [JsonProperty(PropertyName = "Protect apartment even when owner absent")]
+        public bool WhenAbsent { get; set; }
+
+        [JsonProperty(PropertyName = "Protect apartment even when rent due")]
+        public bool WhenRentDue { get; set; }
+
+        [JsonProperty(PropertyName = "Protect shops from break-ins")]
+        public bool ProtectShops { get; set; }
+
+        [JsonProperty(PropertyName = "Protect only when damage scale below")]
+        public float WhenDamageBelow { get; set; }
+
+        [JsonProperty(PropertyName = "Use damage scale as break-in success chance")]
+        public bool DamageAsChance { get; set; }
       }
 
       public sealed class TeamOptions
@@ -705,6 +729,12 @@ namespace
           baseConfig.RaidProtection.ProtectDecayingBase;
       }
 
+      if (Configuration.Version < new VersionNumber(1, 4, 0))
+      {
+        Configuration.ApartmentProtection =
+          baseConfig.ApartmentProtection;
+      }
+
       Configuration.Version = Version;
 
       SaveConfig();
@@ -757,6 +787,15 @@ namespace
         DecayIgnoreTwig = false,
         Prefabs = GetPrefabNames(),
         PrefabsBlacklist = new()
+      },
+      ApartmentProtection = new()
+      {
+        ProtectApartments = false,
+        WhenAbsent = false,
+        WhenRentDue = false,
+        ProtectShops = false,
+        WhenDamageBelow = 1f,
+        DamageAsChance = false
       },
       Team = new()
       {
@@ -981,6 +1020,39 @@ namespace
         IsBuildingDecaying(buildingPrivlidge, cachedProtectedMinutes > 0);
     }
 
+    // provide feedback when a player knocks on a protected apartment door
+    private void OnDoorKnocked(ApartmentDoor apartmentDoor, BasePlayer player)
+    {
+      if (!Configuration.ApartmentProtection.ProtectApartments ||
+          (!Configuration.Other.ShowMessage &&
+           !Configuration.Other.PlaySound) ||
+          !apartmentDoor || player?.userID.IsSteamId() is null or false)
+        return;
+
+      CheckNotifyApartment(apartmentDoor, player);
+    }
+
+    // provide feedback when a player hits a protected apartment door
+    private object OnEntityTakeDamage(
+      ApartmentDoor apartmentDoor, HitInfo hitInfo)
+    {
+      // abort if:
+      // - apartment protection disabled
+      // - notifications disabled
+      // - door invalid
+      // - hit by something/someone other than Steam player
+      if (!Configuration.ApartmentProtection.ProtectApartments ||
+          (!Configuration.Other.ShowMessage &&
+           !Configuration.Other.PlaySound) ||
+          !apartmentDoor ||
+          hitInfo?.InitiatorPlayer?.userID.IsSteamId() is null or false)
+        return null;
+
+      CheckNotifyApartment(apartmentDoor, hitInfo.InitiatorPlayer);
+
+      return null;
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private object OnEntityTakeDamage(BaseCombatEntity entity, HitInfo hitInfo)
     {
@@ -1004,6 +1076,56 @@ namespace
       return OnStructureAttack(entity, ref hitInfo);
     }
 
+    private object OnApartmentRoomBreakInComplete(
+      ApartmentRoom room, BasePlayer player, ApartmentDoor door)
+    {
+      if (!Configuration.ApartmentProtection.ProtectApartments ||
+          !room || player?.userID.IsSteamId() is null or false || !door)
+        return null;
+
+      var (protection, ownerID, damageScale) = GetApartmentProtection(door);
+
+      // allow if unprotected
+      if (ApartmentProtection.Protected != protection)
+        return null;
+
+      // allow if random chance enabled and roll succeeds
+      if (Configuration.ApartmentProtection.DamageAsChance &&
+          Random.Range(0f, 1f) <= damageScale)
+      {
+        return null;
+      }
+
+      // block and notify
+      NotifyApartmentOrShop(player, ownerID, damageScale);
+      return true;
+    }
+
+    private object OnRentableShopBreakInComplete(
+      RentableShop shop, BasePlayer player)
+    {
+      if (!Configuration.ApartmentProtection.ProtectShops ||
+          !shop || player?.userID.IsSteamId() is null or false)
+        return null;
+
+      var (protection, ownerID, damageScale) = GetShopProtection(shop);
+
+      // allow if unprotected
+      if (ApartmentProtection.Protected != protection)
+        return null;
+
+      // allow if random chance enabled and roll succeeds
+      if (Configuration.ApartmentProtection.DamageAsChance &&
+          Random.Range(0f, 1f) <= damageScale)
+      {
+        return null;
+      }
+
+      // block and notify
+      NotifyApartmentOrShop(player, ownerID, damageScale);
+      return true;
+    }
+
     #endregion Hooks
 
     #region Hook Subscribtion
@@ -1011,14 +1133,25 @@ namespace
     private void UnsubscribeHooks()
     {
       if (Configuration.RaidProtection.ProtectDecayingBase)
+      {
         Unsubscribe(nameof(OnCupboardProtectionCalculated));
-
-      if (Configuration.Team.TeamAvoidAbuse || Configuration.Team.TeamEnablePenalty)
-        return;
-
-      Unsubscribe(nameof(OnTeamDisband));
-      Unsubscribe(nameof(OnTeamKick));
-      Unsubscribe(nameof(OnTeamLeave));
+      }
+      if (!Configuration.ApartmentProtection.ProtectApartments)
+      {
+        Unsubscribe(nameof(OnApartmentRoomBreakInComplete));
+        Unsubscribe(nameof(OnDoorKnocked));
+      }
+      if (!Configuration.ApartmentProtection.ProtectShops)
+      {
+        Unsubscribe(nameof(OnRentableShopBreakInComplete));
+      }
+      if (!Configuration.Team.TeamAvoidAbuse &&
+          !Configuration.Team.TeamEnablePenalty)
+      {
+        Unsubscribe(nameof(OnTeamDisband));
+        Unsubscribe(nameof(OnTeamKick));
+        Unsubscribe(nameof(OnTeamLeave));
+      }
     }
 
     #endregion Hook Subscribtion
@@ -1284,22 +1417,25 @@ namespace
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private bool IsProtected(in BaseCombatEntity entity)
+    private bool IsProtected(in BaseEntity entity)
     {
-      // Boat building block is protected if associated with a boat, and boat
-      //  protection is enabled
-      // NOTE: Boat building blocks in edit mode will not be associated with a
-      //  boat, and will thus not be protected
-      if (entity is BoatBuildingBlock && PlayerBoat.GetParentPlayerBoat(entity))
+      switch (entity)
       {
-        return Configuration.RaidProtection.ProtectBaseBoats;
-      }
-
-      // BuildingBlock is protected, except twig when twig protection disabled
-      if (entity is BuildingBlock buildingBlock and not BoatBuildingBlock)
-      {
-        return buildingBlock.grade != BuildingGrade.Enum.Twigs ||
-               Configuration.RaidProtection.ProtectTwigs;
+        // Boat building block is protected if associated with a boat, and boat
+        //  protection is enabled
+        // NOTE: Boat building blocks in edit mode will not be associated with a
+        //  boat, and will thus not be protected
+        case BoatBuildingBlock:
+          if (!PlayerBoat.GetParentPlayerBoat(entity)) break;
+          return Configuration.RaidProtection.ProtectBaseBoats;
+        // BuildingBlock is protected, except twig when twig protection disabled
+        case BuildingBlock buildingBlock:
+          return Configuration.RaidProtection.ProtectTwigs ||
+                 buildingBlock.grade != BuildingGrade.Enum.Twigs;
+        case ApartmentDoor:
+          return Configuration.ApartmentProtection.ProtectApartments;
+        case RentableShop:
+          return Configuration.ApartmentProtection.ProtectShops;
       }
 
       // If ProtectAll is enabled, only check the blacklist
@@ -1365,14 +1501,14 @@ namespace
         GetAuthorizedPlayers(entity, tugboat, modularBoat, vehicle);
 
       // Abort if no authorized players
-      if (authorizedPlayers is null)
+      if (authorizedPlayers?.Count is not > 0)
         return null;
 
       // Abort if the TC has either no players authed, or an NPC authed
       // Note: Mixed auth is possible, but we still want to ignore it, because
       //  it probably indicates a Raidable Bases base or something
       using var e = authorizedPlayers.GetEnumerator();
-      if (!e.MoveNext() || !e.Current.IsSteamID())
+      if (!e.MoveNext() || !e.Current.IsSteamId())
         return null;
 
       // Abort if damage is from is an authorized player
@@ -1380,9 +1516,9 @@ namespace
           authorizedPlayers.Contains(hitInfo.InitiatorPlayer.userID.Get()))
         return null;
 
-      // Abort if the building is decaying
+      // Abort if decaying building
       if (!Configuration.RaidProtection.ProtectDecayingBase &&
-          !_isVehicle && !tugboat && !modularBoat &&
+          _privilege && !_isVehicle && !tugboat && !modularBoat &&
           _tcCache.TryGetValue(_privilege.buildingID, out var tc) &&
           tc.IsDecaying)
         return null;
@@ -1574,6 +1710,8 @@ namespace
           _tmpHashSet2.Add(playerID);
         }
 
+        // TODO: don't skip checking team members, as not all plugins
+        //  implementing the Clans API automatically do clan-team sync  -HZ
         return GetOfflineMember(_tmpHashSet2);
       }
 
@@ -1774,7 +1912,7 @@ namespace
       if (scale is 0f)
       {
         if (showMessage && initiatorValid)
-          SendMessage(hitInfo, targetID);
+          SendMessage(hitInfo.InitiatorPlayer, targetID);
 
         PlaySound(ref hitInfo);
 
@@ -1783,11 +1921,11 @@ namespace
 
       hitInfo.damageTypes.ScaleAll(scale);
 
-      if (scale >= 1)
+      if (scale >= 1f)
         return null;
 
       if (showMessage && initiatorValid)
-        SendMessage(hitInfo, targetID, scale.ToPercent());
+        SendMessage(hitInfo.InitiatorPlayer, targetID, scale.ToPercent());
 
       PlaySound(ref hitInfo);
 
@@ -1806,36 +1944,156 @@ namespace
       }
     }
 
+    private enum ApartmentProtection
+    {
+      NotApplicable,
+      UnprotectedRentDue,
+      UnprotectedAbsent,
+      UnprotectedDamageScale,
+      Protected
+    }
+
+    // notify player if apartment door is protected
+    private void CheckNotifyApartment(
+      ApartmentDoor apartmentDoor, BasePlayer player)
+    {
+      var (protection, ownerID, damageScale) =
+        GetApartmentProtection(apartmentDoor);
+
+      if (ApartmentProtection.Protected == protection)
+        NotifyApartmentOrShop(player, ownerID, damageScale);
+    }
+
+    // notify player of apartment or shop protection
+    private void NotifyApartmentOrShop(
+      BasePlayer player, ulong ownerID, float damageScale)
+    {
+      _isVehicle = false;
+
+      if (Configuration.Other.ShowMessage)
+      {
+        var percent = damageScale <= 0f ? 100f : damageScale.ToPercent();
+        SendMessage(player, ownerID, percent);
+      }
+
+      if (Configuration.Other.PlaySound)
+      {
+        Effect.server.Run(
+          Configuration.Other.SoundPath,
+          player.transform.position,
+          UnityEngine.Vector3.zero);
+      }
+    }
+
+    private ulong GetApartmentOwnerID(ApartmentRoom apartmentRoom)
+    {
+      using var e = apartmentRoom.Owners.GetEnumerator();
+      return e.MoveNext() && e.Current.IsSteamId() ? e.Current : 0UL;
+    }
+
+    private (ApartmentProtection, ulong, float) GetApartmentProtection(
+      ApartmentDoor apartmentDoor)
+    {
+      // room must be rented to an offline player
+      var ownerID = 0UL;
+      var damageScale = -1f;
+      if (!Configuration.ApartmentProtection.ProtectApartments ||
+          !apartmentDoor || !BaseNetworkable.serverEntities.TryGetEntity(
+            apartmentDoor.ApartmentId, out ApartmentRoom apartmentRoom) ||
+          !apartmentRoom || !apartmentRoom.IsCurrentlyRented() ||
+          apartmentRoom.owners.Count <= 0 ||
+          AnyPlayersOnline(apartmentRoom.owners))
+        return (ApartmentProtection.NotApplicable, ownerID, damageScale);
+
+      // check if rent due voids protection
+      if (!Configuration.ApartmentProtection.WhenRentDue &&
+          apartmentRoom.timeRentOverdue > 0f)
+        return (ApartmentProtection.UnprotectedRentDue, ownerID, damageScale);
+
+      // remaining checks require apartment owner userID
+      ownerID = GetApartmentOwnerID(apartmentRoom);
+      if (0UL == ownerID || !ownerID.IsSteamId())
+        return (ApartmentProtection.NotApplicable, ownerID, damageScale);
+
+      // check if absent owner voids protection
+      if (!Configuration.ApartmentProtection.WhenAbsent)
+      {
+        var owner = PlayerManager.GetPlayer(ownerID);
+        if (!owner || !apartmentRoom.IsInsideRoom(owner))
+          return (ApartmentProtection.UnprotectedAbsent, ownerID, damageScale);
+      }
+
+      // check if damage scale voids protection
+      damageScale = GetCachedDamageScale(ownerID);
+      if (damageScale < 0f)
+        damageScale = GetDamageScale(ownerID);
+      if (damageScale < 0f ||
+          damageScale >= Configuration.ApartmentProtection.WhenDamageBelow ||
+          damageScale >= 1f)
+        return
+          (ApartmentProtection.UnprotectedDamageScale, ownerID, damageScale);
+
+      // must be at least partially protected
+      return (ApartmentProtection.Protected, ownerID, damageScale);
+    }
+
+    private (ApartmentProtection, ulong, float) GetShopProtection(
+      RentableShop rentableShop)
+    {
+      // shop must be rented to an offline player
+      var ownerID = 0UL;
+      var damageScale = -1f;
+      if (!Configuration.ApartmentProtection.ProtectShops ||
+          rentableShop?.IsOn() is false or null)
+        return (ApartmentProtection.NotApplicable, ownerID, damageScale);
+
+      // remaining checks require apartment owner userID
+      ownerID = rentableShop.ShopOwnerId;
+      if (0UL == ownerID || !ownerID.IsSteamId() || IsOnline(ownerID))
+        return (ApartmentProtection.NotApplicable, ownerID, damageScale);
+
+      // check if damage scale voids protection
+      damageScale = GetCachedDamageScale(ownerID);
+      if (damageScale < 0f)
+        damageScale = GetDamageScale(ownerID);
+      if (damageScale < 0f ||
+          damageScale >= Configuration.ApartmentProtection.WhenDamageBelow ||
+          damageScale >= 1f)
+        return
+          (ApartmentProtection.UnprotectedDamageScale, ownerID, damageScale);
+
+      // must be at least partially protected
+      return (ApartmentProtection.Protected, ownerID, damageScale);
+    }
+
     #endregion Core Methods
 
     #region Game Tip Message
 
     private void SendMessage(
-      in HitInfo hitInfo, in ulong targetID, in float amount = 100f)
+      in BasePlayer player, in ulong targetID, in float amount = 100f)
     {
-      var initiator = hitInfo.InitiatorPlayer;
       if (!_scaleCache.TryGetValue(
-            initiator.userID.Get(), out var playerScaleCache))
+            player.userID.Get(), out var playerScaleCache))
       {
         playerScaleCache = new(
           _currentDateTime, -1f,
           targetID.HasPermission(Configuration.Permission.Protect));
-        _scaleCache[initiator.userID.Get()] = playerScaleCache;
+        _scaleCache[player.userID.Get()] = playerScaleCache;
       }
 
       if (playerScaleCache.ActiveGameTipMessage)
         return;
 
       if (playerScaleCache.HideGameTipAction is null)
-        playerScaleCache.CacheAction(initiator);
+        playerScaleCache.CacheAction(player);
 
-      ShowMessageTip(initiator, amount);
+      ShowMessageTip(player, amount);
       playerScaleCache.ActiveGameTipMessage = true;
 
       return;
 
 
-      [MethodImpl(MethodImplOptions.AggressiveInlining)]
       void ShowMessageTip(in BasePlayer player, in float amount = 100f)
       {
         _sb.Clear();
@@ -1894,6 +2152,8 @@ namespace
       if (_clanTagCache.TryGetValue(userID, out var tag))
         return tag;
 
+      // TODO: probably shouldn't assume that teams and plugin Clans are
+      //  mutually exclusive  -HZ
       var team = GetTeam(userID);
       if (!(team?.members.Count > 0))
         return null;
@@ -1920,6 +2180,18 @@ namespace
       var team = GetTeam(userID);
       if (team?.members.Count > 0)
         _tmpList.AddRange(team.members);
+
+      // also add vanilla clan members here, if applicable
+      if (PlayerManager.GetPlayer(userID) is { serverClan: not null } player &&
+          0 != player.clanId)
+      {
+        foreach (var clanMember in player.serverClan.Members)
+        {
+          var memberID = clanMember.SteamId;
+          if (memberID != userID)
+            _tmpList.Add(memberID);
+        }
+      }
 
       return _tmpList.Count > 0 ? _tmpList : null;
     }
@@ -2066,10 +2338,11 @@ namespace
     private static UnityEngine.Ray _ray;
 
     private const int LayerMask =
-      Rust.Layers.Mask.Construction |  // building blocks
-      Rust.Layers.Mask.Deployed |      // deployable items
+      Rust.Layers.Mask.Construction  | // building blocks
+      Rust.Layers.Mask.Deployed      | // deployable items
       Rust.Layers.Mask.Vehicle_World | // modular cars
-      Rust.Layers.Mask.Vehicle_Large;  // buildable boats
+      Rust.Layers.Mask.Vehicle_Large | // buildable boats
+      Rust.Layers.Mask.World;          // rentable shops
 
 #if !CARBON
     private static bool CheckChatCmdPerm(BasePlayer player, string perm)
@@ -2168,15 +2441,43 @@ namespace
         return;
       }
 
-      if (baseEntity is not BaseCombatEntity entity)
+      if (!IsProtected(baseEntity))
       {
-        player.ChatMessage($"{baseEntity.GetType()}/{baseEntity} is not a combat entity");
+        player.ChatMessage($"{baseEntity.GetType()}/{baseEntity} is not a protected player entity");
         return;
       }
 
-      if (!IsProtected(entity))
+      if (baseEntity is ApartmentDoor apartmentDoor)
       {
-        player.ChatMessage($"{entity.GetType()}/{entity} is not a protected player entity");
+        var (protection, ownerID, _) =
+          GetApartmentProtection(apartmentDoor);
+        if (0UL == ownerID)
+        {
+          player.ChatMessage($"{apartmentDoor.GetType()}/{apartmentDoor} has no owner");
+          return;
+        }
+        player.ChatMessage($"{apartmentDoor.GetType()}/{apartmentDoor} report:\nApartment protection status: {protection}");
+        player.ChatMessage(GetStatusText(new[] { ownerID.ToString() }, ownerOnly: true));
+        return;
+      }
+
+      if (baseEntity is RentableShop rentableShop)
+      {
+        var (protection, ownerID, _) =
+          GetShopProtection(rentableShop);
+        if (0UL == ownerID)
+        {
+          player.ChatMessage($"{rentableShop.GetType()}/{rentableShop} has no owner");
+          return;
+        }
+        player.ChatMessage($"{rentableShop.GetType()}/{rentableShop} report:\nShop protection status: {protection}");
+        player.ChatMessage(GetStatusText(new[] { ownerID.ToString() }, ownerOnly: true));
+        return;
+      }
+
+      if (baseEntity is not BaseCombatEntity entity)
+      {
+        player.ChatMessage($"{baseEntity.GetType()}/{baseEntity} is not a combat entity");
         return;
       }
 
@@ -2198,7 +2499,7 @@ namespace
         }
       }
 
-      if (null == authorizedPlayers || !firstPlayer.IsSteamID())
+      if (null == authorizedPlayers || !firstPlayer.IsSteamId())
       {
         player.ChatMessage($"{entity.GetType()}/{entity} has no owner");
         return;
@@ -2703,7 +3004,8 @@ namespace
 
     #region Texts
 
-    private string GetStatusText(in string[] args, in bool isDecaying = false)
+    private string GetStatusText(
+      in string[] args, in bool isDecaying = false, in bool ownerOnly = false)
     {
       if (args?.Length is not 1)
         return MESSAGE_INVALID_SYNTAX;
@@ -2737,7 +3039,7 @@ namespace
       else
       {
         var scale = GetDamageScale(
-          GetRecentActiveMemberAll(userID),
+          ownerOnly ? userID : GetRecentActiveMemberAll(userID),
           _scaleCache.GetValueOrDefault(userID, null));
         var prot = scale.ToPercent();
         if (scale is not -1)
@@ -3028,9 +3330,6 @@ namespace Oxide.Plugins.OfflineRaidProtectionEx
           first.TryAdd(kvp.Key, kvp.Value);
       }
     }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static bool IsSteamID(this in ulong id) => id > 76561197960265728UL;
   }
 }
 
