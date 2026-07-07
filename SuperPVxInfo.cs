@@ -12,7 +12,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Super PVx Info", "HunterZ", "1.10.0")]
+[Info("Super PVx Info", "HunterZ", "1.11.0")]
 [Description("Displays PvE/PvP/etc. status on player's HUD")]
 public class SuperPVxInfo : RustPlugin
 {
@@ -226,31 +226,32 @@ public class SuperPVxInfo : RustPlugin
       PrintWarning("ZoneManager is outdated or not running; this plugin may not work properly");
     }
 
-    if (true == _configData?.SyncAssumptions && true == TruePVE?.IsLoaded)
+    var toDict = Pool.Get<Dictionary<string, object>>();
+    if (true != _configData?.SyncAssumptions)
     {
-      Puts("Querying TruePVE for assumptions...");
-      if (TruePVE?.Call("GetAboveworld") is float pvpAboveHeight)
-      {
-        _configData.PvpAboveHeight = pvpAboveHeight;
-        Puts($" - PVP above height: {pvpAboveHeight}");
-      }
-      if (TruePVE?.Call("GetUnderworld") is float pvpBelowHeight)
-      {
-        _configData.PvpBelowHeight = pvpBelowHeight;
-        Puts($" - PVP below height: {pvpBelowHeight}");
-      }
-      if (TruePVE?.Call("GetDeepSeaPVP") is bool pvpDeepSea)
-      {
-        _configData.PvpDeepSea = pvpDeepSea;
-        Puts($" - PVP deep sea: {pvpDeepSea}");
-      }
-      else if (TruePVE?.Call("GetDeepSea") is bool pvpDeepSea2)
-      {
-        _configData.PvpDeepSea = pvpDeepSea2;
-        Puts($" - PVP deep sea: {pvpDeepSea2}");
-      }
-      Puts("...Done");
+      Puts("TruePVE config query is disabled - skipping");
     }
+    else if (true != TruePVE?.IsLoaded)
+    {
+      Puts("TruePVE not loaded - skipping config query");
+    }
+    else if (TruePVE?.Call("GetOptionsNoAlloc", toDict) is not true)
+    {
+      Puts("TruePVE config query failed");
+    }
+    else
+    {
+      Puts("Got TruePVE config:");
+      _configData.PvpAboveHeight = (float)toDict["world_above"];
+      Puts($"- PVP above height: {_configData.PvpAboveHeight}");
+      _configData.PvpBelowHeight = (float)toDict["world_under"];
+      Puts($"- PVP below height: {_configData.PvpBelowHeight}");
+      _configData.PvpApartments = (bool)toDict["apartment_pvp"];
+      Puts($"- PVP apartments: {_configData.PvpApartments}");
+      _configData.PvpDeepSea = (bool)toDict["deepsea_pvp"];
+      Puts($"- PVP deep sea: {_configData.PvpDeepSea}");
+    }
+    Pool.FreeUnmanaged(ref toDict);
     PlayerWatcher.PvpAboveHeight = _configData?.PvpAboveHeight ?? 1000.0f;
     PlayerWatcher.PvpBelowHeight = _configData?.PvpBelowHeight ?? -500.0f;
     PlayerWatcher.PvpApartments  = _configData?.PvpApartments  ?? false;
@@ -482,7 +483,7 @@ public class SuperPVxInfo : RustPlugin
       var hasTimers =
         _excludedPlayers.TryGetValue(userid, out var excludeTimers);
       if (hasTimers &&
-          excludeTimers.TryGetValue(pluginName, out var excludeTimer))
+          excludeTimers?.TryGetValue(pluginName, out var excludeTimer) is true)
       {
         if (TimerValid(excludeTimer))
         {
@@ -1342,13 +1343,13 @@ public class SuperPVxInfo : RustPlugin
             {
               new CuiPanel
               {
-                Image = { Color = BackgroundColor /*, FadeIn = FadeIn*/ },
+                Image = { Color = BackgroundColor, FadeIn = FadeIn },
                 RectTransform = {
                   AnchorMin = MinAnchor, AnchorMax = MaxAnchor,
                   OffsetMin = MinOffset, OffsetMax = MaxOffset
                 },
-                CursorEnabled = false /*,
-                FadeOut = FadeOut,*/
+                CursorEnabled = false,
+                FadeOut = FadeOut
               },
               Layer, UIName, UIName
             },
@@ -1359,13 +1360,13 @@ public class SuperPVxInfo : RustPlugin
                   Text = Text,
                   FontSize = TextSize,
                   Align = TextAnchor.MiddleCenter,
-                  Color = TextColor /*,
-                  FadeIn = FadeIn,*/
+                  Color = TextColor,
+                  FadeIn = FadeIn
                 },
                 RectTransform = {
                   AnchorMin = "0.05 0.05", AnchorMax = "0.95 0.95"
-                } /*,
-                FadeOut = FadeOut, */
+                },
+                FadeOut = FadeOut
               },
               UIName, CuiHelper.GetGuid()
             }
