@@ -10,7 +10,7 @@ public class ScarecrowWrangler : RustPlugin
 {
   // mask containing forbidden topologies
   // TODO: move to config file, and also add safe zone wrangling toggle there
-  private static readonly int Mask =
+  private const int Mask =
     (int)TerrainTopology.Enum.Ocean |
     (int)TerrainTopology.Enum.Tier0;
 
@@ -196,7 +196,8 @@ public class ScarecrowWrangler : RustPlugin
     watcher.Destroying = true;
     watcher.Instance = null; // set to null here to prevent callbacks / log spam
     // schedule for destruction
-    Object.Destroy(watcher);
+    // NOTE: Oxide needs the UnityEngine qualifier for some reason
+    UnityEngine.Object.Destroy(watcher);
   }
 
   // return grid name for given world location
