@@ -193,6 +193,7 @@ public class PlayerBasePvpZones : RustPlugin
 
     // since the building is in *some* TC range, see if any of those are
     //  physically attached (credit: Kulltero for this more efficient method)
+    // TODO: can't we compare the building's ID to toolCupboard.buildingID?
     foreach (var toolCupboard in building.buildingPrivileges)
     {
       if (!building.decayEntities.Contains(toolCupboard)) continue;
