@@ -894,11 +894,13 @@ public class SuperPVxInfo : RustPlugin
 
   #region RaidableBases Hook Handlers
 
+  // NOTE: Only need to included up to the last parameter that we actually use;
+  //  Oxide/Carbon will call the closest-matching hook signature
+
   private void OnPlayerEnteredRaidableBase(
     BasePlayer player, Vector3 location, bool allowPVP, int mode, string id,
     float _, float __, float loadTime, ulong ownerId, string baseName,
-    DateTime spawnTime, DateTime despawnTime, float radius,
-    int lootRemaining) =>
+    DateTime spawnTime, DateTime despawnTime, float radius) =>
     NextTick(() => EnteredBase(
       player, allowPVP ? PVxType.PVP : PVxType.PVE, location, radius));
 
@@ -913,8 +915,7 @@ public class SuperPVxInfo : RustPlugin
     float __, float loadTime, ulong ownerId, BasePlayer owner,
     List<BasePlayer> raiders, List<BasePlayer> intruders,
     List<BaseEntity> entities, string baseName, DateTime spawnDateTime,
-    DateTime despawnDateTime, float protectionRadius,
-    int lootAmountRemaining) =>
+    DateTime despawnDateTime, float protectionRadius) =>
     NextTick(() =>
     {
       // set zone check flag for any players in base radius
@@ -931,6 +932,9 @@ public class SuperPVxInfo : RustPlugin
       }
     });
 
+  // NOTE: Here we need to include enough parameters to disambiguate from
+  //  Abandoned Bases
+
   private void OnPlayerPvpDelayStart(BasePlayer player, int _) =>
     NextTick(() => SetPvpDelay(player, PvpDelayType.RaidableBases, true));
 
@@ -945,20 +949,16 @@ public class SuperPVxInfo : RustPlugin
   #region AbandonedBases Hook Handlers
 
   private void OnPlayerEnteredAbandonedBase(
-    BasePlayer player, Vector3 eventPos, float radius, bool allowPVP,
-    List<BasePlayer> intruders, List<ulong> intruderIds,
-    List<BaseEntity> entities) =>
+    BasePlayer player, Vector3 eventPos, float radius, bool allowPVP) =>
     NextTick(() => EnteredBase(
       player, allowPVP ? PVxType.PVP : PVxType.PVE, eventPos, radius));
 
-  private void OnPlayerExitAbandonedBase(
-    BasePlayer player, Vector3 location, bool allowPVP) =>
+  private void OnPlayerExitAbandonedBase(BasePlayer player) =>
     NextTick(() => ExitedBase(player));
 
   private void OnAbandonedBaseEnded(
     Vector3 eventPos, float radius, bool allowPVP,
-    List<BasePlayer> participants, List<ulong> participantIds,
-    List<BaseEntity> entities) =>
+    List<BasePlayer> participants) =>
     NextTick(() =>
     {
       foreach (var player in participants)

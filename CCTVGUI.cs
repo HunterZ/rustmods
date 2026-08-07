@@ -250,7 +250,7 @@ public class CCTVGUI : RustPlugin
       return;
     }
 
-    var locationShortName = arg.Args[0];
+    var locationShortName = arg.GetString(0);
     if (!_codesUiJson.TryGetValue(locationShortName, out var json))
     {
       SendReply(player, $"Unknown location: {locationShortName}");
@@ -448,7 +448,7 @@ public class CCTVGUI : RustPlugin
           // Padding = "12", // "l t r b" or "x" for all sizes
           Spacing = $"{locGridParams.SpaceX} {locGridParams.SpaceY}",
           StartAxis = GridLayoutGroup.Axis.Horizontal,
-          StartCorner = GridLayoutGroup.Corner.UpperLeft,
+          StartCorner = GridLayoutGroup.Corner.UpperLeft
         },
         new CuiContentSizeFitterComponent
         {
@@ -600,7 +600,7 @@ public class CCTVGUI : RustPlugin
             // Padding = "12", // "l t r b" or "x" for all sizes
             Spacing = "0 0",
             StartAxis = GridLayoutGroup.Axis.Horizontal,
-            StartCorner = GridLayoutGroup.Corner.UpperLeft,
+            StartCorner = GridLayoutGroup.Corner.UpperLeft
           },
           new CuiContentSizeFitterComponent
           {

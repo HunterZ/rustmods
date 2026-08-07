@@ -16,7 +16,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "5.0.2", ResourceId = 2728)]
+[Info("Dynamic PVP", "HunterZ/CatMeat/Arainrr", "5.1.0", ResourceId = 2728)]
 [Description("Creates temporary PvP zones on certain actions/events")]
 public class DynamicPVP : RustPlugin
 {
@@ -119,6 +119,7 @@ public class DynamicPVP : RustPlugin
   {
     Bradley,
     Helicopter,
+    Satellite,
     TimedSupply,
     SupplySignal,
     CargoShip,
@@ -327,7 +328,8 @@ public class DynamicPVP : RustPlugin
     {
       Subscribe(nameof(OnEntityKill));
     }
-    if ((_configData.GeneralEvents.HackableCrate.Enabled &&
+    if (_configData.GeneralEvents.SatelliteCrash.Enabled ||
+        (_configData.GeneralEvents.HackableCrate.Enabled &&
          _configData.GeneralEvents.HackableCrate.StartWhenSpawned) ||
         _configData.GeneralEvents.CargoShip.Enabled)
     {
@@ -420,7 +422,8 @@ public class DynamicPVP : RustPlugin
       Pool.FreeUnmanaged(ref apZoneI);
     }
     _activePluginZones.Clear();
-    DomeEvent._domeEventsToCheck = null;
+    DomeEvent.DomeEventsToCheck?.Clear();
+    DomeEvent.DomeEventsToCheck = null;
 
     _activeSignaledPlanesAndDrops.Clear();
   }
@@ -781,7 +784,7 @@ public class DynamicPVP : RustPlugin
     // determine up-front whether there are any general events to create,
     //  because iterating over all net entities is not cheap
     var checkGeneralEvents = false;
-    // TODO: Bradley, Patrol Helicopter, Supply Drop, Timed Supply
+    // TODO: Bradley, Patrol Helicopter, Satellite, Supply Drop, Timed Supply
     checkGeneralEvents |= _configData.GeneralEvents.CargoShip.Enabled;
     // NOTE: StopWhenKilled is checked because we don't want to start events
     //  whose end is determined by a timer, as we don't know elapsed times
@@ -1155,7 +1158,8 @@ public class DynamicPVP : RustPlugin
 
   private void OnEntityDeath(PatrolHelicopter patrolHelicopter, HitInfo info)
   {
-    if (!_configData.GeneralEvents.PatrolHelicopter.Enabled)
+    var baseEvent = _configData.GeneralEvents.PatrolHelicopter;
+    if (!baseEvent.Enabled)
     {
       return;
     }
@@ -1165,12 +1169,19 @@ public class DynamicPVP : RustPlugin
       return;
     }
 
-    PatrolHelicopterEvent(patrolHelicopter);
+    PrintDebug("OnEntityDeath(PatrolHelicopter): Trying to create Patrol Helicopter killed event.");
+    if (!CheckEntityOwner(patrolHelicopter))
+    {
+      return;
+    }
+
+    HandleGeneralEvent(baseEvent, patrolHelicopter, useEntityId: false);
   }
 
   private void OnEntityDeath(BradleyAPC bradleyApc, HitInfo info)
   {
-    if (!_configData.GeneralEvents.BradleyApc.Enabled)
+    var baseEvent = _configData.GeneralEvents.BradleyApc;
+    if (!baseEvent.Enabled)
     {
       return;
     }
@@ -1180,35 +1191,7 @@ public class DynamicPVP : RustPlugin
       return;
     }
 
-    BradleyApcEvent(bradleyApc);
-  }
-
-  private void PatrolHelicopterEvent(PatrolHelicopter patrolHelicopter)
-  {
-    var baseEvent = _configData.GeneralEvents.PatrolHelicopter;
-    if (!baseEvent.Enabled)
-    {
-      return;
-    }
-
-    PrintDebug("PatrolHelicopterEvent(): Trying to create Patrol Helicopter killed event.");
-    if (!CheckEntityOwner(patrolHelicopter))
-    {
-      return;
-    }
-
-    HandleGeneralEvent(baseEvent, patrolHelicopter, useEntityId: false);
-  }
-
-  private void BradleyApcEvent(BradleyAPC bradleyApc)
-  {
-    var baseEvent = _configData.GeneralEvents.BradleyApc;
-    if (!baseEvent.Enabled)
-    {
-      return;
-    }
-
-    PrintDebug("BradleyApcEvent(): Trying to create Bradley APC killed event.");
+    PrintDebug("OnEntityDeath(BradleyAPC): Trying to create Bradley APC killed event.");
     if (!CheckEntityOwner(bradleyApc))
     {
       return;
@@ -1218,6 +1201,28 @@ public class DynamicPVP : RustPlugin
   }
 
   #endregion PatrolHelicopter And BradleyAPC Event
+
+  #region Satellite Crash Event
+
+  private void OnEntitySpawned(SatelliteCrashRemains satelliteCrashRemains)
+  {
+    var baseEvent = _configData.GeneralEvents.SatelliteCrash;
+    if (!baseEvent.Enabled)
+    {
+      return;
+    }
+
+    if (!satelliteCrashRemains || null == satelliteCrashRemains.net)
+    {
+      return;
+    }
+
+    PrintDebug("OnEntitySpawned(SatelliteCrashRemains): Trying to create Satellite Crash spawned event.");
+
+    HandleGeneralEvent(baseEvent, satelliteCrashRemains, useEntityId: false);
+  }
+
+  #endregion Satellite Crash Event
 
   #region SupplyDrop And SupplySignal Event
 
@@ -2599,39 +2604,33 @@ public class DynamicPVP : RustPlugin
       Pool.FreeUnmanaged(ref stringBuilder);
       return "";
     }
+    // special cases: surface connector / 4-way intersection
     var upwards = "tunnel-upwards" == slashSplit[4];
+    var intersection = "intersection.prefab" == slashSplit[5];
+    // general case: feature-direction combo
     var dashSplit = slashSplit[5].Split("-");
-    if (dashSplit.Length < 2)
+    if (dashSplit.Length < 2 && !intersection)
     {
       PrintDebug($"ToTunnelSectionEventName(): Skipping unsupported DungeonGridCell type due to name components: {cellName}");
       Pool.FreeUnmanaged(ref stringBuilder);
       return "";
     }
     // extract feature part of name
-    var feature = slashSplit[5];
+    var feature = dashSplit[0];
     if (upwards)
     {
       stringBuilder.Append(" Upwards");
     }
-    else if (feature.StartsWith("curve"))
-    {
-      stringBuilder.Append(" Curve");
-    }
-    else if (feature.StartsWith("intersection"))
+    else if (intersection)
     {
       stringBuilder.Append(" Intersection");
     }
-    else if (feature.StartsWith("station"))
+    else if (feature.Length >= 2)
     {
-      stringBuilder.Append(" Station");
-    }
-    else if (feature.StartsWith("straight"))
-    {
-      stringBuilder.Append(" Straight");
-    }
-    else if (feature.StartsWith("transition"))
-    {
-      stringBuilder.Append(" Transition");
+      stringBuilder
+        .Append(' ')
+        .Append(char.ToUpperInvariant(feature[0]))
+        .Append(feature[1..]);
     }
     else
     {
@@ -2640,10 +2639,11 @@ public class DynamicPVP : RustPlugin
       return "";
     }
     // extract direction part of name
-    var direction =
-      dashSplit[upwards ? dashSplit.Length - 1 : 1].Split(".")[0];
+    var direction = intersection ?
+      "d" : dashSplit[upwards ? dashSplit.Length - 1 : 1].Split(".")[0];
     switch (direction)
     {
+      case "d":  stringBuilder.Append(" Double");      break;
       case "e":  stringBuilder.Append(" East");        break;
       case "n":  stringBuilder.Append(" North");       break;
       case "ne": stringBuilder.Append(" North-East");  break;
@@ -2861,13 +2861,11 @@ public class DynamicPVP : RustPlugin
       return null;
     }
 
-    if (_pvpDelays.TryGetValue(player.userID, out var leftZone))
+    if (_pvpDelays.TryGetValue(player.userID, out var leftZone) &&
+        true == leftZone.baseEvent?.CommandWorksForPVPDelay &&
+        IsBlockedCommand(leftZone.baseEvent, command, isChat))
     {
-      if (true == leftZone.baseEvent?.CommandWorksForPVPDelay &&
-          IsBlockedCommand(leftZone.baseEvent, command, isChat))
-      {
-        return false;
-      }
+      return false;
     }
 
     var playerZones = Pool.Get<List<string>>();
@@ -3582,7 +3580,7 @@ public class DynamicPVP : RustPlugin
 
     if (TryRemovePVPDelay(player)) return;
 
-    if (baseEvent?.HolsterTime is not > 0) return;
+    if (baseEvent.HolsterTime <= 0) return;
     // if player is not re-entering zone while in PVP delay, check for
     //  weapon holster
     player.equippingBlocked = true;
@@ -4033,30 +4031,21 @@ public class DynamicPVP : RustPlugin
 
   #region Commands
 
-  private static void DrawCube(
-    BasePlayer player, float duration, Color color,
-    Vector3 pos, Vector3 size, float rotation)
+  private static bool DrawParented(ulong parentID, string zoneID) =>
+    0UL != parentID && !string.IsNullOrEmpty(zoneID);
+
+  private static void DrawAxes(
+    BasePlayer player, float duration,
+    Vector3 pos, Vector3 halfLengths, float rotation, float textScale,
+    ulong parentID = 0UL, string zoneID = "")
   {
-    // this is complicated because ddraw doesn't have a rectangular prism
-    //  rendering option, so we need to figure out where all the rotated
-    //  vertices are and then draw all the edges
-    var halfSize = size / 2;
     Vector3[] vertices =
     {
-      // corners
-      new(pos.x + halfSize.x, pos.y + halfSize.y, pos.z + halfSize.z),
-      new(pos.x + halfSize.x, pos.y + halfSize.y, pos.z - halfSize.z),
-      new(pos.x + halfSize.x, pos.y - halfSize.y, pos.z + halfSize.z),
-      new(pos.x + halfSize.x, pos.y - halfSize.y, pos.z - halfSize.z),
-      new(pos.x - halfSize.x, pos.y + halfSize.y, pos.z + halfSize.z),
-      new(pos.x - halfSize.x, pos.y + halfSize.y, pos.z - halfSize.z),
-      new(pos.x - halfSize.x, pos.y - halfSize.y, pos.z + halfSize.z),
-      new(pos.x - halfSize.x, pos.y - halfSize.y, pos.z - halfSize.z),
       // axes
-      new(pos.x, pos.y, pos.z),
-      new(pos.x + halfSize.x, pos.y, pos.z),
-      new(pos.x, pos.y + halfSize.y, pos.z),
-      new(pos.x, pos.y, pos.z + halfSize.z)
+      new(pos.x,                 pos.y,                 pos.z),
+      new(pos.x + halfLengths.x, pos.y,                 pos.z),
+      new(pos.x,                 pos.y + halfLengths.y, pos.z),
+      new(pos.x,                 pos.y,                 pos.z + halfLengths.z)
     };
 
     // rotate all the points
@@ -4066,81 +4055,97 @@ public class DynamicPVP : RustPlugin
       vertices[i] = rotQ * (vertices[i] - pos) + pos;
     }
 
-    // corners
-    player.SendConsoleCommand(
-      "ddraw.line",  duration, color, vertices[0], vertices[1]);
-    player.SendConsoleCommand(
-      "ddraw.line",  duration, color, vertices[0], vertices[2]);
-    player.SendConsoleCommand(
-      "ddraw.line",  duration, color, vertices[0], vertices[4]);
-    player.SendConsoleCommand(
-      "ddraw.line",  duration, color, vertices[1], vertices[3]);
-    player.SendConsoleCommand(
-      "ddraw.line",  duration, color, vertices[1], vertices[5]);
-    player.SendConsoleCommand(
-      "ddraw.line",  duration, color, vertices[2], vertices[3]);
-    player.SendConsoleCommand(
-      "ddraw.line",  duration, color, vertices[2], vertices[6]);
-    player.SendConsoleCommand(
-      "ddraw.line",  duration, color, vertices[3], vertices[7]);
-    player.SendConsoleCommand(
-      "ddraw.line",  duration, color, vertices[4], vertices[5]);
-    player.SendConsoleCommand(
-      "ddraw.line",  duration, color, vertices[4], vertices[6]);
-    player.SendConsoleCommand(
-      "ddraw.line",  duration, color, vertices[5], vertices[7]);
-    player.SendConsoleCommand(
-      "ddraw.line",  duration, color, vertices[6], vertices[7]);
-    // axes
-    player.SendConsoleCommand(
-      "ddraw.arrow", duration, Color.red,   vertices[8], vertices[9],  5);
-    player.SendConsoleCommand(
-      "ddraw.arrow", duration, Color.green, vertices[8], vertices[10], 5);
-    player.SendConsoleCommand(
-      "ddraw.arrow", duration, Color.blue,  vertices[8], vertices[11], 5);
-    player.SendConsoleCommand(
-      "ddraw.text",  duration, Color.red,   vertices[9],  "+x");
-    player.SendConsoleCommand(
-      "ddraw.text",  duration, Color.green, vertices[10], "+y");
-    player.SendConsoleCommand(
-      "ddraw.text",  duration, Color.blue,  vertices[11], "+z");
+    if (DrawParented(parentID, zoneID))
+    {
+      player.SendConsoleCommand("ddraw.arrow",
+        duration, Color.red,   vertices[0], vertices[1], 5,
+        true, false, parentID, zoneID);
+      player.SendConsoleCommand("ddraw.arrow",
+        duration, Color.green, vertices[0], vertices[2], 5,
+        true, false, parentID, zoneID);
+      player.SendConsoleCommand("ddraw.arrow",
+        duration, Color.blue,  vertices[0], vertices[3], 5,
+        true, false, parentID, zoneID);
+    }
+    else
+    {
+      player.SendConsoleCommand("ddraw.arrow",
+        duration, Color.red,   vertices[0], vertices[1], 5);
+      player.SendConsoleCommand("ddraw.arrow",
+        duration, Color.green, vertices[0], vertices[2], 5);
+      player.SendConsoleCommand("ddraw.arrow",
+        duration, Color.blue,  vertices[0], vertices[3], 5);
+    }
+
+    DrawText(
+      player, duration, Color.red,   vertices[1], "+x", textScale,
+      parentID, zoneID);
+    DrawText(
+      player, duration, Color.green, vertices[2], "+y", textScale,
+      parentID, zoneID);
+    DrawText(
+      player, duration, Color.blue,  vertices[3], "+z", textScale,
+      parentID, zoneID);
+  }
+
+  private static void DrawCube(
+    BasePlayer player, float duration, Color color,
+    Vector3 pos, Vector3 size, float rotation, float textScale,
+    ulong parentID = 0UL, string zoneID = "")
+  {
+    Quaternion q = new(0f, rotation, 0f, 1f);
+    if (DrawParented(parentID, zoneID))
+    {
+      player.SendConsoleCommand("ddraw.box",
+        duration, color, pos, size.ToString(), q,
+        true, false, parentID, zoneID);
+    }
+    else
+    {
+      player.SendConsoleCommand("ddraw.box",
+        duration, color, pos, size.ToString(), q);
+    }
+
+    var halfLengths = size / 2;
+    DrawAxes(
+      player, duration, pos, halfLengths, rotation, textScale, parentID,
+      zoneID);
   }
 
   private static void DrawSphere(
     BasePlayer player, float duration, Color color,
-    Vector3 pos, float radius, float rotation)
+    Vector3 pos, float radius, float rotation, float textScale,
+    ulong parentID = 0UL, string zoneID = "")
   {
-    player.SendConsoleCommand(
-      "ddraw.sphere", duration, color, pos, radius);
-
-    // axes
-    Vector3[] vertices =
+    if (DrawParented(parentID, zoneID))
     {
-      new(pos.x,          pos.y,          pos.z),
-      new(pos.x + radius, pos.y,          pos.z),
-      new(pos.x,          pos.y + radius, pos.z),
-      new(pos.x,          pos.y,          pos.z + radius)
-    };
-
-    // rotate all the points
-    var rotQ = Quaternion.Euler(0, rotation, 0);
-    for (var i = 0; i < vertices.Length; ++i)
+      player.SendConsoleCommand("ddraw.sphere", duration, color, pos, radius,
+        true, false, parentID, zoneID);
+    }
+    else
     {
-      vertices[i] = (rotQ * (vertices[i] - pos)) + pos;
+      player.SendConsoleCommand("ddraw.sphere", duration, color, pos, radius);
     }
 
-    player.SendConsoleCommand(
-      "ddraw.arrow", duration, Color.red,   vertices[0], vertices[1], 5);
-    player.SendConsoleCommand(
-      "ddraw.arrow", duration, Color.green, vertices[0], vertices[2], 5);
-    player.SendConsoleCommand(
-      "ddraw.arrow", duration, Color.blue,  vertices[0], vertices[3], 5);
-    player.SendConsoleCommand(
-      "ddraw.text",  duration, Color.red,    vertices[1], "+x");
-    player.SendConsoleCommand(
-      "ddraw.text",  duration, Color.green,  vertices[2], "+y");
-    player.SendConsoleCommand(
-      "ddraw.text",  duration, Color.blue,   vertices[3], "+z");
+    Vector3 halfLengths = new(radius, radius, radius);
+    DrawAxes(
+      player, duration, pos, halfLengths, rotation, textScale, parentID,
+      zoneID);
+  }
+
+  private static void DrawText(
+    BasePlayer player, float duration, Color color,
+    Vector3 pos, string text, float textScale,
+    ulong parentID = 0UL, string zoneID = "")
+  {
+    if (DrawParented(parentID, zoneID))
+    {
+      player.SendConsoleCommand("ddraw.text",
+        duration, color, pos, text, true, false, textScale, parentID, zoneID);
+      return;
+    }
+    player.SendConsoleCommand("ddraw.text",
+      duration, color, pos, text, true, false, textScale);
   }
 
   private void CommandHelp(IPlayer iPlayer)
@@ -4225,28 +4230,43 @@ public class DynamicPVP : RustPlugin
         SphereCubeParentDynamicZone => Color.blue,
         _                           => Color.red
       };
+      var textScale = _configData.Chat.ShowTextScale;
+      var zoneParent = zoneData.transform.parent?.gameObject.ToBaseEntity();
+      var zoneParentID =
+        zoneParent?.gameObject.ToBaseEntity()?.net?.ID.Value ?? 0UL;
+      var showDuration = _configData.Chat.ShowDuration;
+      var drawParented = zoneParent && DrawParented(zoneParentID, zoneId);
+      var pos = zoneData.transform.position;
+      var rot = 0f;
+      if (drawParented)
+      {
+        // calculate rough offset between parent and zone
+        pos -= zoneParent.transform.position;
+      }
+      else
+      {
+        // grab zone rotation
+        rot = zoneData.transform.eulerAngles.y;
+      }
 
       switch (zoneData.collider)
       {
         case BoxCollider b:
           DrawCube(
-            player, _configData.Chat.ShowDuration, zoneColor,
-            zoneData.transform.position, b.size,
-            zoneData.transform.eulerAngles.y);
+            player, showDuration, zoneColor, pos, b.size, rot, textScale,
+            zoneParentID, zoneId);
           break;
 
         case SphereCollider s:
           DrawSphere(
-            player, _configData.Chat.ShowDuration, zoneColor,
-            zoneData.transform.position, s.radius,
-            zoneData.transform.eulerAngles.y);
+            player, showDuration, zoneColor, pos, s.radius, rot, textScale,
+            zoneParentID, zoneId);
           break;
       }
 
-      player.SendConsoleCommand(
-        "ddraw.text", _configData.Chat.ShowDuration, zoneColor,
-        zoneData.transform.position,
-        $"{zoneId}\n{baseEvent.GetName()}");
+      DrawText(
+        player, showDuration, zoneColor, pos,
+        $"{zoneId}\n{baseEvent.GetName()}", textScale, zoneParentID, zoneId);
     }
   }
 
@@ -4390,6 +4410,58 @@ public class DynamicPVP : RustPlugin
 
   #region ConfigurationFile
 
+  public class Vector3Converter : JsonConverter
+  {
+    private static float Round(float value) =>
+      Mathf.Sign(value) * Mathf.Round(Mathf.Abs(value) * 1000f) / 1000f;
+
+    public override bool CanConvert(Type objectType) =>
+      objectType == typeof(Vector3);
+
+    public override void WriteJson(
+      JsonWriter writer, object value, JsonSerializer serializer)
+    {
+      if (value is not Vector3 v)
+        throw new NotImplementedException($"Cannot convert {value?.GetType()}");
+      // write only x, y, and z values
+      writer.WriteStartObject();
+      writer.WritePropertyName("x");
+      writer.WriteValue(Round(v.x));
+      writer.WritePropertyName("y");
+      writer.WriteValue(Round(v.y));
+      writer.WritePropertyName("z");
+      writer.WriteValue(Round(v.z));
+      writer.WriteEndObject();
+    }
+
+    public override object ReadJson(
+      JsonReader reader, Type objectType, object existingValue,
+      JsonSerializer serializer)
+    {
+      var x = 0.0f;
+      var y = 0.0f;
+      var z = 0.0f;
+
+      while (reader.Read() && reader.TokenType != JsonToken.EndObject)
+      {
+        // skip to next property name
+        if (reader.TokenType != JsonToken.PropertyName) continue;
+        var propName = reader.Value?.ToString();
+        // read property value
+        reader.Read();
+        // process x, y, or z field
+        switch (propName)
+        {
+          case "x": x = Round(Convert.ToSingle(reader.Value)); break;
+          case "y": y = Round(Convert.ToSingle(reader.Value)); break;
+          case "z": z = Round(Convert.ToSingle(reader.Value)); break;
+        }
+      }
+
+      return new Vector3(x, y, z);
+    }
+  }
+
   private ConfigData _configData;
 
   private sealed class ConfigData
@@ -4467,6 +4539,9 @@ public class DynamicPVP : RustPlugin
 
     [JsonProperty(PropertyName = "Zone Show Duration (in seconds)")]
     public float ShowDuration { get; set; } = 15.0f;
+
+    [JsonProperty(PropertyName = "Zone Show Text Scale")]
+    public float ShowTextScale { get; set; } = 1.0f;
   }
 
   private sealed class GeneralEventSettings
@@ -4476,6 +4551,9 @@ public class DynamicPVP : RustPlugin
 
     [JsonProperty(PropertyName = "Patrol Helicopter Event")]
     public HelicopterEvent PatrolHelicopter { get; set; } = new();
+
+    [JsonProperty(PropertyName = "Satellite Crash Event")]
+    public SatelliteEvent SatelliteCrash { get; set; } = new();
 
     [JsonProperty(PropertyName = "Supply Signal Event")]
     public SupplySignalEvent SupplySignal { get; set; } = new();
@@ -4571,20 +4649,26 @@ public class DynamicPVP : RustPlugin
     public DomeSettings DomeData { get; set; } = new();
 
     // this is a temporary list to support migration from obsolete dome settings
-    [JsonIgnore] public static List<DomeEvent> _domeEventsToCheck;
+    [JsonIgnore]
+    public static List<DomeEvent> DomeEventsToCheck { get; set; }
 
     // self-register all instances for obsolete data migration check
     protected DomeEvent()
     {
       // lazily instantiate
-      _domeEventsToCheck ??= new List<DomeEvent>();
-      _domeEventsToCheck?.Add(this);
+      DomeEventsToCheck ??= new List<DomeEvent>();
+      DomeEventsToCheck.Add(this);
     }
 
     public static void Migrate()
     {
+      if (null == DomeEventsToCheck)
+      {
+        return;
+      }
+
       // 4.9.0 dome settings migration check
-      foreach (var domeEvent in _domeEventsToCheck)
+      foreach (var domeEvent in DomeEventsToCheck)
       {
         switch (domeEvent.ObeDomesEnabled)
         {
@@ -4605,7 +4689,7 @@ public class DynamicPVP : RustPlugin
         domeEvent.ObeDomesDarkness = null;
       }
       // clear the list; it may get reused for both config and data files
-      _domeEventsToCheck.Clear();
+      DomeEventsToCheck.Clear();
     }
   }
 
@@ -4655,11 +4739,13 @@ public class DynamicPVP : RustPlugin
     public string ZoneId { get; set; } = "";
 
     [JsonProperty(PropertyName = "Transform Position", Order = 42)]
+    [JsonConverter(typeof(Vector3Converter))]
     public Vector3 TransformPosition { get; set; }
 
     public override BaseDynamicZone GetDynamicZone() => DynamicZone;
 
-    [JsonIgnore] public GeneralEventType GeneralEventType =>
+    [JsonIgnore]
+    public GeneralEventType GeneralEventType =>
       GeneralEventType.ExcavatorIgnition;
 
     public override string GetName() =>
@@ -4677,11 +4763,13 @@ public class DynamicPVP : RustPlugin
     public string ZoneId { get; set; } = "";
 
     [JsonProperty(PropertyName = "Transform Position", Order = 47)]
+    [JsonConverter(typeof(Vector3Converter))]
     public Vector3 TransformPosition { get; set; }
 
     public override BaseDynamicZone GetDynamicZone() => DynamicZone;
 
-    [JsonIgnore] public string EventName { get; set; }
+    [JsonIgnore]
+    public string EventName { get; set; }
 
     public override string GetName() => EventName;
   }
@@ -4700,11 +4788,13 @@ public class DynamicPVP : RustPlugin
     public string ZoneId { get; set; } = "";
 
     [JsonProperty(PropertyName = "Position", Order = 53)]
+    [JsonConverter(typeof(Vector3Converter))]
     public Vector3 Position { get; set; }
 
     public override BaseDynamicZone GetDynamicZone() => DynamicZone;
 
-    [JsonIgnore] public string EventName { get; set; }
+    [JsonIgnore]
+    public string EventName { get; set; }
 
     public override string GetName() => EventName;
   }
@@ -4730,25 +4820,34 @@ public class DynamicPVP : RustPlugin
 
   public class CustomTimedEvent : SphereCubeTimedEvent
   {
-    [JsonIgnore] public string EventName { get; set; }
+    [JsonIgnore]
+    public string EventName { get; set; }
 
     public override string GetName() => EventName;
   }
 
   public class BradleyEvent : SphereCubeTimedEvent, IGeneralEvent
   {
-    [JsonIgnore] public GeneralEventType GeneralEventType =>
-      GeneralEventType.Bradley;
+    [JsonIgnore]
+    public GeneralEventType GeneralEventType => GeneralEventType.Bradley;
 
     public override string GetName() => nameof(GeneralEventType.Bradley);
   }
 
   public class HelicopterEvent : SphereCubeTimedEvent, IGeneralEvent
   {
-    [JsonIgnore] public GeneralEventType GeneralEventType =>
-      GeneralEventType.Helicopter;
+    [JsonIgnore]
+    public GeneralEventType GeneralEventType => GeneralEventType.Helicopter;
 
     public override string GetName() => nameof(GeneralEventType.Helicopter);
+  }
+
+  public class SatelliteEvent : SphereCubeTimedEvent, IGeneralEvent
+  {
+    [JsonIgnore]
+    public GeneralEventType GeneralEventType => GeneralEventType.Satellite;
+
+    public override string GetName() => nameof(GeneralEventType.Satellite);
   }
 
   // Hackable Crate general event
@@ -4779,8 +4878,8 @@ public class DynamicPVP : RustPlugin
     [JsonProperty(PropertyName = "Excluding Hackable Crate on Ghost Ship", Order = 76)]
     public bool ExcludeGhostShip { get; set; } = true;
 
-    [JsonIgnore] public GeneralEventType GeneralEventType =>
-      GeneralEventType.HackableCrate;
+    [JsonIgnore]
+    public GeneralEventType GeneralEventType => GeneralEventType.HackableCrate;
 
     public override BaseDynamicZone GetDynamicZone() => DynamicZone;
 
@@ -4818,16 +4917,16 @@ public class DynamicPVP : RustPlugin
 
   public class SupplySignalEvent : SupplyDropEvent, IGeneralEvent
   {
-    [JsonIgnore] public GeneralEventType GeneralEventType =>
-      GeneralEventType.SupplySignal;
+    [JsonIgnore]
+    public GeneralEventType GeneralEventType => GeneralEventType.SupplySignal;
 
     public override string GetName() => nameof(GeneralEventType.SupplySignal);
   }
 
   public class TimedSupplyEvent : SupplyDropEvent, IGeneralEvent
   {
-    [JsonIgnore] public GeneralEventType GeneralEventType =>
-      GeneralEventType.TimedSupply;
+    [JsonIgnore]
+    public GeneralEventType GeneralEventType => GeneralEventType.TimedSupply;
 
     public override string GetName() => nameof(GeneralEventType.TimedSupply);
   }
@@ -4860,8 +4959,8 @@ public class DynamicPVP : RustPlugin
 
     public override BaseDynamicZone GetDynamicZone() => DynamicZone;
 
-    [JsonIgnore] public GeneralEventType GeneralEventType =>
-      GeneralEventType.CargoShip;
+    [JsonIgnore]
+    public GeneralEventType GeneralEventType => GeneralEventType.CargoShip;
 
     public override string GetName() => nameof(GeneralEventType.CargoShip);
   }
@@ -4877,12 +4976,13 @@ public class DynamicPVP : RustPlugin
     };
 
     [JsonProperty(PropertyName = "Transform Position", Order = 101)]
+    [JsonConverter(typeof(Vector3Converter))]
     public Vector3 TransformPosition { get; set; }
 
     public override BaseDynamicZone GetDynamicZone() => DynamicZone;
 
-    [JsonIgnore] public GeneralEventType GeneralEventType =>
-      GeneralEventType.GhostShip;
+    [JsonIgnore]
+    public GeneralEventType GeneralEventType => GeneralEventType.GhostShip;
 
     public override string GetName() => nameof(GeneralEventType.GhostShip);
   }
@@ -4895,12 +4995,13 @@ public class DynamicPVP : RustPlugin
     public SphereCubeAutoGeoDynamicZone DynamicZone { get; set; } = new();
 
     [JsonProperty(PropertyName = "Transform Position", Order = 106)]
+    [JsonConverter(typeof(Vector3Converter))]
     public Vector3 TransformPosition { get; set; }
 
     public override BaseDynamicZone GetDynamicZone() => DynamicZone;
 
-    [JsonIgnore] public GeneralEventType GeneralEventType =>
-      GeneralEventType.DeepSeaIsland;
+    [JsonIgnore]
+    public GeneralEventType GeneralEventType => GeneralEventType.DeepSeaIsland;
 
     public override string GetName() => nameof(GeneralEventType.DeepSeaIsland);
   }
@@ -4916,12 +5017,13 @@ public class DynamicPVP : RustPlugin
     };
 
     [JsonProperty(PropertyName = "Transform Position", Order = 111)]
+    [JsonConverter(typeof(Vector3Converter))]
     public Vector3 TransformPosition { get; set; }
 
     public override BaseDynamicZone GetDynamicZone() => DynamicZone;
 
-    [JsonIgnore] public GeneralEventType GeneralEventType =>
-      GeneralEventType.IslandCannon;
+    [JsonIgnore]
+    public GeneralEventType GeneralEventType => GeneralEventType.IslandCannon;
 
     public override string GetName() => nameof(GeneralEventType.IslandCannon);
   }
@@ -4930,7 +5032,8 @@ public class DynamicPVP : RustPlugin
 
   public interface IGeneralEvent
   {
-    [JsonIgnore] public GeneralEventType GeneralEventType { get; }
+    [JsonIgnore]
+    public GeneralEventType GeneralEventType { get; }
   }
 
   public interface ITimedDisable
@@ -5050,6 +5153,7 @@ public class DynamicPVP : RustPlugin
     public float Radius { get; set; }
 
     [JsonProperty(PropertyName = "Zone Size", Order = 301)]
+    [JsonConverter(typeof(Vector3Converter))]
     public Vector3 Size { get; set; }
 
     [JsonProperty(PropertyName = "Zone Rotation", Order = 302)]
@@ -5094,9 +5198,11 @@ public class DynamicPVP : RustPlugin
     public float Radius { get; set; }
 
     [JsonProperty(PropertyName = "Zone Size", Order = 401)]
+    [JsonConverter(typeof(Vector3Converter))]
     public Vector3 Size { get; set; }
 
     [JsonProperty(PropertyName = "Transform Position", Order = 402)]
+    [JsonConverter(typeof(Vector3Converter))]
     public Vector3 Center { get; set; }
 
     public override string[] ZoneSettings(Transform transform = null) =>
