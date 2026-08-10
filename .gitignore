@@ -7,9 +7,11 @@
 !KillHeliVote.cs
 !MagicDeepSeaPanel.cs
 !MagicGiantExcavatorPanel.cs
+!MagicPowerPlantPanel.cs
 !MagicTravelingVendorPanel.cs
 !OfflineRaidProtection.cs
 !PlayerBasePvpZones.cs
+!PlayerSafetyNet.cs
 !RecyclerOverride.cs
 !ScarecrowWrangler.cs
 !ShareTheRoad.cs

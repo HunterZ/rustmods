@@ -199,7 +199,7 @@ public class MagicDeepSeaPanel : RustPlugin
     var deepSeaManager = DeepSeaManager.ServerInstance;
     if (!deepSeaManager)
     {
-      PrintError("GetPanel(): DeepSeaManager.ServerInstance is null");
+      PrintError("CheckUpdate(): DeepSeaManager.ServerInstance is null");
       return;
     }
 

@@ -179,7 +179,7 @@ public class SuperPVxInfo : RustPlugin
     if (TimerValid(t)) t.Destroy();
   }
 
-  private static bool TimerValid(Timer t) => false == t?.Destroyed;
+  private static bool TimerValid(Timer t) => t is { Destroyed: false };
 
   #endregion Utility Methods
 

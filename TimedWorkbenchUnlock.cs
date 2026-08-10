@@ -8,15 +8,16 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Timed Workbench Unlock", "HunterZ", "2.3.0")]
+[Info("Timed Workbench Unlock", "HunterZ", "2.4.0")]
 [Description("Provides timed/manual/disabled unlocking of workbenches")]
 class TimedWorkbenchUnlock : RustPlugin
 {
   #region Vars
 
-  // ordered list of workbench IDs
-  private static readonly int[] WorkbenchID = {
-    1524187186, -41896755, -1607980696
+  private readonly int[][] _workbenchIDsByTier = {
+    new[]{ 210787554, 1524187186 },
+    new[]{ -41896755 },
+    new[]{ -1607980696 }
   };
 
   // periodic global status broadcast timer
@@ -26,13 +27,15 @@ class TimedWorkbenchUnlock : RustPlugin
   private ConfigData _configData;
 
   // "can't craft" warning suppression timers by userID
-  private readonly Dictionary<ulong, Timer> _craftWarned = new();
+  private readonly Dictionary<ulong, (int, Timer)> _craftWarned = new();
 
   // string builder for producing status messages
   private readonly StringBuilder _statusBuilder = new();
 
   // workbench unlock announcement broadcast timers
   private readonly Timer[] _unlockTimers = { null, null, null };
+
+  private readonly Dictionary<string, string> _prefixedPerms = new();
 
   #region Permission Strings
 
@@ -51,13 +54,21 @@ class TimedWorkbenchUnlock : RustPlugin
 
   #region Utilities
 
+  private static void DestroyTimer(ref Timer t)
+  {
+    if (TimerValid(t)) t.Destroy();
+    t = null;
+  }
+
+  private static bool TimerValid(Timer t) => t is { Destroyed: false };
+
   // get time since wipe in seconds
   // if positive optional parameter is specified, it is used as a passthrough
   private float GetWipeElapsedSeconds(float wipeElapsedSeconds = -1.0f)
   {
     if (null == _configData) return 0;
     return wipeElapsedSeconds > 0 ? wipeElapsedSeconds : Convert.ToSingle(
-      (DateTime.UtcNow - _configData.LastWipeUTC).TotalSeconds);
+      (DateTime.UtcNow - _configData.LastWipeUtc).TotalSeconds);
   }
 
   // returns unlock status for given workbench index (0-2 => level 1-3)
@@ -118,18 +129,10 @@ class TimedWorkbenchUnlock : RustPlugin
       timer.Once(status, () => { ReportUnlock(index); }) : null;
   }
 
-  // destroy existing broadcast timer (if any)
-  private void DestroyBroadcastTimer()
-  {
-    if (_broadcastTimer is not { Destroyed: false }) return;
-    _broadcastTimer.Destroy();
-    _broadcastTimer = null;
-  }
-
   // (re)set broadcast timer to fire at configured interval
   private void SetBroadcastTimer()
   {
-    DestroyBroadcastTimer();
+    DestroyTimer(ref _broadcastTimer);
     // only set new timer if config value is positive (i.e. broadcast period
     //  in seconds)
     var broadcastConfig = _configData?.BroadcastConfig ?? 0;
@@ -145,10 +148,7 @@ class TimedWorkbenchUnlock : RustPlugin
   {
     for (var i = 0; i < _unlockTimers.Length; ++i)
     {
-      var unlockTimer = _unlockTimers[i];
-      if (unlockTimer is not { Destroyed: false }) continue;
-      unlockTimer.Destroy();
-      _unlockTimers[i] = null;
+      DestroyTimer(ref _unlockTimers[i]);
     }
   }
 
@@ -167,11 +167,9 @@ class TimedWorkbenchUnlock : RustPlugin
 
   private void DestroyWarnTimer(ulong userId)
   {
-    if (_craftWarned.Remove(userId, out var wTimer) &&
-        wTimer is { Destroyed: false })
-    {
-      wTimer.Destroy();
-    }
+    if (!_craftWarned.Remove(userId, out var data)) return;
+    var warnTimer = data.Item2;
+    DestroyTimer(ref warnTimer);
   }
 
   // generate color locked/unlocked status text for twinfo command
@@ -198,7 +196,14 @@ class TimedWorkbenchUnlock : RustPlugin
 
   // return a prefixed version of the given permission string
   // this is done to avoid hard-coding it, which would be a maintenance issue
-  private string PrefixPermission(string perm) => Name.ToLower() + "." + perm;
+  private string PrefixPermission(string perm)
+  {
+    if (!_prefixedPerms.TryGetValue(perm, out var prefixedPerm))
+    {
+      _prefixedPerms[perm] = prefixedPerm = Name.ToLower() + "." + perm;
+    }
+    return prefixedPerm;
+  }
 
   // report user-friendly detailed status
   private void ReportStatus(IPlayer player)
@@ -255,72 +260,87 @@ class TimedWorkbenchUnlock : RustPlugin
       null, "UnlockNotice", (index + 1).ToString(CultureInfo.CurrentCulture));
   }
 
-  // return whether crafting of the given item ID should be allowed
-  private bool AllowCraftAttempt(BasePlayer player, int itemid)
+  // return tier-1 for given workbench ID, or -1 if not a workbench
+  private int WorkbenchIndex(int itemID)
   {
-    // do nothing if any of the following are true:
-    // - player reference invalid
-    // - player in Tutorial Island
-    // - player crafting something other than a workbench
-    // - player has skiplock permission (note: admins not exempt by default)
-    if (!player ||
-        player.IsInTutorial ||
-        !WorkbenchID.Contains(itemid) ||
-        player.IPlayer.HasPermission(PrefixPermission(PermissionSkipLock)))
+    for (var tm1 = 0; tm1 < _workbenchIDsByTier.Length; ++tm1)
+    {
+      var wbTm1 = _workbenchIDsByTier[tm1];
+      if (Array.IndexOf(wbTm1, itemID) >= 0) return tm1;
+    }
+
+    return -1;
+  }
+
+  // return whether crafting of the given item ID should be allowed
+  private bool AllowAttempt(BasePlayer player, int itemID)
+  {
+    if (player is not { IsInTutorial: false } || true ==
+        player.IPlayer?.HasPermission(PrefixPermission(PermissionSkipLock)))
     {
       return true;
     }
 
-    // get status
-    var wbIndex = Array.IndexOf(WorkbenchID, itemid);
+    var wbIndex = WorkbenchIndex(itemID);
+    if (wbIndex < 0) return true; // not a workbench
+
     var status = GetUnlockStatus(wbIndex);
+    if (0 == status) return true; // unlocked
 
-    // do nothing if workbench is unlocked
-    if (0 == status) return true;
-
-    // warn player
-    if (_configData.ReportAsSound) WarnSound(player);
-
-    // abort here if text reports disabled, to avoid building time string
-    if (status > 0 && !_configData.ReportAsChat && !_configData.ReportAsToast)
-    {
-      return false;
-    }
-
-    var timeString = status > 0 ?
-      TimeSpan.FromSeconds(status).ToString("g", CultureInfo.CurrentCulture) :
-      null;
-
-    if (_configData.ReportAsChat)
-    {
-      WarnChat(player, timeString);
-    }
-
-    if (_configData.ReportAsToast)
-    {
-      WarnToast(player, timeString);
-    }
+    Warn(player, wbIndex, status);
 
     // block crafting
     return false;
   }
 
-  private void WarnChat(BasePlayer player, string timeString = null)
+  private void Warn(BasePlayer player, int index, int status)
   {
-    // abort if chat spam suppression timer active for player
-    var userId = player.userID.Get();
-    if (_craftWarned.ContainsKey(userId)) return;
+    if (null == player?.IPlayer) return;
 
-    SendMessage(
-      player.IPlayer,
-      null == timeString ? "CannotCraftManual" : "CannotCraft",
-      timeString);
+    // warn player (no spam protect on this)
+    if (_configData.ReportAsSound) WarnSound(player);
 
-    // set chat spam suppression timer
-    _craftWarned.Add(userId, timer.Once(5.0f, () =>
+    // abort here if text reports disabled for performance
+    if (!_configData.ReportAsChat && !_configData.ReportAsToast)
     {
-      DestroyWarnTimer(userId);
-    }));
+      return;
+    }
+
+    // abort if warn spam suppression already active for player+index
+    var userId = player.userID.Get();
+    var warned = _craftWarned.TryGetValue(userId, out var data);
+    if (warned && index == data.Item1) return;
+
+    var timeString = status > 0 ?
+      TimeSpan.FromSeconds(status).ToString("g", CultureInfo.CurrentCulture) :
+      null;
+    var message = null == timeString ? "CannotCraftManual" : "CannotCraft";
+
+    if (_configData is { ReportAsChat: true })
+    {
+      SendMessage(player.IPlayer, message, timeString);
+    }
+
+    if (_configData is { ReportAsToast: true })
+    {
+      SendToast(player.IPlayer, message, timeString);
+    }
+
+    // (re)set chat spam suppression timer
+    if (warned)
+    {
+      // warn suppress timer was active for different workbench level
+      // update record and reset timer
+      var oldTimer = data.Item2;
+      _craftWarned[userId] = (index, oldTimer);
+      oldTimer.Reset(5.0f);
+    }
+    else
+    {
+      // add new record
+      _craftWarned.Add(userId,
+        (index, timer.Once(5.0f, () => { DestroyWarnTimer(userId); })));
+    }
   }
 
   private static void WarnSound(BasePlayer player)
@@ -328,14 +348,6 @@ class TimedWorkbenchUnlock : RustPlugin
     Effect.server.Run(
       "assets/prefabs/locks/keypad/effects/lock.code.denied.prefab",
       player.transform.position);
-  }
-
-  private void WarnToast(BasePlayer player, string timeString = null)
-  {
-    SendToast(
-      player.IPlayer,
-      null == timeString ? "CannotCraftManual" : "CannotCraft",
-      timeString);
   }
 
   #endregion Utilities
@@ -433,6 +445,29 @@ class TimedWorkbenchUnlock : RustPlugin
   // called by Oxide after config load
   protected void Init()
   {
+    if (null == _configData)
+    {
+      PrintError("Init(): ERROR: Config not loaded; aborting");
+      return;
+    }
+
+    if (_configData.WbConfig.Length != _workbenchIDsByTier.Length)
+    {
+      PrintWarning($"Init(): Got {_configData.WbConfig.Length} workbench unlock settings, but expected {_workbenchIDsByTier.Length}; resetting to default list");
+      _configData.WbConfig = ConfigData.DefaultWbSeconds;
+    }
+
+    var serverWipeTime = SaveRestore.SaveCreatedTime;
+    if (_configData.LastWipeUtc < serverWipeTime)
+    {
+      _configData.LastWipeUtc = serverWipeTime;
+      Puts("Init(): Wipe detected - reset wipe time to " + serverWipeTime.ToString("R", CultureInfo.CurrentCulture));
+    }
+
+    // unconditionally save config here - this handles changes to the above,
+    //  changes on version update, etc.
+    SaveConfig();
+
     SetBroadcastTimer();
     SetUnlockTimers();
 
@@ -466,24 +501,40 @@ class TimedWorkbenchUnlock : RustPlugin
   protected void Unload()
   {
     // clean up any timers
-    DestroyBroadcastTimer();
+    DestroyTimer(ref _broadcastTimer);
     DestroyUnlockTimers();
-    foreach (var (_, warnTimer) in _craftWarned)
+    foreach (var (_, (_, warnTimer)) in _craftWarned)
     {
-      if (warnTimer is not { Destroyed: false }) continue;
-      warnTimer.Destroy();
+      var temp = warnTimer;
+      DestroyTimer(ref temp);
     }
     _craftWarned.Clear();
   }
 
   private object CanCraft(
     PlayerBlueprints playerBlueprints, ItemDefinition itemDefinition) =>
-    _configData is not { BlockCraft: true } || AllowCraftAttempt(
-      playerBlueprints.baseEntity, itemDefinition.itemid) ? null : false;
+    _configData is not { BlockCraft: true } ||
+    AllowAttempt(playerBlueprints.baseEntity, itemDefinition.itemid) ?
+      null : false;
+
+  // TODO: on Carbon, CanBuild is called instead - check with Oxide to see if
+  //  this hook is effectively obsolete
+  private object CanDeployItem(BasePlayer player, Deployer instance) =>
+    _configData is not { BlockDeploy: true } ||
+    AllowAttempt(player, instance?.GetOwnerItemDefinition()?.itemid ?? 0) ?
+      null : new NonNull();
 
   private object CanResearchItem(BasePlayer player, Item item) =>
-    _configData is not { BlockResearch: true } || AllowCraftAttempt(
-      player, item.info.itemid) ? null : false;
+    _configData is not { BlockResearch: true } ||
+    AllowAttempt(player, item?.info?.itemid ?? 0) ?
+      null : new NonNull();
+
+  private object CanBuild(Planner instance) =>
+    _configData is not { BlockDeploy: true } ||
+    AllowAttempt(
+      instance?.GetOwnerPlayer(),
+      instance?.GetOwnerItemDefinition()?.itemid ?? 0) ?
+      null : new NonNull();
 
   private void OnPlayerConnected(BasePlayer player) =>
     ReportStatus(player.IPlayer);
@@ -626,7 +677,7 @@ class TimedWorkbenchUnlock : RustPlugin
     }
 
     var currentTime = DateTime.UtcNow;
-    _configData.LastWipeUTC = currentTime;
+    _configData.LastWipeUtc = currentTime;
     SaveConfig();
     SetUnlockTimers();
 
@@ -638,6 +689,8 @@ class TimedWorkbenchUnlock : RustPlugin
 
   #region Configuration
 
+  private struct NonNull {}
+
   // need to append logic to check for map wipe since last load
   protected override void LoadConfig()
   {
@@ -647,7 +700,7 @@ class TimedWorkbenchUnlock : RustPlugin
       _configData = Config.ReadObject<ConfigData>();
       if (null == _configData)
       {
-        throw new JsonException("ReadObject() returned null");
+        LoadDefaultConfig();
       }
     }
     catch (Exception ex)
@@ -655,23 +708,6 @@ class TimedWorkbenchUnlock : RustPlugin
       PrintWarning($"LoadConfig(): Exception while loading configuration file:\n{ex}");
       LoadDefaultConfig();
     }
-
-    if (null == _configData) return;
-
-    if (_configData.WbConfig.Length != 3)
-    {
-      PrintWarning($"LoadConfig(): Got {_configData.WbConfig.Length} workbench unlock settings, but expected 3; resetting to default list");
-      _configData.WbConfig = ConfigData.DefaultWbSeconds;
-    }
-
-    var serverWipeTime = SaveRestore.SaveCreatedTime;
-    if (_configData.LastWipeUTC < serverWipeTime)
-    {
-      _configData.LastWipeUTC = serverWipeTime;
-      Puts("LoadConfig(): Wipe detected - reset wipe time to " + serverWipeTime.ToString("R", CultureInfo.CurrentCulture));
-    }
-
-    SaveConfig();
   }
 
   protected override void LoadDefaultConfig()
@@ -680,7 +716,11 @@ class TimedWorkbenchUnlock : RustPlugin
     _configData = new ConfigData();
   }
 
-  protected override void SaveConfig() => Config.WriteObject(_configData);
+  protected override void SaveConfig()
+  {
+    Puts("SaveConfig(): Saving config file");
+    Config.WriteObject(_configData);
+  }
 
   // config file data class
   private sealed class ConfigData
@@ -693,7 +733,7 @@ class TimedWorkbenchUnlock : RustPlugin
     public int BroadcastConfig { get; set; } = 300;
 
     [JsonProperty(PropertyName = "Time that current wipe started (UTC)")]
-    public DateTime LastWipeUTC { get; set; } = SaveRestore.SaveCreatedTime;
+    public DateTime LastWipeUtc { get; set; } = SaveRestore.SaveCreatedTime;
 
     [JsonProperty(PropertyName = "Workbench unlock times (seconds from start of wipe, or 0 for unlocked, or -1 for permanently locked)")]
     public int[] WbConfig { get; set; } = DefaultWbSeconds;
@@ -701,16 +741,19 @@ class TimedWorkbenchUnlock : RustPlugin
     [JsonProperty(PropertyName = "Block crafting of locked workbench(es)")]
     public bool BlockCraft = true;
 
+    [JsonProperty(PropertyName = "Block deploying of locked workbench(es)")]
+    public bool BlockDeploy = true;
+
     [JsonProperty(PropertyName = "Block researching of locked workbench(es)")]
     public bool BlockResearch = true;
 
-    [JsonProperty(PropertyName = "Report craft failure as chat message")]
+    [JsonProperty(PropertyName = "Report blocking via chat message")]
     public bool ReportAsChat = false;
 
-    [JsonProperty(PropertyName = "Report craft failure as sound effect")]
+    [JsonProperty(PropertyName = "Report blocking via sound effect")]
     public bool ReportAsSound = true;
 
-    [JsonProperty(PropertyName = "Report craft failure as toast message")]
+    [JsonProperty(PropertyName = "Report blocking via toast message")]
     public bool ReportAsToast = true;
   }
 
