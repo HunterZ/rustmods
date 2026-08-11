@@ -317,7 +317,7 @@ public class PlayerSafetyNet : RustPlugin
     _sb.Clear().Append(Name).Append(" statistics (looked/bounced):");
     if (_stats.IsEmpty())
     {
-      _sb.AppendLine(" <none yet>");
+      _sb.AppendLine(" [none yet]");
       Puts(_sb.ToString());
       _sb.Clear();
       return;
