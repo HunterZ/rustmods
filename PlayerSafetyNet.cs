@@ -8,7 +8,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Player Safety Net", "HunterZ", "0.0.1")]
+[Info("Player Safety Net", "HunterZ", "0.0.2")]
 public class PlayerSafetyNet : RustPlugin
 {
   #region Data
@@ -36,12 +36,12 @@ public class PlayerSafetyNet : RustPlugin
 
   #region Helpers
 
-  private static bool IsCliff(string name) =>
+  private static bool IsFormation(string name) =>
     true == name?.StartsWith("cliff") ||
     true == name?.StartsWith("rock_formation_");
 
   private static bool IsBlocking(RaycastHit hit, string name) =>
-    IsCliff(name) ||
+    IsFormation(name) ||
     hit.IsOnLayer(Layer.Construction) ||
     hit.IsOnLayer(Layer.Deployed);
 
@@ -51,10 +51,10 @@ public class PlayerSafetyNet : RustPlugin
   // returns null on invalid maxDistance or appropriate height not found
   private float? GetTerminalY(
     Vector3 position, Match match, float maxDistance, Blocking blocking,
-    int mask, Vector3 direction)
+    int mask, bool up)
   {
-    direction.x = direction.z = 0f;
-    direction.Normalize();
+    var down = !up;
+    var direction = up ? Vector3.up : Vector3.down;
     var cDist = Match.Closest == match ? MaxDist : -MaxDist;
     float? cY = null;
     // optimization: abort if distance is non-positive
@@ -85,7 +85,7 @@ public class PlayerSafetyNet : RustPlugin
       // ignore terrain if hit is inside a terrain ignore volume or whatever
       // NOTE: GetIgnore() handles checking whether the hit is a terrain one, so
       //  there's no point doing it here as well
-      if (direction.y < 0 && TerrainMeta.Collision.GetIgnore(hit))
+      if (down && TerrainMeta.Collision.GetIgnore(hit))
       {
         continue;
       }
@@ -93,12 +93,13 @@ public class PlayerSafetyNet : RustPlugin
       switch (colliderName)
       {
         case null:
+        case { Length: 0 }:
           break;
         case "Add_To_Height":
         case "Collider":
         // only ignore terrain colliders when looking up
-        case "DeepSea_Bottom" when direction.y > 0:
-        case "Terrain"        when direction.y > 0:
+        case "DeepSea_Bottom" when up:
+        case "Terrain"        when up:
         case "assets/prefabs/player/player.prefab":
         case "junkpile_base":
           continue;
@@ -109,7 +110,7 @@ public class PlayerSafetyNet : RustPlugin
           if (IsBlocking(hit, colliderName)) continue;
           break;
         case Blocking.IgnoreCliff:
-          if (IsCliff(colliderName)) continue;
+          if (IsFormation(colliderName)) continue;
           break;
         case Blocking.Include:
           break;
@@ -117,7 +118,7 @@ public class PlayerSafetyNet : RustPlugin
           if (!IsBlocking(hit, colliderName)) continue;
           break;
         case Blocking.RequireCliff:
-          if (!IsCliff(colliderName)) continue;
+          if (!IsFormation(colliderName)) continue;
           break;
       }
       switch (match)
@@ -130,7 +131,7 @@ public class PlayerSafetyNet : RustPlugin
         case Match.Farthest when hit.distance <= cDist:
           continue;
       }
-      // best match so far; record it
+      // best match so far; record it as a candidate
       cDist = hit.distance;
       cY = position.y + cDist * direction.y;
     }
@@ -140,18 +141,18 @@ public class PlayerSafetyNet : RustPlugin
 
   private float GetClosestSolidAbove(Vector3 position) => GetTerminalY(
     position, Match.Closest, WorldTop - position.y, Blocking.Include,
-    SolidLayerMask, Vector3.up) ?? WorldTop;
+    SolidLayerMask, true) ?? WorldTop;
 
   private float? GetClosestSolidBelow(Vector3 position) => GetTerminalY(
     position, Match.Closest, -WorldBottom + position.y, Blocking.Include,
-    SolidLayerMask, Vector3.down);
+    SolidLayerMask, false);
 
   // finds closest ceiling or top of world above position, then finds closest
   //  appropriate floor below that
   //
   // returns null unless a floor was found whose Y coordinate is above
   //  position.y
-  private float? ShouldMove(Vector3 position, BaseEntity sourceEntity = null)
+  private float? ShouldMove(Vector3 position)
   {
     // abort if in a holiday dungeon etc. for now
     // NOTE: need to allow < WorldBottom because kill check happens late
@@ -164,15 +165,14 @@ public class PlayerSafetyNet : RustPlugin
     {
       // find ceiling or top of world above position
       var ceilingY = GetClosestSolidAbove(position);
-      Vector3 ceilingPos = new(position.x, ceilingY, position.z);
+      var ceilingPos = new Vector3(position.x, ceilingY, position.z);
       // find closest useful floor/terrain below ceiling
-      if (GetClosestSolidBelow(ceilingPos) is { } floorY &&
-          floorY <= ceilingY)
+      if (GetClosestSolidBelow(ceilingPos) is { } floorY && floorY <= ceilingY)
       {
         // return floor if above original position, else null
         return floorY > originalY ? floorY : null;
       }
-      // else no floor found
+      // else no floor of interest found
 
       // abort if ceiling is top of world
       if (ceilingY >= WorldTop)
@@ -182,52 +182,22 @@ public class PlayerSafetyNet : RustPlugin
       }
 
       // try again starting from detected ceiling
-      // last-ditch effort in case player fell out of a hole in the world, e.g.
-      //  train tunnels entrance on a primitive map in non-primitive mode
-      PrintWarning("No floor found, but ceiling is below world top; trying again starting at ceiling");
+      // this is a last-ditch effort in case player fell out of a hole in the
+      //  world with a ceiling above, e.g. train tunnels entrance on a primitive
+      //  map in non-primitive mode
+      PrintWarning($"No floor found, but ceiling is below world top; trying again starting at ceiling position={ceilingPos}");
       position = ceilingPos;
     }
 
     return null;
   }
 
-  // move a player to a new Y position
-  private static void MovePlayerY(BasePlayer player, float newY)
-  {
-    var position = player.transform.position;
-    player.Teleport(new Vector3(position.x, newY, position.z));
-  }
-
   // move a non-player entity to a new Y position
   private static void MoveEntityY(BaseCombatEntity entity, float newY)
   {
     var oldPos = entity.ServerWorldPosition;
+    // note: this should trigger a network update automatically if appropriate
     entity.ServerWorldPosition = new Vector3(oldPos.x, newY, oldPos.z);
-  }
-
-  private static string ToString(Vector3 position) =>
-    $"{position}/{MapHelper.PositionToString(position)}";
-
-  private void BounceEntity<T>(T entity) where T : BaseCombatEntity
-  {
-    if (!entity || entity.HasParent() ||
-        _config.BounceIgnorePrefabs.Contains(entity.PrefabName))
-    {
-      return;
-    }
-    var position = entity.transform.position;
-    if (ShouldMove(position) is not { } newY)
-    {
-      RecordLook($"{entity.GetType()}:{entity.ShortPrefabName}");
-      return;
-    }
-    if (_config.BounceLog &&
-        !_config.LogIgnorePrefabs.Contains(entity.PrefabName))
-    {
-      Puts($"Moving {entity.GetType()} {entity} at {ToString(position)} to new Y={newY} ({newY - position.y})");
-    }
-    MoveEntityY(entity, newY);
-    RecordBounce($"{entity.GetType()}:{entity.ShortPrefabName}");
   }
 
   private void RecordLook(string key, bool bounced = false)
@@ -243,6 +213,32 @@ public class PlayerSafetyNet : RustPlugin
   }
 
   private void RecordBounce(string key) => RecordLook(key, true);
+
+  private static string ToString(Vector3 position) =>
+    $"{position}/{MapHelper.PositionToString(position)}";
+
+  private void BounceEntity<T>(T entity) where T : BaseCombatEntity
+  {
+    if (!entity || entity.HasParent() ||
+        _config.BounceIgnorePrefabs.Contains(entity.PrefabName))
+    {
+      return;
+    }
+    var position = entity.transform.position;
+    var entitySignature = $"{entity.GetType()}:{entity.ShortPrefabName}";
+    if (ShouldMove(position) is not { } newY)
+    {
+      RecordLook(entitySignature);
+      return;
+    }
+    if (_config.BounceLog &&
+        !_config.LogIgnorePrefabs.Contains(entity.PrefabName))
+    {
+      Puts($"Moving {entitySignature} at {ToString(position)} to new Y={newY} ({newY - position.y})");
+    }
+    MoveEntityY(entity, newY);
+    RecordBounce(entitySignature);
+  }
 
   #endregion
 
@@ -343,14 +339,14 @@ public class PlayerSafetyNet : RustPlugin
     var position = player.transform.position;
     if (ShouldMove(position) is not { } newY)
     {
-      RecordLook("BasePlayer");
+      RecordLook("OnPlayerDeath");
       return null;
     }
     if (_config.BounceLog)
     {
       Puts($"Moving BasePlayer={player.displayName}({player})@{ToString(position)} to new Y={newY} ({newY - position.y})");
     }
-    MovePlayerY(player, newY);
+    player.Teleport(new Vector3(position.x, newY, position.z));
     RecordBounce("OnPlayerDeath");
     return null;
   }
@@ -436,13 +432,13 @@ public class PlayerSafetyNet : RustPlugin
     public bool BounceHelicopterDebris { get; set; } = true;
 
     [JsonProperty(PropertyName = "Bounce HorseCorpse entities on spawn")]
-    public bool BounceHorseCorpse { get; set; } = true;
+    public bool BounceHorseCorpse { get; set; } = true; //= false;
 
     [JsonProperty(PropertyName = "Bounce LootableCorpse entities on spawn")]
     public bool BounceLootableCorpse { get; set; } = true;
 
     [JsonProperty(PropertyName = "Bounce NPCPlayerCorpse entities on spawn")]
-    public bool BounceNpcPlayerCorpse { get; set; } = true;
+    public bool BounceNpcPlayerCorpse { get; set; } = true; //= false;
 
     [JsonProperty(PropertyName = "Bounce PlayerCorpse entities on spawn")]
     public bool BouncePlayerCorpse { get; set; } = true;
@@ -451,7 +447,11 @@ public class PlayerSafetyNet : RustPlugin
     public bool BounceLog { get; set; } = true;
 
     [JsonProperty(PropertyName = "Suppress bounce for entity prefabs")]
-    public SortedSet<string> BounceIgnorePrefabs { get; set; } = new();
+    public SortedSet<string> BounceIgnorePrefabs { get; set; } = new()
+    {
+      // "item_drop_buoyant",
+      // "player_corpse"
+    };
 
     [JsonProperty(PropertyName = "Suppress logging for entity prefabs")]
     public SortedSet<string> LogIgnorePrefabs { get; set; } = new();
