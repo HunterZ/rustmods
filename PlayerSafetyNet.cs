@@ -4,11 +4,12 @@ using Rust;
 using System.Collections.Generic;
 using System;
 using System.Text;
+using Facepunch.Extend;
 using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Player Safety Net", "HunterZ", "0.0.2")]
+[Info("Player Safety Net", "HunterZ", "0.0.3")]
 public class PlayerSafetyNet : RustPlugin
 {
   #region Data
@@ -27,8 +28,25 @@ public class PlayerSafetyNet : RustPlugin
 
   private enum Blocking { Ignore, IgnoreCliff, Include, Require, RequireCliff }
 
-  private readonly SortedDictionary<string, (ulong, ulong)> _stats = new();
+  private Collider _terrainCollider;
+  private Collider _deepSeaBottomCollider;
+
+  private readonly SortedDictionary<string, (int, int)> _stats = new();
   private readonly StringBuilder _sb = new();
+
+  private enum Columns
+  {
+    EntityOrHook,
+    Looked,
+    Bounced
+  };
+
+  private readonly int[] _columnWidths =
+  {
+    nameof(Columns.EntityOrHook).Length,
+    nameof(Columns.Looked).Length,
+    nameof(Columns.Bounced).Length
+  };
 
   private PluginConfig _config;
 
@@ -44,6 +62,12 @@ public class PlayerSafetyNet : RustPlugin
     IsFormation(name) ||
     hit.IsOnLayer(Layer.Construction) ||
     hit.IsOnLayer(Layer.Deployed);
+
+  private static bool IsIgnored(string colliderName) =>
+    !string.IsNullOrEmpty(colliderName) && colliderName is
+      "Add_To_Height" or
+      "Collider" or
+      "junkpile_base";
 
   // get Y coordinate of appropriate prefab, terrain, or world bound that would
   //  stop movement in the given direction from the given position
@@ -72,37 +96,32 @@ public class PlayerSafetyNet : RustPlugin
     {
       var hit = _raycastHits[i];
       var collider = hit.collider;
-      // try to ignore any entities that could be the source of a corpse that is
-      //  being spawned - otherwise oil rig scientists tend to do flips, stick
-      //  to ceilings, etc. for some reason lol
-      var cEntity = collider?.ToBaseEntity();
-      if (cEntity && cEntity is
-          BaseCombatEntity {lifestate: BaseCombatEntity.LifeState.Dead} or
-          BaseNpc or BaseNPC2 or BasePlayer or RidableHorse)
+      if (!collider) continue;
+      // ignore terrain colliders when looking up
+      if (up &&
+          (collider == _terrainCollider || collider == _deepSeaBottomCollider))
       {
         continue;
       }
-      // ignore terrain if hit is inside a terrain ignore volume or whatever
+      // ignore terrain if downward hit is inside a terrain ignore volume
       // NOTE: GetIgnore() handles checking whether the hit is a terrain one, so
       //  there's no point doing it here as well
       if (down && TerrainMeta.Collision.GetIgnore(hit))
       {
         continue;
       }
-      var colliderName = collider?.name;
-      switch (colliderName)
+      // check for blacklisted names
+      var colliderName = collider.name;
+      if (IsIgnored(colliderName)) continue;
+      // try to ignore any entities that could be the source of a corpse that is
+      //  being spawned - otherwise oil rig scientists tend to do flips, stick
+      //  to ceilings, etc. for some reason lol
+      var cEntity = collider.ToBaseEntity();
+      if (cEntity && cEntity is
+            BaseCombatEntity {lifestate: BaseCombatEntity.LifeState.Dead} or
+            BaseNpc or BaseNPC2 or BasePlayer or RidableHorse)
       {
-        case null:
-        case { Length: 0 }:
-          break;
-        case "Add_To_Height":
-        case "Collider":
-        // only ignore terrain colliders when looking up
-        case "DeepSea_Bottom" when up:
-        case "Terrain"        when up:
-        case "assets/prefabs/player/player.prefab":
-        case "junkpile_base":
-          continue;
+        continue;
       }
       switch (blocking)
       {
@@ -120,6 +139,8 @@ public class PlayerSafetyNet : RustPlugin
         case Blocking.RequireCliff:
           if (!IsFormation(colliderName)) continue;
           break;
+        default:
+          throw new ArgumentOutOfRangeException(nameof(blocking), blocking, null);
       }
       switch (match)
       {
@@ -130,6 +151,11 @@ public class PlayerSafetyNet : RustPlugin
         case Match.Closest when hit.distance >= cDist:
         case Match.Farthest when hit.distance <= cDist:
           continue;
+        case Match.Closest:
+        case Match.Farthest:
+          break;
+        default:
+          throw new ArgumentOutOfRangeException(nameof(match), match, null);
       }
       // best match so far; record it as a candidate
       cDist = hit.distance;
@@ -202,14 +228,14 @@ public class PlayerSafetyNet : RustPlugin
 
   private void RecordLook(string key, bool bounced = false)
   {
-    var bouncedNum = bounced ? 1UL : 0UL;
-    var oldLooked = 0UL;
-    var oldBounced = 0UL;
+    var bouncedNum = bounced ? 1 : 0;
+    var oldLooked = 0;
+    var oldBounced = 0;
     if (_stats.TryGetValue(key, out var value))
     {
       (oldLooked, oldBounced) = value;
     }
-    _stats[key] = (oldLooked + 1UL, oldBounced + bouncedNum);
+    _stats[key] = (oldLooked + 1, oldBounced + bouncedNum);
   }
 
   private void RecordBounce(string key) => RecordLook(key, true);
@@ -238,6 +264,32 @@ public class PlayerSafetyNet : RustPlugin
     }
     MoveEntityY(entity, newY);
     RecordBounce(entitySignature);
+  }
+
+  private static Collider GetDeepSeaCollider(DeepSeaManager deepSeaManager)
+  {
+    var childCount = deepSeaManager.sharedCollidersParent.childCount;
+    for (var i = 0; i < childCount; ++i)
+    {
+      var child = deepSeaManager.sharedCollidersParent.GetChild(i);
+      if (child.TryGetComponent(out Collider collider) &&
+          collider is { name: "DeepSea_Bottom" })
+      {
+        return collider;
+      }
+    }
+    return null;
+  }
+
+  private static int NumDigits(ulong n)
+  {
+    var retVal = 1;
+    while (n >= 10)
+    {
+      ++retVal;
+      n /= 10;
+    }
+    return retVal;
   }
 
   #endregion
@@ -305,16 +357,51 @@ public class PlayerSafetyNet : RustPlugin
 
   private void OnServerInitialized()
   {
+    _terrainCollider = TerrainMeta.Collider;
+    var deepSeaManager = DeepSeaManager.ServerInstance;
+    if (deepSeaManager && deepSeaManager.IsOpen())
+    {
+      _deepSeaBottomCollider = GetDeepSeaCollider(deepSeaManager);
+      if (_deepSeaBottomCollider)
+      {
+        Puts($"OnServerInitialized(): Found Deep Sea Bottom collider: {_deepSeaBottomCollider}");
+      }
+      else
+      {
+        PrintWarning("OnServerInitialized(): Deep Sea is open, but failed to find bottom collider");
+      }
+    }
   }
 
   private void Unload()
   {
+    _terrainCollider = null;
+    _deepSeaBottomCollider = null;
+  }
+
+  private void OnDeepSeaOpened(DeepSeaManager deepSeaManager)
+  {
+    if (!deepSeaManager) return;
+    _deepSeaBottomCollider = GetDeepSeaCollider(deepSeaManager);
+    if (_deepSeaBottomCollider)
+    {
+      Puts($"OnDeepSeaOpened(): Found Deep Sea Bottom collider: {_deepSeaBottomCollider}");
+    }
+    else
+    {
+      PrintWarning("OnDeepSeaOpened(): Deep Sea is open, but failed to find bottom collider");
+    }
+  }
+
+  private void OnDeepSeaClose(DeepSeaManager deepSeaManager)
+  {
+    _deepSeaBottomCollider = null;
   }
 
   [ConsoleCommand("psn.report")]
   private void CmdReport(ConsoleSystem.Arg arg)
   {
-    _sb.Clear().Append(Name).Append(" statistics (looked/bounced):");
+    _sb.Clear().Append(Name).Append(" statistics:");
     if (_stats.IsEmpty())
     {
       _sb.AppendLine(" [none yet]");
@@ -322,12 +409,50 @@ public class PlayerSafetyNet : RustPlugin
       _sb.Clear();
       return;
     }
+
+    _sb.AppendLine().AppendLine();
+
+    foreach (var (key, (looked, bounced)) in _stats)
+    {
+      if (key.Length > _columnWidths[0]) _columnWidths[0] = key.Length;
+      var lookedLen = looked.Digits();
+      if (lookedLen > _columnWidths[1]) _columnWidths[1] = lookedLen;
+      var bouncedLen = bounced.Digits();
+      if (bouncedLen > _columnWidths[2]) _columnWidths[2] = bouncedLen;
+    }
+
+    _sb
+      .Append(' ')
+      .Append(nameof(Columns.EntityOrHook))
+      .Append(' ', 1 + _columnWidths[0] - nameof(Columns.EntityOrHook).Length)
+      .Append(nameof(Columns.Looked))
+      .Append(' ', 1 + _columnWidths[1] - nameof(Columns.Looked).Length)
+      .Append(nameof(Columns.Bounced))
+      .AppendLine();
+    _sb
+      .Append(' ')
+      .Append('-', _columnWidths[0])
+      .Append(' ')
+      .Append('-', _columnWidths[1])
+      .Append(' ')
+      .Append('-', _columnWidths[2])
+      .AppendLine();
+
     foreach (var (key, (looked, bounced)) in _stats)
     {
       _sb
-        .AppendLine().Append(' ')
-        .Append(key).Append(":\t").Append(looked).Append(" / ").Append(bounced);
+        .Append(' ')
+        .AppendPadded(key, _columnWidths[0]);
+      _sb
+        .Append(' ')
+        .AppendPadded(looked, _columnWidths[1]);
+      _sb
+        .Append(' ')
+        .AppendPadded(bounced, _columnWidths[2]);
+      _sb
+        .AppendLine();
     }
+
     _sb.AppendLine();
     Puts(_sb.ToString());
     _sb.Clear();
