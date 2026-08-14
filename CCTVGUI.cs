@@ -8,9 +8,6 @@ namespace Oxide.Plugins;
 [Info("CCTV GUI", "HunterZ", "1.0.0")]
 public class CCTVGUI : RustPlugin
 {
-  // whether CUI data needs to be updated due to underlying game state changes
-  private bool _dirty;
-
   // (full location, CCTV netIDs) by short location
   private SortedDictionary<string, (string, HashSet<ulong>)> _locationData =
     new();
@@ -19,26 +16,48 @@ public class CCTVGUI : RustPlugin
   // landmark names by object
   private Dictionary<LandmarkInfo, string> _landmarkData = new();
 
-  // UI root panel name
+  // fixed CUI data strings
   private string _rootPanelName;
+  private string _titleElementName;
+  private string _locationClosePanelName;
+  private string _locationCloseButtonName;
+
   // location selector UI JSON
   private string _locationUiJson;
+  // whether to regenerate location UI JSON
+  private bool _locationUiDirty;
   // CCTV codes UI JSON by short location
   private SortedDictionary<string, string> _codesUiJson = new();
+  // set of short locations whose CCTV codes UI JSON should be regenerated
+  private HashSet<string> _codesUiDirty = new();
+
+  // CUI scratchpad container
+  private CuiElementContainer _container = new();
+
+  private const float Width = 544.0f;
+  private const float Height = 544.0f;
+  private const float OffsetLeft = -Width * 0.5f;
+  private const float OffsetRight = Width * 0.5f;
+  private const float OffsetBottom = -Height * 0.5f;
+  private const float OffsetTop = Height * 0.5f;
 
   private void Init()
   {
     Unsubscribe(nameof(OnEntitySpawned));
     Unsubscribe(nameof(OnEntityKill));
 
+    _locationUiDirty = true;
     _rootPanelName = $"{Name}.Root.Panel";
+    _titleElementName = $"{Name}.Locations.Label.Help";
+    _locationClosePanelName = $"{Name}.Locations.Panel.Close";
+    _locationCloseButtonName = $"{Name}.Locations.Button.Close";
   }
 
   private void OnServerInitialized()
   {
     foreach (var entity in BaseNetworkable.serverEntities)
     {
-      if (entity && entity is CCTV_RC camera) OnEntitySpawned(camera);
+      if (entity is CCTV_RC camera && camera) OnEntitySpawned(camera);
     }
     // this needs to be done in NextTick() because OnEntitySpawned() uses it
     NextTick(() =>
@@ -68,6 +87,8 @@ public class CCTVGUI : RustPlugin
     _rootPanelName = null;
     _locationUiJson = null;
     _codesUiJson.Clear();
+    _codesUiDirty.Clear();
+    _container.Clear();
   }
 
   private void OnPlayerDisconnected(BasePlayer player, string reason)
@@ -97,9 +118,10 @@ public class CCTVGUI : RustPlugin
     {
       locationData = (locationName, Facepunch.Pool.Get<HashSet<ulong>>());
       _locationData[locationShortName] = locationData;
+      _locationUiDirty = true;
     }
-    locationData.Item2.Add(netID);
-    _dirty = true;
+    var cameraSet = locationData.Item2;
+    if (cameraSet.Add(netID)) _codesUiDirty.Add(locationShortName);
   });
 
   private void OnEntityKill(CCTV_RC camera)
@@ -109,7 +131,6 @@ public class CCTVGUI : RustPlugin
     // remove camera from _cameraData
     var netID = camera.net.ID.Value;
     if (!_cameraData.Remove(netID, out var cameraData)) return;
-    _dirty = true;
 
     // remove camera from _locationData
     var locationShortName = cameraData.Item2;
@@ -118,12 +139,18 @@ public class CCTVGUI : RustPlugin
       return;
     }
     var cameraSet = locationData.Item2;
-    cameraSet.Remove(netID);
+    if (cameraSet.Remove(netID)) _codesUiDirty.Add(locationShortName);
 
     if (cameraSet.Count > 0) return;
-    // more cameras at location; remove entire location entry
+    // no more cameras at location; remove entire location entry
     Facepunch.Pool.FreeUnmanaged(ref cameraSet);
-    _locationData.Remove(locationShortName);
+    if (!_locationData.Remove(locationShortName)) return;
+    _locationUiDirty = true;
+    // ...also remove JSON and dirty state for defunct location
+    if (_codesUiJson.Remove(locationShortName))
+    {
+      _codesUiDirty.Remove(locationShortName);
+    }
   }
 
   private static string ToShortName(string locationName) =>
@@ -205,8 +232,7 @@ public class CCTVGUI : RustPlugin
   }
 
   // Credit: Lorenzo - https://umod.org/community/rust/4861-calculate-current-coordinate-of-player?page=1#post-3
-  private static string GetGrid(Vector3 pos) =>
-    MapHelper.PositionToString(pos);
+  private static string GetGrid(Vector3 pos) => MapHelper.PositionToString(pos);
 
   [ChatCommand("CCTV")]
   private void ChatCommandCctv(BasePlayer player, string command, string[] args)
@@ -250,14 +276,14 @@ public class CCTVGUI : RustPlugin
       return;
     }
 
+    GenerateUI();
+
     var locationShortName = arg.GetString(0);
     if (!_codesUiJson.TryGetValue(locationShortName, out var json))
     {
       SendReply(player, $"Unknown location: {locationShortName}");
       return;
     }
-
-    GenerateUI();
 
     CuiHelper.AddUi(player, json);
   }
@@ -278,7 +304,7 @@ public class CCTVGUI : RustPlugin
     }
 
     public GridParams(
-      int itemCount, Bias bias, float width, float height, RustPlugin plugin)
+      int itemCount, Bias bias, float width, float height)
     {
       //  try to get a similar number of rows and columns
       var sqrt = Mathf.Sqrt(itemCount);
@@ -298,130 +324,150 @@ public class CCTVGUI : RustPlugin
     }
   }
 
-  private void GenerateUI()
+  private void ResetContainer(
+    string titleElementName, string titleTextText,
+    string closePanelName, string closeButtonName)
   {
-    if (!_dirty) return;
-    Puts("Updating GUI cache");
-    _dirty = false;
-    _codesUiJson.Clear();
+    if (_container.Count >= 4 &&
+        _container[1] is { Components.Count: > 0 } titleElement &&
+        titleElement.Components[0] is CuiTextComponent titleText &&
+        _container[2] is { } closePanel &&
+        _container[3] is { } closeButton)
+    {
+      // trash everything except for the title bar
+      _container.RemoveRange(4, _container.Count - 4);
 
-    const float width = 544.0f;
-    const float height = 544.0f;
-    const float offsetLeft = -width * 0.5f;
-    const float offsetRight = width * 0.5f;
-    const float offsetBottom = -height * 0.5f;
-    const float offsetTop = height * 0.5f;
+      // update existing stuff
+      titleElement.Name = titleElement.DestroyUi = titleElementName;
+      titleText.Text = titleTextText;
+      closePanel.Name = closePanel.DestroyUi = closePanelName;
+      closeButton.Name = closeButton.DestroyUi = closeButtonName;
+
+      return;
+    }
+
+    // first generation, or (unlikely) beginning entries are unexpected format
+    _container.Clear();
+
+    // add root panel
+    _container.Add(new CuiPanel
+    {
+      CursorEnabled = true,
+      FadeOut = 0f,
+      Image = { Color = "0 0 0 0.9" },
+      KeyboardEnabled = true,
+      // RawImage = null,
+      RectTransform =
+      {
+        AnchorMin = "0.5 0.5", AnchorMax = "0.5 0.5",
+        OffsetMin = $"{OffsetLeft} {OffsetBottom}",
+        OffsetMax = $"{OffsetRight} {OffsetTop}"
+      }
+    }, "Overlay", _rootPanelName, _rootPanelName);
+
+    // add title text
+    _container.Add(new CuiLabel
+    {
+      FadeOut = 0f,
+      RectTransform =
+      {
+        AnchorMin = "0.5 0.5", AnchorMax = "0.5 0.5",
+        OffsetMin = $"{OffsetLeft + 32} {OffsetTop - 32}",
+        OffsetMax = $"{OffsetRight - 32} {OffsetTop}"
+      },
+      Text =
+      {
+        Color = "1 1 1 1",
+        Enabled = true,
+        FadeIn = 0f,
+        // PlaceholderParentId = "",
+        Text = titleTextText,
+        Align = TextAnchor.UpperCenter,
+        // Font = "",
+        FontSize = 18,
+        VerticalOverflow = VerticalWrapMode.Overflow
+      }
+    }, _rootPanelName, titleElementName, titleElementName);
+
+    // add close panel
+    _container.Add(new CuiPanel
+    {
+      // CursorEnabled = true,
+      FadeOut = 0f,
+      Image = { Color = "1 0.5 0 1" },
+      // KeyboardEnabled = false,
+      // RawImage = null,
+      RectTransform =
+      {
+        AnchorMin = "0.5 0.5", AnchorMax = "0.5 0.5",
+        OffsetMin = $"{OffsetRight - 32} {OffsetTop - 32}",
+        OffsetMax = $"{OffsetRight} {OffsetTop}"
+      }
+    }, _rootPanelName, closePanelName, closePanelName);
+
+    // add close button
+    _container.Add(new CuiButton
+    {
+      FadeOut = 0f,
+      RectTransform =
+      {
+        AnchorMin = "0.5 0.5", AnchorMax = "0.5 0.5",
+        OffsetMin = $"{OffsetRight - 28} {OffsetTop - 28}",
+        OffsetMax = $"{OffsetRight -  4} {OffsetTop -  4}"
+      },
+      Button =
+      {
+        Color = "1 1 1 1",
+        Close = _rootPanelName,
+        // ColorMultiplier = 0f,
+        // Command = "/CCTV X",
+        // DisabledColor = "",
+        Enabled = true,
+        FadeDuration = 0f,
+        // FadeIn = 0f,
+        HighlightedColor = "1 0 0 1",
+        // ImageType = Image.Type.Simple,
+        // Material = "",
+        // NormalColor = "0 0 1 1",
+        // PlaceholderParentId = "",
+        // PressedColor = "",
+        // SelectedColor = "",
+        Sprite = "assets/icons/close.png"
+      }
+      // Text =
+      // {
+      //   Color = "1 1 1 1",
+      //   Enabled = true,
+      //   FadeIn = 0f,
+      //   PlaceholderParentId = "",
+      //   Text = "X",
+      //   Align = TextAnchor.MiddleCenter,
+      //   Font = "",
+      //   FontSize = 12,
+      //   VerticalOverflow = VerticalWrapMode.Truncate
+      // }
+    }, _rootPanelName, closeButtonName, closeButtonName);
+  }
+
+  // generate location selector JSON
+  private void GenerateLocationUI()
+  {
+    if (!_locationUiDirty) return;
+    _locationUiDirty = false;
+    Puts("Updating location selector UI cache");
+
     // Puts($"width={width}, height={height}, offsetLeft={offsetLeft}, offsetRight={offsetRight}");
 
-    // generate location selector JSON
-    var container = new CuiElementContainer
-    {
-      {
-        new CuiPanel
-        {
-          CursorEnabled = true,
-          FadeOut = 0f,
-          Image = { Color = "0 0 0 0.9" },
-          KeyboardEnabled = true,
-          // RawImage = null,
-          RectTransform =
-          {
-            AnchorMin = "0.5 0.5", AnchorMax = "0.5 0.5",
-            OffsetMin = $"{offsetLeft} {offsetBottom}",
-            OffsetMax = $"{offsetRight} {offsetTop}"
-          }
-        }, "Overlay", _rootPanelName, _rootPanelName
-      },
-      {
-        new CuiLabel
-        {
-          FadeOut = 0f,
-          RectTransform =
-          {
-            AnchorMin = "0.5 0.5", AnchorMax = "0.5 0.5",
-            OffsetMin = $"{offsetLeft + 32} {offsetTop - 32}",
-            OffsetMax = $"{offsetRight - 32} {offsetTop}"
-          },
-          Text =
-          {
-            Color = "1 1 1 1",
-            Enabled = true,
-            FadeIn = 0f,
-            // PlaceholderParentId = "",
-            Text = $"Click one of the {_locationData.Count} location(s) below to see CCTV RF IDs",
-            Align = TextAnchor.UpperCenter,
-            // Font = "",
-            FontSize = 18,
-            VerticalOverflow = VerticalWrapMode.Overflow
-          }
-        }, _rootPanelName, $"{Name}.Locations.Label.Help", $"{Name}.Locations.Label.Help"
-      },
-      {
-        new CuiPanel
-        {
-          // CursorEnabled = true,
-          FadeOut = 0f,
-          Image = { Color = "1 0.5 0 1" },
-          // KeyboardEnabled = false,
-          // RawImage = null,
-          RectTransform =
-          {
-            AnchorMin = "0.5 0.5", AnchorMax = "0.5 0.5",
-            OffsetMin = $"{offsetRight - 32} {offsetTop - 32}",
-            OffsetMax = $"{offsetRight} {offsetTop}"
-          }
-        }, _rootPanelName, $"{Name}.Locations.Panel.Close", $"{Name}.Locations.Panel.Close"
-      },
-      {
-        new CuiButton
-        {
-          FadeOut = 0f,
-          RectTransform =
-          {
-            AnchorMin = "0.5 0.5", AnchorMax = "0.5 0.5",
-            OffsetMin = $"{offsetRight - 28} {offsetTop - 28}",
-            OffsetMax = $"{offsetRight -  4} {offsetTop -  4}"
-          },
-          Button =
-          {
-            Color = "1 1 1 1",
-            Close = _rootPanelName,
-            // ColorMultiplier = 0f,
-            // Command = "/CCTV X",
-            // DisabledColor = "",
-            Enabled = true,
-            FadeDuration = 0f,
-            // FadeIn = 0f,
-            HighlightedColor = "1 0 0 1",
-            // ImageType = Image.Type.Simple,
-            // Material = "",
-            // NormalColor = "0 0 1 1",
-            // PlaceholderParentId = "",
-            // PressedColor = "",
-            // SelectedColor = "",
-            Sprite = "assets/icons/close.png"
-          }
-          // Text =
-          // {
-          //   Color = "1 1 1 1",
-          //   Enabled = true,
-          //   FadeIn = 0f,
-          //   PlaceholderParentId = "",
-          //   Text = "X",
-          //   Align = TextAnchor.MiddleCenter,
-          //   Font = "",
-          //   FontSize = 12,
-          //   VerticalOverflow = VerticalWrapMode.Truncate
-          // }
-        }, _rootPanelName, $"{Name}.Locations.Button.Close", $"{Name}.Locations.Button.Close"
-      }
-    };
+    ResetContainer(
+      _titleElementName,
+      $"Click one of the {_locationData.Count} location(s) below to see CCTV RF IDs",
+      _locationClosePanelName, _locationCloseButtonName);
 
     // add a grid for the location buttons
     var locGridName = $"{Name}.Locations.Grid";
     var locGridParams = new GridParams(
-      _locationData.Count, GridParams.Bias.Cols, width, height - 32, this);
-    container.Add(new CuiElement
+      _locationData.Count, GridParams.Bias.Cols, Width, Height - 32);
+    _container.Add(new CuiElement
     {
       Name = locGridName,
       Parent = _rootPanelName,
@@ -436,8 +482,8 @@ public class CCTVGUI : RustPlugin
         new CuiRectTransformComponent
         {
           AnchorMin = "0.5 0.5", AnchorMax = "0.5 0.5",
-          OffsetMin = $"{offsetLeft} {offsetBottom}",
-          OffsetMax = $"{offsetRight} {offsetTop - 32}"
+          OffsetMin = $"{OffsetLeft} {OffsetBottom}",
+          OffsetMax = $"{OffsetRight} {OffsetTop - 32}"
         },
         new CuiGridLayoutGroupComponent
         {
@@ -464,7 +510,7 @@ public class CCTVGUI : RustPlugin
       // have to add individual components, because we don't use a transform
       var buttonNameI = $"{Name}.Locations.Button.{locationShortName}";
 
-      container.Add(new CuiElement
+      _container.Add(new CuiElement
       {
         Name = buttonNameI,
         Parent = locGridName,
@@ -484,7 +530,7 @@ public class CCTVGUI : RustPlugin
       });
 
       var textName = $"{Name}.Locations.Text.{locationShortName}";
-      container.Add(new CuiElement
+      _container.Add(new CuiElement
       {
         Name = textName,
         Parent = buttonNameI,
@@ -504,168 +550,166 @@ public class CCTVGUI : RustPlugin
     }
 
     // cache as JSON string for reuse until it becomes dirty
-    _locationUiJson = container.ToJson();
+    _locationUiJson = _container.ToJson();
+  }
 
-    // now build the code panels
-    foreach (var (locationShortName, (locationName, cameraSet))
-             in _locationData)
+  private void GenerateCodesUI(
+    string locationShortName, string locationName, HashSet<ulong> cameraSet)
+  {
+    if (!_codesUiDirty.Remove(locationShortName)) return;
+    Puts($"Updating camera codes UI cache for location {locationShortName}");
+
+    var prefix = $"{Name}.Codes_{locationShortName}.";
+
+    ResetContainer(
+      $"{prefix}Label.Help",
+      $"{locationName} has {cameraSet.Count} CCTV RF ID(s)\nHighlight and hit Ctrl+C to copy",
+      $"{prefix}Panel.Close", $"{prefix}Button.Close");
+
+    // add a back panel + button
+    var backPanelName = $"{prefix}Panel.Back";
+    _container.Add(new CuiPanel
     {
-      // trash everything from the CUI builder except for the title bar
-      container.RemoveRange(4, container.Count - 4);
-
-      // change the title ID & text
-      if (container.Count < 4 || container[1] is not { } titleElement ||
-          titleElement.Components?.Count is not > 0 ||
-          titleElement.Components[0] is not CuiTextComponent titleText)
+      // CursorEnabled = true,
+      FadeOut = 0f,
+      Image = { Color = "1 0.5 0 1" },
+      // KeyboardEnabled = false,
+      // RawImage = null,
+      RectTransform =
       {
-        continue;
+        AnchorMin = "0.5 0.5", AnchorMax = "0.5 0.5",
+        OffsetMin = $"{OffsetLeft} {OffsetTop - 32}",
+        OffsetMax = $"{OffsetLeft + 32} {OffsetTop}"
       }
+    }, _rootPanelName, backPanelName, backPanelName);
 
-      var prefix = $"{Name}.Codes_{locationShortName}.";
-      titleElement.Name = titleElement.DestroyUi = $"{prefix}Label.Help";
-      titleText.Text = $"{locationName} has {cameraSet.Count} CCTV RF ID(s)\nHighlight and hit Ctrl+C to copy";
-
-      // change close panel + button ID
-      if (container[2] is not { } closePanel ||
-          container[3] is not { } closeButton)
+    var backButtonName = $"{prefix}Button.Back";
+    _container.Add(new CuiButton
+    {
+      FadeOut = 0f,
+      RectTransform =
       {
-        continue;
+        AnchorMin = "0.5 0.5", AnchorMax = "0.5 0.5",
+        OffsetMin = $"{OffsetLeft + 4} {OffsetTop - 28}",
+        OffsetMax = $"{OffsetLeft + 28} {OffsetTop - 4}"
+      },
+      Button =
+      {
+        Color = "1 1 1 1",
+        // Close = _rootPanelName,
+        Command = "chat.say /CCTV",
+        Enabled = true,
+        FadeDuration = 0f,
+        HighlightedColor = "1 0 0 1",
+        Sprite = "assets/icons/folder_up.png"
       }
-      closePanel.Name = closePanel.DestroyUi = $"{prefix}Panel.Close";
-      closeButton.Name = closeButton.DestroyUi = $"{prefix}Button.Close";
+    }, _rootPanelName, backButtonName, backButtonName);
 
-      // add a back panel + button
-      var backPanelName = $"{prefix}Panel.Back";
-      container.Add(new CuiPanel
+    // add a grid for the CCTV codes
+    var codeGridName = $"{prefix}Grid";
+    var codeGridParams = new GridParams(
+      cameraSet.Count, GridParams.Bias.Rows, Width, Height - 32);
+    _container.Add(new CuiElement
+    {
+      Name = codeGridName,
+      Parent = _rootPanelName,
+      DestroyUi = codeGridName,
+      Components =
       {
-        // CursorEnabled = true,
-        FadeOut = 0f,
-        Image = { Color = "1 0.5 0 1" },
-        // KeyboardEnabled = false,
-        // RawImage = null,
-        RectTransform =
+        new CuiRectTransformComponent
         {
           AnchorMin = "0.5 0.5", AnchorMax = "0.5 0.5",
-          OffsetMin = $"{offsetLeft} {offsetTop - 32}",
-          OffsetMax = $"{offsetLeft + 32} {offsetTop}"
-        }
-      }, _rootPanelName, backPanelName, backPanelName);
-
-      var backButtonName = $"{prefix}Button.Back";
-      container.Add(new CuiButton
-      {
-        FadeOut = 0f,
-        RectTransform =
-        {
-          AnchorMin = "0.5 0.5", AnchorMax = "0.5 0.5",
-          OffsetMin = $"{offsetLeft + 4} {offsetTop - 28}",
-          OffsetMax = $"{offsetLeft + 28} {offsetTop - 4}"
+          OffsetMin = $"{OffsetLeft} {OffsetBottom}",
+          OffsetMax = $"{OffsetRight} {OffsetTop - 32}"
         },
-        Button =
+        new CuiGridLayoutGroupComponent
         {
-          Color = "1 1 1 1",
-          // Close = _rootPanelName,
-          Command = "chat.say /CCTV",
-          Enabled = true,
-          FadeDuration = 0f,
-          HighlightedColor = "1 0 0 1",
-          Sprite = "assets/icons/folder_up.png"
+          CellSize = $"{codeGridParams.FullX} {codeGridParams.FullY}",
+          ChildAlignment = TextAnchor.MiddleCenter,
+          Constraint = GridLayoutGroup.Constraint.FixedColumnCount,
+          // try to get a similar number of rows and columns
+          ConstraintCount = codeGridParams.GridCols,
+          // Padding = "12", // "l t r b" or "x" for all sizes
+          Spacing = "0 0",
+          StartAxis = GridLayoutGroup.Axis.Horizontal,
+          StartCorner = GridLayoutGroup.Corner.UpperLeft
+        },
+        new CuiContentSizeFitterComponent
+        {
+          VerticalFit = ContentSizeFitter.FitMode.PreferredSize,
+          HorizontalFit = ContentSizeFitter.FitMode.PreferredSize
         }
-      }, _rootPanelName, backButtonName, backButtonName);
+      }
+    });
 
-      // add a grid for the CCTV codes
-      var codeGridName = $"{prefix}Grid";
-      var codeGridParams = new GridParams(
-        cameraSet.Count, GridParams.Bias.Rows, width, height - 32, this);
-      container.Add(new CuiElement
+    // add textInputs to grid
+    foreach (var cameraNetID in cameraSet)
+    {
+      if (!_cameraData.TryGetValue(cameraNetID, out var cameraData)) continue;
+      var cameraCode = cameraData.Item1;
+
+      var imageNameI = $"{prefix}Image.{cameraCode}";
+      _container.Add(new CuiElement
       {
-        Name = codeGridName,
-        Parent = _rootPanelName,
-        DestroyUi = codeGridName,
+        Name = imageNameI,
+        Parent = codeGridName,
+        DestroyUi = imageNameI,
         Components =
         {
-          new CuiRectTransformComponent
+          new CuiImageComponent
           {
-            AnchorMin = "0.5 0.5", AnchorMax = "0.5 0.5",
-            OffsetMin = $"{offsetLeft} {offsetBottom}",
-            OffsetMax = $"{offsetRight} {offsetTop - 32}"
-          },
-          new CuiGridLayoutGroupComponent
-          {
-            CellSize = $"{codeGridParams.FullX} {codeGridParams.FullY}",
-            ChildAlignment = TextAnchor.MiddleCenter,
-            Constraint = GridLayoutGroup.Constraint.FixedColumnCount,
-            // try to get a similar number of rows and columns
-            ConstraintCount = codeGridParams.GridCols,
-            // Padding = "12", // "l t r b" or "x" for all sizes
-            Spacing = "0 0",
-            StartAxis = GridLayoutGroup.Axis.Horizontal,
-            StartCorner = GridLayoutGroup.Corner.UpperLeft
-          },
-          new CuiContentSizeFitterComponent
-          {
-            VerticalFit = ContentSizeFitter.FitMode.PreferredSize,
-            HorizontalFit = ContentSizeFitter.FitMode.PreferredSize
+            Color = "1 0.5 0.01 0.67",
+            ItemId = 634478325
           }
         }
       });
 
-      // add textInputs to grid
-      foreach (var cameraNetID in cameraSet)
+      var textNameI = $"{prefix}TextInput.{cameraCode}";
+      _container.Add(new CuiElement
       {
-        if (!_cameraData.TryGetValue(cameraNetID, out var cameraData)) continue;
-        var cameraCode = cameraData.Item1;
-
-        var imageNameI = $"{prefix}Image.{cameraCode}";
-        container.Add(new CuiElement
+        Name = textNameI,
+        Parent = imageNameI, //codeGridName,
+        DestroyUi = textNameI,
+        Components =
         {
-          Name = imageNameI,
-          Parent = codeGridName,
-          DestroyUi = imageNameI,
-          Components =
+          new CuiInputFieldComponent
           {
-            new CuiImageComponent
-            {
-              Color = "1 0.5 0.01 0.67",
-              ItemId = 634478325
-            }
+            Color = "1 1 1 1",
+            Text = cameraCode,
+            Align = TextAnchor.MiddleCenter,
+            // Command = "",
+            // Enabled = true,
+            FadeIn = 0f,
+            // PlaceholderParentId = "",
+            // Font = "",
+            FontSize = 18,
+            // Autofocus = true,
+            // CharsLimit = 0,
+            // HudMenuInput = true,
+            IsPassword = false,
+            LineType = InputField.LineType.SingleLine,
+            NeedsKeyboard = true,
+            // PlaceholderId = "",
+            ReadOnly = true
           }
-        });
+        }
+      });
+    }
 
-        var textNameI = $"{prefix}TextInput.{cameraCode}";
-        container.Add(new CuiElement
-        {
-          Name = textNameI,
-          Parent = imageNameI, //codeGridName,
-          DestroyUi = textNameI,
-          Components =
-          {
-            new CuiInputFieldComponent
-            {
-              Color = "1 1 1 1",
-              Text = cameraCode,
-              Align = TextAnchor.MiddleCenter,
-              // Command = "",
-              // Enabled = true,
-              FadeIn = 0f,
-              // PlaceholderParentId = "",
-              // Font = "",
-              FontSize = 18,
-              // Autofocus = true,
-              // CharsLimit = 0,
-              // HudMenuInput = true,
-              IsPassword = false,
-              LineType = InputField.LineType.SingleLine,
-              NeedsKeyboard = true,
-              // PlaceholderId = "",
-              ReadOnly = true
-            }
-          }
-        });
-      }
+    // cache as JSON string for reuse until it becomes dirty
+    _codesUiJson[locationShortName] = _container.ToJson();
+  }
 
-      // cache as JSON string for reuse until it becomes dirty
-      _codesUiJson[locationShortName] = container.ToJson();
+  private void GenerateUI()
+  {
+    // Puts($"width={width}, height={height}, offsetLeft={offsetLeft}, offsetRight={offsetRight}");
+
+    GenerateLocationUI();
+
+    foreach (var (locationShortName, (locationName, cameraSet))
+             in _locationData)
+    {
+      GenerateCodesUI(locationShortName, locationName, cameraSet);
     }
   }
 }

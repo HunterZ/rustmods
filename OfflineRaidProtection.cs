@@ -34,7 +34,7 @@ namespace
   Oxide.Plugins
 #endif
 {
-  [Info("Offline Raid Protection", "realedwin/HunterZ", "1.7.0"), Description("Prevents/reduces offline raids by other players")]
+  [Info("Offline Raid Protection", "realedwin/HunterZ", "1.7.1"), Description("Prevents/reduces offline raids by other players")]
   public sealed class OfflineRaidProtection :
 #if CARBON
     CarbonPlugin
@@ -417,9 +417,12 @@ namespace
         [JsonProperty(PropertyName = "Permission required to manage tax protection")]
         public string TaxProtection { get; set; }
 
+        [JsonProperty(PropertyName = "Permission to force online protection for specific players")]
+        public string OnlineProtect { get; set; }
+
         internal void RegisterPermissions(Permission permission, Plugin plugin)
         {
-          string[] permissions = {Protect, Check, Admin, TaxProtection};
+          string[] permissions = {Protect, Check, Admin, TaxProtection, OnlineProtect};
 
           foreach (var perm in permissions)
           {
@@ -657,32 +660,27 @@ namespace
     private sealed class PlayerScaleCache
     {
       public float Scale { get; set; }
-
       public long ExpiresTicks { get; private set; }
-
       public bool ActiveGameTipMessage { get; set; }
-
       public System.TimeSpan RemainingTime { get; set; }
-
       public bool HasProtectPermission { get; set; }
-
       public bool HasTaxPermission { get; set; }
+      public bool HasOnlineProtectPermission { get; set; }
 
       public System.Action HideGameTipAction { get; }
-
       public string ProtectionMessageBuilding { get; private set; }
-
       public string ProtectionMessageVehicle { get; private set; }
 
       public PlayerScaleCache(
         System.DateTime expires, float scale, bool hasProtectPermission,
-        bool hasTaxPermission)
+        bool hasTaxPermission, bool hasOnlineProtectPermission)
       {
         ExpiresDT = expires;
         Scale = scale;
         ActiveGameTipMessage = false;
         HasProtectPermission = hasProtectPermission;
         HasTaxPermission = hasTaxPermission;
+        HasOnlineProtectPermission = hasOnlineProtectPermission;
         HideGameTipAction = HideGameTip;
       }
 
@@ -1238,6 +1236,9 @@ namespace
         Configuration.Command.CommandTaxProtection = baseConfig.Command.CommandTaxProtection;
       }
 
+      if (Configuration.Version < new VersionNumber(1, 7, 1))
+        Configuration.Permission.OnlineProtect = baseConfig.Permission.OnlineProtect;
+
       Configuration.Version = Version;
 
       SaveConfig();
@@ -1346,6 +1347,7 @@ namespace
         Check = "offlineraidprotection.check",
         Admin = "offlineraidprotection.admin",
         TaxProtection = "offlineraidprotection.tax",
+        OnlineProtect = "offlineraidprotection.onlineprotect"
       },
       Other = new()
       {
@@ -1703,22 +1705,22 @@ namespace
       CacheAdmin(player);
 
       var playerID = player.userID.Get();
-      var taxEnabled = Configuration.TaxProtection.Enabled;
+      var hasProtectPerm = playerID.HasPermission(Configuration.Permission.Protect);
+      var hasTaxPerm = Configuration.TaxProtection.Enabled && playerID.HasPermission(Configuration.Permission.TaxProtection);
+      var hasOnlinePerm = playerID.HasPermission(Configuration.Permission.OnlineProtect);
+
       if (_scaleCache.TryGetValue(playerID, out var scaleCache))
       {
-        scaleCache.HasProtectPermission =
-          playerID.HasPermission(Configuration.Permission.Protect);
-        scaleCache.HasTaxPermission = taxEnabled &&
-          playerID.HasPermission(Configuration.Permission.TaxProtection);
+        scaleCache.HasProtectPermission = hasProtectPerm;
+        scaleCache.HasTaxPermission = hasTaxPerm;
+        scaleCache.HasOnlineProtectPermission = hasOnlinePerm;
         scaleCache.ExpiresDT = System.DateTime.MinValue;
       }
       else
       {
         scaleCache = new(
           System.DateTime.MinValue, -1f,
-          playerID.HasPermission(Configuration.Permission.Protect),
-          taxEnabled &&
-          playerID.HasPermission(Configuration.Permission.TaxProtection));
+          hasProtectPerm, hasTaxPerm, hasOnlinePerm);
         _scaleCache[playerID] = scaleCache;
       }
       scaleCache.CacheMessages(this, player.UserIDString);
@@ -1860,12 +1862,8 @@ namespace
     }
 
     private void OnCupboardAuthorize(
-      BuildingPrivlidge buildingPrivlidge, BasePlayer player)
-    {
-      UpdateTcMarkerLabel(buildingPrivlidge);
-      QueueCupboardStatusHudRefresh(buildingPrivlidge);
-      QueueStatusHudRefresh(player);
-    }
+      BuildingPrivlidge buildingPrivlidge, BasePlayer player) =>
+      RefreshCupboardAuthorizationViews(buildingPrivlidge, player);
 
     private void OnCupboardAssign(
       BuildingPrivlidge buildingPrivlidge, ulong _userID,
@@ -1873,20 +1871,12 @@ namespace
       UpdateTcMarkerLabel(buildingPrivlidge);
 
     private void OnCupboardDeauthorize(
-      BuildingPrivlidge buildingPrivlidge, BasePlayer player)
-    {
-      UpdateTcMarkerLabel(buildingPrivlidge);
-      QueueCupboardStatusHudRefresh(buildingPrivlidge);
-      QueueStatusHudRefresh(player);
-    }
+      BuildingPrivlidge buildingPrivlidge, BasePlayer player) =>
+      RefreshCupboardAuthorizationViews(buildingPrivlidge, player);
 
     private void OnCupboardClearList(
-      BuildingPrivlidge buildingPrivlidge, BasePlayer player)
-    {
-      UpdateTcMarkerLabel(buildingPrivlidge);
-      QueueCupboardStatusHudRefresh(buildingPrivlidge);
-      QueueStatusHudRefresh(player);
-    }
+      BuildingPrivlidge buildingPrivlidge, BasePlayer player) =>
+      RefreshCupboardAuthorizationViews(buildingPrivlidge, player);
 
     private void OnEntitySpawned(Tugboat tugboat) =>
       QueueBoatMapMarkerSync(tugboat);
@@ -2369,17 +2359,25 @@ namespace
         CacheDamageScale(lastOnline.UserID, -1f);
     }
 
-    private void CacheAllPlayerPermissions()
+    private bool CacheAllPlayerPermissions()
     {
+      var permissionsChanged = false;
       foreach (var (userID, scaleCache) in _scaleCache)
-        RefreshPlayerPermissionState(userID, scaleCache);
+        permissionsChanged |= RefreshPlayerPermissionState(userID, scaleCache);
+
+      return permissionsChanged;
     }
 
     private void RefreshGroupPermissionState(string permissionName)
     {
+      var permissionsChanged = false;
       if (permissionName == Configuration.Permission.Protect ||
-          permissionName == Configuration.Permission.TaxProtection)
-        CacheAllPlayerPermissions();
+          permissionName == Configuration.Permission.TaxProtection ||
+          permissionName == Configuration.Permission.OnlineProtect)
+        permissionsChanged = CacheAllPlayerPermissions();
+
+      if (permissionsChanged)
+        RefreshAllProtectionViews();
 
       if (permissionName != Configuration.Permission.Admin ||
           !CacheAllAdmins(out var hasNewAdmin))
@@ -2391,12 +2389,19 @@ namespace
     private void RefreshUserPermissionState(
       string id, string permissionName = null)
     {
+      ulong userID = 0UL;
+      var permissionsChanged = false;
       if ((permissionName is null ||
            permissionName == Configuration.Permission.Protect ||
-           permissionName == Configuration.Permission.TaxProtection) &&
-          ulong.TryParse(id, out var userID) &&
-          _scaleCache.TryGetValue(userID, out var scaleCache))
-        RefreshPlayerPermissionState(userID, scaleCache);
+           permissionName == Configuration.Permission.TaxProtection ||
+           permissionName == Configuration.Permission.OnlineProtect) &&
+           ulong.TryParse(id, out userID) &&
+           _scaleCache.TryGetValue(userID, out var scaleCache))
+        permissionsChanged =
+          RefreshPlayerPermissionState(userID, scaleCache);
+
+      if (permissionsChanged)
+        RefreshProtectionViews(userID);
 
       if (permissionName is not null &&
           permissionName != Configuration.Permission.Admin)
@@ -2408,20 +2413,24 @@ namespace
       QueueMapMarkerRefresh(becameAdmin);
     }
 
-    private void RefreshPlayerPermissionState(
+    private bool RefreshPlayerPermissionState(
       ulong userID, PlayerScaleCache scaleCache)
     {
-      var hasProtectPermission =
-        userID.HasPermission(Configuration.Permission.Protect);
-      var hasTaxPermission = Configuration.TaxProtection.Enabled &&
+      var hasProtectPerm = userID.HasPermission(Configuration.Permission.Protect);
+      var hasTaxPerm = Configuration.TaxProtection.Enabled &&
         userID.HasPermission(Configuration.Permission.TaxProtection);
-      if (scaleCache.HasProtectPermission == hasProtectPermission &&
-          scaleCache.HasTaxPermission == hasTaxPermission)
-        return;
+      var hasOnlinePerm = userID.HasPermission(Configuration.Permission.OnlineProtect);
 
-      scaleCache.HasProtectPermission = hasProtectPermission;
-      scaleCache.HasTaxPermission = hasTaxPermission;
+      if (scaleCache.HasProtectPermission == hasProtectPerm &&
+          scaleCache.HasTaxPermission == hasTaxPerm &&
+          scaleCache.HasOnlineProtectPermission == hasOnlinePerm)
+        return false;
+
+      scaleCache.HasProtectPermission = hasProtectPerm;
+      scaleCache.HasTaxPermission = hasTaxPerm;
+      scaleCache.HasOnlineProtectPermission = hasOnlinePerm;
       scaleCache.ExpiresDT = System.DateTime.MinValue;
+      return true;
     }
 
     private void CacheDamageScale(ulong targetID, float scale)
@@ -2437,7 +2446,8 @@ namespace
           System.DateTime.MinValue, scale,
           targetID.HasPermission(Configuration.Permission.Protect),
           Configuration.TaxProtection.Enabled &&
-          targetID.HasPermission(Configuration.Permission.TaxProtection));
+          targetID.HasPermission(Configuration.Permission.TaxProtection),
+          targetID.HasPermission(Configuration.Permission.OnlineProtect));
         _scaleCache[targetID] = scaleCache;
         scaleCache.CacheMessages(this, targetID.ToString());
       }
@@ -3120,9 +3130,15 @@ namespace
       if (targetID is 0UL || !authorizedPlayers.Contains(targetID))
         targetID = firstPlayer;
 
+      // Get the most recent team member based on the configuration setting
       targetID = GetRecentActiveMemberAll(
         targetID, authorizedPlayers, nowUtc);
       var targetScaleCache = GetOrCreateScaleCache(targetID, nowUtc);
+
+      // Penalty status should be checked first
+      if (!_lastOnline.TryGetValue(targetID, out var targetLastOnline) ||
+          IsApiPenaltyActive(targetLastOnline, nowUtc))
+        return DamageDecision.Allow(targetID, isVehicle);
 
       // --- Tax Protection ---
       long taxProtEndTicks = 0L;
@@ -3136,11 +3152,9 @@ namespace
       float scale;
       if (hasTaxProtection)
       {
-        if (!_lastOnline.TryGetValue(targetID, out var purchasedLastOnline))
-          return DamageDecision.Allow(targetID, isVehicle);
 
         scale = GetCachedDamageScale(
-          targetID, purchasedLastOnline, targetScaleCache, nowUtc);
+          targetID, targetLastOnline, targetScaleCache, nowUtc);
         return CreateDamageDecision(
           targetID, scale, isVehicle, targetScaleCache,
           taxProtEndTicks);
@@ -3151,14 +3165,14 @@ namespace
           targetID, isVehicle, taxProtectionGated: true);
       // --- Tax Protection ---
 
-      var isOnlineRaidProtectionEnabled = Configuration.RaidProtection.OnlineRaidProtection;
+      // Check the online status and the configuration setting / cached permission
+      var isOnlineRaidProtectionEnabled = Configuration.RaidProtection.OnlineRaidProtection ||
+        targetScaleCache.HasOnlineProtectPermission;
+
       if (!isOnlineRaidProtectionEnabled && AnyPlayersOnline(authorizedPlayers))
         return DamageDecision.Allow(targetID, isVehicle);
 
-      // Get the most recent team member based on the configuration setting
-      if (!_lastOnline.TryGetValue(targetID, out var targetLastOnline) ||
-          (!isOnlineRaidProtectionEnabled && IsOnline(targetID)) ||
-          nowUtc.Ticks <= targetLastOnline.PenaltyEndTicks)
+      if (!isOnlineRaidProtectionEnabled && IsOnline(targetID))
         return DamageDecision.Allow(targetID, isVehicle);
 
       scale = GetCachedDamageScale(targetID, targetLastOnline, targetScaleCache, nowUtc);
@@ -3457,7 +3471,8 @@ namespace
         System.DateTime.MinValue, -1f,
         targetID.HasPermission(Configuration.Permission.Protect),
         Configuration.TaxProtection.Enabled &&
-        targetID.HasPermission(Configuration.Permission.TaxProtection));
+        targetID.HasPermission(Configuration.Permission.TaxProtection),
+        targetID.HasPermission(Configuration.Permission.OnlineProtect));
       _scaleCache[targetID] = scaleCache;
       scaleCache.CacheMessages(this, targetID.ToString());
       return scaleCache;
@@ -3526,8 +3541,10 @@ namespace
       PlayerScaleCache scaleCache, System.DateTime nowUtc,
       out long boundaryTicks, out float[] damageScaleKeys)
     {
-      if (targetLastOnline is null || !Configuration.RaidProtection.OnlineRaidProtection &&
-          IsOnline(targetID))
+      var isOnlineRaidProtectionEnabled = Configuration.RaidProtection.OnlineRaidProtection ||
+        (scaleCache is not null && scaleCache.HasOnlineProtectPermission);
+
+      if (targetLastOnline is null || (!isOnlineRaidProtectionEnabled && IsOnline(targetID)))
       {
         boundaryTicks = 0L;
         damageScaleKeys = null;
@@ -3548,6 +3565,7 @@ namespace
         timeScales.AbsoluteTimeScale, timeScales.AbsoluteTimeScaleKeys,
         timeScales.DamageScale, damageScaleKeys,
         targetID, targetLastOnline, nowUtc,
+        isOnlineRaidProtectionEnabled,
         out var offlineTimeScaleApplies);
 
       UpdateRemainingTime(
@@ -3585,7 +3603,8 @@ namespace
       Dictionary<float, float> damageScale,
       float[] damageScaleKeys,
       ulong targetID, LastOnlineData targetLastOnline,
-      System.DateTime nowUtc, out bool offlineTimeScaleApplies)
+      System.DateTime nowUtc, bool allowOnlineProtection,
+      out bool offlineTimeScaleApplies)
     {
       offlineTimeScaleApplies = false;
       if (absoluteTimeScaleKeys.Length > 0)
@@ -3598,11 +3617,13 @@ namespace
           return scale;
       }
 
+      var isOnline = IsOnline(targetID);
       if (damageScaleKeys.Length is 0 ||
-          !IsOffline(targetID, targetLastOnline, nowUtc))
+          (!allowOnlineProtection &&
+           !IsOffline(targetID, targetLastOnline, nowUtc)))
         return -1f;
 
-      if (Configuration.RaidProtection.CooldownQualifyMinutes > 0)
+      if (!isOnline && Configuration.RaidProtection.CooldownQualifyMinutes > 0)
       {
         var minutes =
           (targetLastOnline.LastOnlineTicks - targetLastOnline.LastConnectTicks) /
@@ -3613,7 +3634,8 @@ namespace
           return -1f;
       }
 
-      var hours = GetOfflineHoursUnchecked(targetLastOnline, nowUtc);
+      var hours = isOnline ? 0f :
+        GetOfflineHoursUnchecked(targetLastOnline, nowUtc);
 
       if (hours < damageScaleKeys[0])
       {
@@ -4026,10 +4048,12 @@ namespace
       private readonly long RemainingMinutes;
       private readonly long PenaltySeconds;
       private readonly bool HasTaxProtection;
+      private readonly bool HasOnlineProtection;
 
       public HudStateSnapshot(
         ulong targetNetworkID, HUDProtectionState state, float scale,
-        long remainingMinutes, long penaltySeconds, bool hasTaxProtection)
+        long remainingMinutes, long penaltySeconds, bool hasTaxProtection,
+        bool hasOnlineProtection)
       {
         TargetNetworkID = targetNetworkID;
         State = state;
@@ -4037,6 +4061,7 @@ namespace
         RemainingMinutes = remainingMinutes;
         PenaltySeconds = penaltySeconds;
         HasTaxProtection = hasTaxProtection;
+        HasOnlineProtection = hasOnlineProtection;
       }
 
       public bool Matches(in HudStateSnapshot other) =>
@@ -4045,7 +4070,8 @@ namespace
         Scale == other.Scale &&
         RemainingMinutes == other.RemainingMinutes &&
         PenaltySeconds == other.PenaltySeconds &&
-        HasTaxProtection == other.HasTaxProtection;
+        HasTaxProtection == other.HasTaxProtection &&
+        HasOnlineProtection == other.HasOnlineProtection;
     }
 
 #endregion Types & Classes
@@ -4253,16 +4279,17 @@ namespace
 
       var snapshot = CreateStatusHudSnapshot(
         GetNetworkId(protectedEntity), in decision, nowUtc,
-        hasTaxProtection);
+        hasTaxProtection, out var penaltyEndTicks);
       if (hudState.IsVisible && hudState.HasSnapshot &&
           hudState.Snapshot.Matches(in snapshot))
         return;
 
 #if CARBON
-      RenderStatusHud(player, in decision, nowUtc, hasTaxProtection);
+      RenderStatusHud(
+        player, in decision, nowUtc, hasTaxProtection, penaltyEndTicks);
 #else
       var payload = BuildStatusHudPayload(
-        in decision, nowUtc, hasTaxProtection);
+        in decision, nowUtc, hasTaxProtection, penaltyEndTicks);
       CuiHelper.DestroyUi(player, STATUS_HUD_NAME);
       CuiHelper.AddUi(player, payload);
 #endif
@@ -4274,7 +4301,7 @@ namespace
 
     private HudStateSnapshot CreateStatusHudSnapshot(
       ulong targetNetworkID, in DamageDecision decision, System.DateTime nowUtc,
-      bool hasTaxProtection)
+      bool hasTaxProtection, out long penaltyEndTicks)
     {
       var options = Configuration.StatusHud;
       var state = GetProtectionState(in decision);
@@ -4288,15 +4315,13 @@ namespace
           System.TimeSpan.TicksPerMinute;
       }
 
-      var penaltySeconds = 0L;
+      penaltyEndTicks = 0L;
       if (options.ShowPenaltyTimer &&
           state is not HUDProtectionState.Decaying and not HUDProtectionState.Grief &&
           _lastOnline.TryGetValue(decision.TargetID, out var lastOnline) &&
           lastOnline.PenaltyEndTicks > nowUtc.Ticks)
       {
-        penaltySeconds =
-          (lastOnline.PenaltyEndTicks - nowUtc.Ticks) /
-          System.TimeSpan.TicksPerSecond;
+        penaltyEndTicks = lastOnline.PenaltyEndTicks;
       }
 
       return new(
@@ -4304,18 +4329,22 @@ namespace
         state,
         decision.Scale,
         remainingMinutes,
-        penaltySeconds,
-        hasTaxProtection);
+        penaltyEndTicks > 0L ?
+          (penaltyEndTicks - nowUtc.Ticks) / System.TimeSpan.TicksPerSecond :
+          0L,
+        hasTaxProtection,
+        HasOnlineProtection(in decision));
     }
 
 #if !CARBON
     private string BuildStatusHudPayload(
       in DamageDecision decision, System.DateTime nowUtc,
-      bool hasTaxProtection)
+      bool hasTaxProtection, long penaltyEndTicks)
     {
       _hudBuilder.Clear();
       _hudBuilder.Append(_hudPayloadPrefix);
-      AppendStatusHudText(in decision, nowUtc, hasTaxProtection);
+      AppendStatusHudText(
+        in decision, nowUtc, hasTaxProtection, penaltyEndTicks);
       _hudBuilder.Append(STATUS_HUD_PAYLOAD_SUFFIX);
       return _hudBuilder.ToString();
     }
@@ -4324,10 +4353,11 @@ namespace
 #if CARBON
     private void RenderStatusHud(
       BasePlayer player, in DamageDecision decision, System.DateTime nowUtc,
-      bool hasTaxProtection)
+      bool hasTaxProtection, long penaltyEndTicks)
     {
       _hudBuilder.Clear();
-      AppendStatusHudText(in decision, nowUtc, hasTaxProtection);
+      AppendStatusHudText(
+        in decision, nowUtc, hasTaxProtection, penaltyEndTicks);
       CuiHandler.Destroy(STATUS_HUD_NAME, player);
 
       var lui = CreateCUI().v2;
@@ -4352,7 +4382,7 @@ namespace
 
     private void AppendStatusHudText(
       in DamageDecision decision, System.DateTime nowUtc,
-      bool hasTaxProtection)
+      bool hasTaxProtection, long penaltyEndTicks)
     {
       var options = Configuration.StatusHud;
       var state = GetProtectionState(in decision);
@@ -4366,13 +4396,17 @@ namespace
 
           if (options.ShowProtectionPercentage)
           {
+            var hasOnlineProtection = HasOnlineProtection(in decision);
             _hudBuilder.Append("\n<size=")
             .Append(STATUS_HUD_BODY_FONT_SIZE)
             .Append("><color=")
             .Append(STATUS_HUD_SUBTEXT_COLOR)
             .Append('>');
             AppendPercentage(_hudBuilder, percent);
-            _hudBuilder.Append("% Protection</color></size>");
+            _hudBuilder.Append('%');
+            if (hasOnlineProtection)
+              _hudBuilder.Append(" Online");
+            _hudBuilder.Append(" Protection</color></size>");
           }
           break;
 
@@ -4437,9 +4471,7 @@ namespace
       if (!options.ShowPenaltyTimer ||
         state is HUDProtectionState.Decaying
           or HUDProtectionState.Grief ||
-          !_lastOnline.TryGetValue(
-            decision.TargetID, out var lastOnline) ||
-          lastOnline.PenaltyEndTicks <= nowUtc.Ticks)
+          penaltyEndTicks <= nowUtc.Ticks)
         return;
 
       _hudBuilder.Append("\n<size=")
@@ -4448,7 +4480,7 @@ namespace
         .Append(STATUS_HUD_PENALTY_COLOR)
         .Append('>')
         .Append(STATUS_HUD_PENALTY_TEXT);
-      AppendHudDuration(lastOnline.PenaltyEndTicks - nowUtc.Ticks);
+      AppendHudDuration(penaltyEndTicks - nowUtc.Ticks);
       _hudBuilder.Append("</color></size>");
     }
 
@@ -4688,6 +4720,10 @@ namespace
       decision.PurchasedProtectionEndTicks > 0L &&
       (state is HUDProtectionState.Protected or HUDProtectionState.Partial);
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool HasOnlineProtection(in DamageDecision decision) =>
+      decision.TargetScaleCache?.HasOnlineProtectPermission is true;
+
     private bool IsTrustedForCupboard(
       BasePlayer player, BuildingPrivlidge privilege)
     {
@@ -4786,6 +4822,29 @@ namespace
           System.StringComparison.Ordinal);
     }
 
+    private void RefreshCupboardAuthorizationViews(
+      BuildingPrivlidge buildingPrivlidge, BasePlayer player)
+    {
+      UpdateTcMarkerLabel(buildingPrivlidge);
+      QueueCupboardStatusHudRefresh(buildingPrivlidge);
+      QueueStatusHudRefresh(player);
+    }
+
+    private void RefreshProtectionViews(ulong userID)
+    {
+      QueueTaxProtectionSync();
+      QueueStatusHudRefresh(_players.GetPlayer(userID));
+      QueueMapMarkerRefresh();
+    }
+
+    private void RefreshAllProtectionViews()
+    {
+      QueueTaxProtectionSync();
+      foreach (var player in BasePlayer.activePlayerList)
+        QueueStatusHudRefresh(player);
+      QueueMapMarkerRefresh();
+    }
+
 #endregion Helper Methods
 
 #endregion Status HUD
@@ -4829,6 +4888,7 @@ namespace
       "assets/prefabs/deployable/vendingmachine/vending_mapmarker.prefab";
 
     private const string MAP_MARKER_PROTECTED_TEXT = "PROTECTED ";
+    private const string MAP_MARKER_ONLINE_PROTECTED_TEXT = "ONLINE PROTECTED ";
     private const string MAP_MARKER_DECAYING_TEXT = "DECAYING";
     private const string MAP_MARKER_GRIEF_TEXT = "GRIEF";
     private const string MAP_MARKER_INCREASED_DAMAGE_TEXT = "% DAMAGE";
@@ -4865,6 +4925,7 @@ namespace
       public HUDProtectionState ProtectionState;
       public HUDProtectionState LabelProtectionState;
       public bool LabelHasTaxProtection;
+      public bool LabelHasOnlineProtection;
       public string LabelText;
       public float LabelScale;
       public long LabelRemainingMinutes;
@@ -4887,6 +4948,7 @@ namespace
         ProtectionState = default;
         LabelProtectionState = default;
         LabelHasTaxProtection = false;
+        LabelHasOnlineProtection = false;
         LabelText = null;
         LabelScale = 0f;
         LabelRemainingMinutes = 0L;
@@ -5270,12 +5332,12 @@ namespace
       markerGroup.LabelMarker = labelMarker;
       markerGroup.ProtectionState = protectionState;
       var authorizedPlayers = GetMapMarkerAuthorizedPlayers(markerGroup);
-      markerGroup.LabelText = BuildMapMarkerLabel(
-        protectionState, hasTaxProtection, in decision, nowUtc,
-        authorizedPlayers);
       CacheMapMarkerLabelState(
         markerGroup, protectionState, hasTaxProtection, in decision, nowUtc,
         authorizedPlayers);
+      markerGroup.LabelText = BuildMapMarkerLabel(
+        protectionState, hasTaxProtection, in decision, nowUtc,
+        markerGroup.LabelPenaltyEndTicks, authorizedPlayers);
       labelMarker.markerShopName = markerGroup.LabelText;
       SpawnMapMarkerEntity(radiusMarker);
       SpawnMapMarkerEntity(labelMarker);
@@ -5306,11 +5368,7 @@ namespace
       radiusMarker.SendNetworkUpdate();
       labelMarker.SendNetworkUpdate();
 
-      timer.Once(MAP_MARKER_SEND_UPDATE_DELAY, () =>
-      {
-        if (radiusMarker)
-          radiusMarker.SendUpdate();
-      });
+      QueueMapMarkerRadiusReplay(radiusMarker);
 
       if (_forceRadiusReplay)
         QueueMapMarkerRefresh();
@@ -5409,11 +5467,7 @@ namespace
       radiusMarker.limitNetworking = false;
       radiusMarker.SendNetworkUpdate();
 
-      timer.Once(MAP_MARKER_SEND_UPDATE_DELAY, () =>
-      {
-        if (radiusMarker)
-          radiusMarker.SendUpdate();
-      });
+      QueueMapMarkerRadiusReplay(radiusMarker);
     }
 
     private void UpdateMapMarkerState(
@@ -5443,13 +5497,7 @@ namespace
         markerState.RadiusMarker.SendNetworkUpdate();
         var radiusMarker = markerState.RadiusMarker;
         if (forceRadiusReplay)
-        {
-          timer.Once(MAP_MARKER_SEND_UPDATE_DELAY, () =>
-          {
-            if (radiusMarker)
-              radiusMarker.SendUpdate();
-          });
-        }
+          QueueMapMarkerRadiusReplay(radiusMarker);
         else
           radiusMarker.SendUpdate();
       }
@@ -5462,7 +5510,7 @@ namespace
 
       var label = BuildMapMarkerLabel(
         protectionState, hasTaxProtection, in decision, nowUtc,
-        authorizedPlayers);
+        markerState.LabelPenaltyEndTicks, authorizedPlayers);
       markerState.LabelText = label;
       markerState.LabelMarker.markerShopName = label;
       markerState.LabelMarker.SendNetworkUpdate();
@@ -5480,9 +5528,11 @@ namespace
         out var remainingMinutes, out var penaltyEndTicks,
         out var authorizedPlayerCount,
         out var authorizedPlayerHash);
+      var hasOnlineProtection = HasOnlineProtection(in decision);
 
       if (markerState.LabelProtectionState == protectionState &&
           markerState.LabelHasTaxProtection == hasTaxProtection &&
+          markerState.LabelHasOnlineProtection == hasOnlineProtection &&
           markerState.LabelScale == decision.Scale &&
           markerState.LabelRemainingMinutes == remainingMinutes &&
           markerState.LabelPenaltyEndTicks == penaltyEndTicks &&
@@ -5492,6 +5542,7 @@ namespace
 
       markerState.LabelProtectionState = protectionState;
       markerState.LabelHasTaxProtection = hasTaxProtection;
+      markerState.LabelHasOnlineProtection = hasOnlineProtection;
       markerState.LabelScale = decision.Scale;
       markerState.LabelRemainingMinutes = remainingMinutes;
       markerState.LabelPenaltyEndTicks = penaltyEndTicks;
@@ -5514,6 +5565,7 @@ namespace
         out markerState.LabelAuthorizedPlayerHash);
       markerState.LabelProtectionState = protectionState;
       markerState.LabelHasTaxProtection = hasTaxProtection;
+      markerState.LabelHasOnlineProtection = HasOnlineProtection(in decision);
       markerState.LabelScale = decision.Scale;
     }
 
@@ -5572,7 +5624,8 @@ namespace
     private string BuildMapMarkerLabel(
       HUDProtectionState protectionState, bool hasTaxProtection,
       in DamageDecision decision,
-      System.DateTime nowUtc, PlayerIdSet authorizedPlayers)
+      System.DateTime nowUtc, long penaltyEndTicks,
+      PlayerIdSet authorizedPlayers)
     {
       _mapMarkerBuilder.Clear();
 
@@ -5583,7 +5636,8 @@ namespace
         case HUDProtectionState.Partial:
           var percent = decision.Scale <= 0f ? 100f : decision.Scale.ToPercent();
           _mapMarkerBuilder.Append(ORP_PREFIX)
-            .Append(MAP_MARKER_PROTECTED_TEXT);
+            .Append(HasOnlineProtection(in decision) ?
+              MAP_MARKER_ONLINE_PROTECTED_TEXT : MAP_MARKER_PROTECTED_TEXT);
           AppendPercentage(_mapMarkerBuilder, percent);
           _mapMarkerBuilder.Append('%');
 
@@ -5621,14 +5675,11 @@ namespace
         _mapMarkerBuilder.Append(" (Tax)");
 
       // --- Line 2: Penalty End Time (if active) ---
-      if (protectionState is not HUDProtectionState.Decaying and not HUDProtectionState.Grief &&
-          decision.TargetID is not 0UL &&
-          _lastOnline.TryGetValue(decision.TargetID, out var lastOnline) &&
-          lastOnline.PenaltyEndTicks > nowUtc.Ticks)
+      if (penaltyEndTicks > nowUtc.Ticks)
       {
         var localEndTime = System.TimeZoneInfo.ConvertTimeFromUtc(
-          lastOnline.PenaltyEndDT, _timeZone);
-        var penaltyFormat = lastOnline.PenaltyEndTicks - nowUtc.Ticks >
+          new System.DateTime(penaltyEndTicks), _timeZone);
+        var penaltyFormat = penaltyEndTicks - nowUtc.Ticks >
           System.TimeSpan.TicksPerDay ? MAP_MARKER_LONG_TIME_FORMAT :
           MAP_MARKER_SHORT_TIME_FORMAT;
         _mapMarkerBuilder.Append(MAP_MARKER_PENALTY_PREFIX)
@@ -5663,6 +5714,14 @@ namespace
 
       return _mapMarkerBuilder.ToString();
     }
+
+    private void QueueMapMarkerRadiusReplay(
+      MapMarkerGenericRadius radiusMarker) =>
+      timer.Once(MAP_MARKER_SEND_UPDATE_DELAY, () =>
+      {
+        if (radiusMarker)
+          radiusMarker.SendUpdate();
+      });
 
     private PlayerIdSet GetTotalAuthorizedPlayers(BuildingPrivlidge privilege)
     {
@@ -6310,22 +6369,22 @@ namespace
           !targetScaleCache.HasProtectPermission)
         return false;
 
+      if (_lastOnline.TryGetValue(targetID, out var targetLastOnline) &&
+          IsApiPenaltyActive(targetLastOnline, nowUtc))
+        return false;
+
       if (!IsOnline(targetID))
       {
-        return _lastOnline.TryGetValue(targetID, out var targetLastOnline) &&
+        return _lastOnline.TryGetValue(targetID, out targetLastOnline) &&
           IsOffline(targetID, targetLastOnline, nowUtc);
       }
 
-      if (!Configuration.RaidProtection.OnlineRaidProtection)
+      if (!Configuration.RaidProtection.OnlineRaidProtection &&
+          !targetScaleCache.HasOnlineProtectPermission)
         return false;
 
-      var (absoluteTimeScale, absoluteTimeScaleKeys, _, _, _) =
-        GetActiveTimeScales(nowUtc.Ticks);
-      if (absoluteTimeScaleKeys.Length is 0)
-        return false;
-
-      var scale = absoluteTimeScale.GetValueOrDefault(
-        System.TimeZoneInfo.ConvertTimeFromUtc(nowUtc, _timeZone).Hour, -1f);
+      var scale = GetDamageScale(
+        targetID, targetLastOnline, targetScaleCache, nowUtc);
       return scale is not -1f && scale < 1f;
     }
 
@@ -6715,35 +6774,18 @@ namespace
 
 #region Team Hooks
 
-    private object OnTeamDisband(RelationshipManager.PlayerTeam team)
-    {
-      if (team is null || team.members.Count is 0)
-        return null;
-
-      if (Configuration.Team.TeamAvoidAbuse && AnyPlayersOffline(team.members))
-        return true;
-
-      if (!Configuration.Team.TeamEnablePenalty)
-        return null;
-
-      foreach (var memberID in team.members)
-      {
-        if (!_lastOnline.TryGetValue(memberID, out var member))
-          continue;
-
-        member.EnablePenalty(Configuration.Team.TeamPenaltyDuration);
-        MarkDataDirty();
-      }
-
-      return null;
-    }
+    private object OnTeamDisband(RelationshipManager.PlayerTeam team) =>
+      HandleTeamChange(team);
 
     private object OnTeamKick(
       RelationshipManager.PlayerTeam team, BasePlayer player, ulong _target) =>
       OnTeamLeave(team, player);
 
     private object OnTeamLeave(
-      RelationshipManager.PlayerTeam team, BasePlayer _player)
+      RelationshipManager.PlayerTeam team, BasePlayer _player) =>
+      HandleTeamChange(team);
+
+    private object HandleTeamChange(RelationshipManager.PlayerTeam team)
     {
       if (team is null || team.members.Count is 0)
         return null;
@@ -6754,16 +6796,23 @@ namespace
       if (!Configuration.Team.TeamEnablePenalty)
         return null;
 
-      foreach (var memberID in team.members)
-      {
-        if (!_lastOnline.TryGetValue(memberID, out var member))
-          continue;
-
-        member.EnablePenalty(Configuration.Team.TeamPenaltyDuration);
-        MarkDataDirty();
-      }
+      ApplyTeamPenalty(team.members);
 
       return null;
+    }
+
+    private void ApplyTeamPenalty(List<ulong> memberIDs)
+    {
+      var changedPlayers = 0;
+      var durationHours = Configuration.Team.TeamPenaltyDuration;
+      foreach (var memberID in memberIDs)
+      {
+        if (TryEnablePenalty(memberID, durationHours))
+          changedPlayers++;
+      }
+
+      if (changedPlayers is not 0)
+        MarkDataDirty();
     }
 
 #endregion Team Hooks
@@ -7098,19 +7147,22 @@ namespace
 
       if (duration > 0f)
       {
-        target.EnablePenalty(duration);
-        MarkDataDirty();
+        if (!TryEnablePenalty(userID, target, duration))
+        {
+          ChatMessage(player, MESSAGE_INVALID_SYNTAX);
+          return;
+        }
+
         ChatMessage(player,
           $"{target.UserName} | Penalty until {System.TimeZoneInfo.ConvertTimeFromUtc(target.PenaltyEndDT, _timeZone)}");
       }
       else
       {
-        target.DisablePenalty();
-        MarkDataDirty();
+        TryDisablePenalty(userID, target);
         ChatMessage(player, $"{target.UserName} | Penalty disabled");
       }
 
-      CacheDamageScale(userID, -1f);
+      MarkDataDirty();
     }
 
     private void cmdTestGrief(BasePlayer player, string _command, string[] args)
@@ -7313,7 +7365,8 @@ namespace
       if (!CheckConCmdPerm(arg, Configuration.Permission.Admin))
         return;
 #endif
-      CacheAllPlayerPermissions();
+      if (CacheAllPlayerPermissions())
+        RefreshAllProtectionViews();
       Reply(arg, "Updated the permission status for all players.");
     }
 
@@ -7321,7 +7374,7 @@ namespace
     {
       if (arg is null)
       {
-        PrintError("ccUpdatePermissions(): arg is null");
+        PrintError("ccUpdatePrefabList(): arg is null");
         return;
       }
 #if !CARBON
@@ -7929,7 +7982,7 @@ namespace
 
     public bool API_EnablePenalty(ulong playerID, float durationHours)
     {
-      if (!TryEnableApiPenalty(playerID, durationHours))
+      if (!TryEnablePenalty(playerID, durationHours))
         return false;
 
       MarkDataDirty();
@@ -7938,7 +7991,7 @@ namespace
 
     public bool API_DisablePenalty(ulong playerID)
     {
-      if (!TryDisableApiPenalty(playerID))
+      if (!TryDisablePenalty(playerID))
         return false;
 
       MarkDataDirty();
@@ -7948,7 +8001,7 @@ namespace
     public int API_EnablePenalties(
       ICollection<ulong> playerIDs, float durationHours)
     {
-      if (!IsApiPenaltyDurationValid(durationHours) ||
+      if (!IsPenaltyDurationValid(durationHours) ||
           playerIDs is null || playerIDs.Count is 0)
         return 0;
 
@@ -7959,7 +8012,7 @@ namespace
       var changedPlayers = 0;
       foreach (var playerID in _tmpIdsScratch)
       {
-        if (TryEnableApiPenalty(playerID, durationHours))
+        if (TryEnablePenalty(playerID, durationHours))
           changedPlayers++;
       }
 
@@ -7981,7 +8034,7 @@ namespace
       var changedPlayers = 0;
       foreach (var playerID in _tmpIdsScratch)
       {
-        if (TryDisableApiPenalty(playerID))
+        if (TryDisablePenalty(playerID))
           changedPlayers++;
       }
 
@@ -8021,10 +8074,11 @@ namespace
       ulong playerID, LastOnlineData lastOnline,
       System.DateTime nowUtc, out float[] damageScaleKeys)
     {
+      var scaleCache = GetOrCreateScaleCache(playerID, nowUtc);
       if (!IsApiPenaltyActive(lastOnline, nowUtc) &&
-          playerID.HasPermission(Configuration.Permission.Protect))
+          scaleCache.HasProtectPermission)
         return GetDamageScale(
-          playerID, lastOnline, null, nowUtc, out _, out damageScaleKeys);
+          playerID, lastOnline, scaleCache, nowUtc, out _, out damageScaleKeys);
 
       damageScaleKeys = null;
       return -1f;
@@ -8052,25 +8106,33 @@ namespace
       LastOnlineData lastOnline, System.DateTime nowUtc) =>
         lastOnline is not null && nowUtc.Ticks <= lastOnline.PenaltyEndTicks;
 
-    private static bool IsApiPenaltyDurationValid(float durationHours) =>
+    private static bool IsPenaltyDurationValid(float durationHours) =>
       durationHours > 0f && !float.IsNaN(durationHours) &&
       !float.IsInfinity(durationHours);
 
-    private bool TryEnableApiPenalty(ulong playerID, float durationHours)
+    private bool TryEnablePenalty(ulong playerID, float durationHours) =>
+      _lastOnline.TryGetValue(playerID, out var lastOnline) &&
+      TryEnablePenalty(playerID, lastOnline, durationHours);
+
+    private bool TryEnablePenalty(
+      ulong playerID, LastOnlineData lastOnline, float durationHours)
     {
-      if (!IsApiPenaltyDurationValid(durationHours) ||
-          !_lastOnline.TryGetValue(playerID, out var lastOnline))
+      if (!IsPenaltyDurationValid(durationHours) || lastOnline is null)
         return false;
 
       lastOnline.EnablePenalty(durationHours);
       CacheDamageScale(playerID, -1f);
+      QueueTaxProtectionSync();
       return true;
     }
 
-    private bool TryDisableApiPenalty(ulong playerID)
+    private bool TryDisablePenalty(ulong playerID) =>
+      _lastOnline.TryGetValue(playerID, out var lastOnline) &&
+      TryDisablePenalty(playerID, lastOnline);
+
+    private bool TryDisablePenalty(ulong playerID, LastOnlineData lastOnline)
     {
-      if (!_lastOnline.TryGetValue(playerID, out var lastOnline) ||
-          lastOnline.PenaltyEndTicks is 0L)
+      if (lastOnline?.PenaltyEndTicks is 0L or null)
         return false;
 
       lastOnline.DisablePenalty();

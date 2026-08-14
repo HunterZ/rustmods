@@ -91,13 +91,14 @@ public class PlayerSafetyNet : RustPlugin
       return false;
     }
 
-    // try to ignore any entities that could be the source of a corpse that is
-    //  being spawned - otherwise oil rig scientists tend to do flips, stick
-    //  to ceilings, etc. for some reason lol
+    // try to ignore any entities that could be a corpse or its source -
+    //  otherwise oil rig scientists tend to do sick flips, fly up and stick to
+    //  ceilings, etc. for some reason lol
     var cEntity = collider.ToBaseEntity();
     return !cEntity ||
            (!cEntity.HasTrait(BaseEntity.TraitFlag.Alive) &&
-            cEntity is not (BaseCombatEntity { IsNpc: true } or RidableHorse));
+            cEntity is not (BaseCombatEntity { IsNpc: true }
+              or BaseCorpse or RidableHorse));
   }
 
   // get Y coordinate of appropriate prefab, terrain, or world bound that would
