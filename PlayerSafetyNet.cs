@@ -4,12 +4,11 @@ using Rust;
 using System.Collections.Generic;
 using System;
 using System.Text;
-using Facepunch.Extend;
 using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Player Safety Net", "HunterZ", "0.0.3")]
+[Info("Player Safety Net", "HunterZ", "0.0.4")]
 public class PlayerSafetyNet : RustPlugin
 {
   #region Data
@@ -19,33 +18,43 @@ public class PlayerSafetyNet : RustPlugin
 
   private const int RaycastHitsMax = 64;
   private readonly RaycastHit[] _raycastHits = new RaycastHit[RaycastHitsMax];
-  private const float MaxDist = 10000f;
+  private const float MaxDist = 2000f;
 
-  private const int SolidLayerMask =
-    Layers.Solid;
-
-  private enum Match { Any, Closest, Farthest }
-
-  private enum Blocking { Ignore, IgnoreCliff, Include, Require, RequireCliff }
+  private const int SolidLayerMask = Layers.Solid;
 
   private Collider _terrainCollider;
   private Collider _deepSeaBottomCollider;
 
-  private readonly SortedDictionary<string, (int, int)> _stats = new();
+  private readonly SortedDictionary<string, int> _statsIndexes = new();
+  private readonly List<int> _statsData = new(300);
+  private readonly int[] _newIgnored = { 1, 0, 0 };
+  private readonly int[] _newUnmoved = { 0, 1, 0 };
+  private readonly int[] _newBounced = { 0, 0, 1 };
   private readonly StringBuilder _sb = new();
+  private const string OnPlayerDeathKey = "OnPlayerDeath";
+  private const string CanDropActiveItemKey = "CanDropActiveItem";
 
-  private enum Columns
+  private enum StatColumn
   {
-    EntityOrHook,
-    Looked,
+    HookAndPrefab,
+    Ignored,
+    Unmoved,
     Bounced
-  };
+  }
+
+  private enum StatType
+  {
+    Ignored = 0,
+    Unmoved = 1,
+    Bounced = 2
+  }
 
   private readonly int[] _columnWidths =
   {
-    nameof(Columns.EntityOrHook).Length,
-    nameof(Columns.Looked).Length,
-    nameof(Columns.Bounced).Length
+    nameof(StatColumn.HookAndPrefab).Length,
+    nameof(StatColumn.Ignored).Length,
+    nameof(StatColumn.Unmoved).Length,
+    nameof(StatColumn.Bounced).Length
   };
 
   private PluginConfig _config;
@@ -54,109 +63,70 @@ public class PlayerSafetyNet : RustPlugin
 
   #region Helpers
 
-  private static bool IsFormation(string name) =>
-    true == name?.StartsWith("cliff") ||
-    true == name?.StartsWith("rock_formation_");
+  // return whether a raycast is of interest
+  private bool ProcessHit(RaycastHit hit, bool up)
+  {
+    var collider = hit.collider;
+    if (!collider) return false;
 
-  private static bool IsBlocking(RaycastHit hit, string name) =>
-    IsFormation(name) ||
-    hit.IsOnLayer(Layer.Construction) ||
-    hit.IsOnLayer(Layer.Deployed);
+    switch (up)
+    {
+      // ignore terrain colliders when looking up
+      case true when
+        collider == _terrainCollider || collider == _deepSeaBottomCollider:
+      // ignore terrain if downward hit is inside a terrain ignore volume
+      // NOTE: GetIgnore() handles checking whether the hit is a terrain one, so
+      //  there's no point doing it here as well
+      case false when TerrainMeta.Collision.GetIgnore(hit):
+      {
+        return false;
+      }
+    }
 
-  private static bool IsIgnored(string colliderName) =>
-    !string.IsNullOrEmpty(colliderName) && colliderName is
-      "Add_To_Height" or
-      "Collider" or
-      "junkpile_base";
+    // check for blacklisted names
+    var colliderName = collider.name;
+    if (colliderName.Length > 0 &&
+        colliderName is "Add_To_Height" or "Collider" or "junkpile_base")
+    {
+      return false;
+    }
+
+    // try to ignore any entities that could be the source of a corpse that is
+    //  being spawned - otherwise oil rig scientists tend to do flips, stick
+    //  to ceilings, etc. for some reason lol
+    var cEntity = collider.ToBaseEntity();
+    return !cEntity ||
+           (!cEntity.HasTrait(BaseEntity.TraitFlag.Alive) &&
+            cEntity is not (BaseCombatEntity { IsNpc: true } or RidableHorse));
+  }
 
   // get Y coordinate of appropriate prefab, terrain, or world bound that would
   //  stop movement in the given direction from the given position
   //
   // returns null on invalid maxDistance or appropriate height not found
-  private float? GetTerminalY(
-    Vector3 position, Match match, float maxDistance, Blocking blocking,
-    int mask, bool up)
+  private float? GetTerminalY(Vector3 position, float maxDistance, bool up)
   {
-    var down = !up;
     var direction = up ? Vector3.up : Vector3.down;
-    var cDist = Match.Closest == match ? MaxDist : -MaxDist;
+    var cDist = MaxDist;
     float? cY = null;
+
     // optimization: abort if distance is non-positive
     if (maxDistance <= 0)
     {
       return null;
     }
+
     var hitCount = Physics.RaycastNonAlloc(
-      position, direction, _raycastHits, maxDistance, mask);
+      position, direction, _raycastHits, maxDistance, SolidLayerMask);
     if (hitCount >= _raycastHits.Length)
     {
       PrintWarning($"GetWorldDistanceAndY(): Raycast hit count at or above configured maximum ({hitCount}/{_raycastHits.Length})");
     }
+
     for (var i = 0; i < hitCount; ++i)
     {
       var hit = _raycastHits[i];
-      var collider = hit.collider;
-      if (!collider) continue;
-      // ignore terrain colliders when looking up
-      if (up &&
-          (collider == _terrainCollider || collider == _deepSeaBottomCollider))
-      {
-        continue;
-      }
-      // ignore terrain if downward hit is inside a terrain ignore volume
-      // NOTE: GetIgnore() handles checking whether the hit is a terrain one, so
-      //  there's no point doing it here as well
-      if (down && TerrainMeta.Collision.GetIgnore(hit))
-      {
-        continue;
-      }
-      // check for blacklisted names
-      var colliderName = collider.name;
-      if (IsIgnored(colliderName)) continue;
-      // try to ignore any entities that could be the source of a corpse that is
-      //  being spawned - otherwise oil rig scientists tend to do flips, stick
-      //  to ceilings, etc. for some reason lol
-      var cEntity = collider.ToBaseEntity();
-      if (cEntity && cEntity is
-            BaseCombatEntity {lifestate: BaseCombatEntity.LifeState.Dead} or
-            BaseNpc or BaseNPC2 or BasePlayer or RidableHorse)
-      {
-        continue;
-      }
-      switch (blocking)
-      {
-        case Blocking.Ignore:
-          if (IsBlocking(hit, colliderName)) continue;
-          break;
-        case Blocking.IgnoreCliff:
-          if (IsFormation(colliderName)) continue;
-          break;
-        case Blocking.Include:
-          break;
-        case Blocking.Require:
-          if (!IsBlocking(hit, colliderName)) continue;
-          break;
-        case Blocking.RequireCliff:
-          if (!IsFormation(colliderName)) continue;
-          break;
-        default:
-          throw new ArgumentOutOfRangeException(nameof(blocking), blocking, null);
-      }
-      switch (match)
-      {
-        case Match.Any:
-          cDist = hit.distance;
-          cY = position.y + cDist * direction.y;
-          return cY;
-        case Match.Closest when hit.distance >= cDist:
-        case Match.Farthest when hit.distance <= cDist:
-          continue;
-        case Match.Closest:
-        case Match.Farthest:
-          break;
-        default:
-          throw new ArgumentOutOfRangeException(nameof(match), match, null);
-      }
+      if (hit.distance >= cDist || !ProcessHit(hit, up)) continue;
       // best match so far; record it as a candidate
       cDist = hit.distance;
       cY = position.y + cDist * direction.y;
@@ -165,19 +135,18 @@ public class PlayerSafetyNet : RustPlugin
     return cY;
   }
 
-  private float GetClosestSolidAbove(Vector3 position) => GetTerminalY(
-    position, Match.Closest, WorldTop - position.y, Blocking.Include,
-    SolidLayerMask, true) ?? WorldTop;
+  private float GetClosestSolidAbove(Vector3 position) =>
+    GetTerminalY(position, WorldTop - position.y, true) ?? WorldTop;
 
-  private float? GetClosestSolidBelow(Vector3 position) => GetTerminalY(
-    position, Match.Closest, -WorldBottom + position.y, Blocking.Include,
-    SolidLayerMask, false);
+  private float? GetClosestSolidBelow(Vector3 position) =>
+    GetTerminalY(position, -WorldBottom + position.y, false);
 
-  // finds closest ceiling or top of world above position, then finds closest
-  //  appropriate floor below that
+  // use raycasts to simulate bouncing something from the given position off of
+  //  a suitable ceiling (including top of the world), then letting it fall back
+  //  down onto a suitable floor (including terrain and prefabs)
   //
-  // returns null unless a floor was found whose Y coordinate is above
-  //  position.y
+  // if a suitable floor was found, and it is above the given position, return
+  //  its height; else return null
   private float? ShouldMove(Vector3 position)
   {
     // abort if in a holiday dungeon etc. for now
@@ -226,44 +195,77 @@ public class PlayerSafetyNet : RustPlugin
     entity.ServerWorldPosition = new Vector3(oldPos.x, newY, oldPos.z);
   }
 
-  private void RecordLook(string key, bool bounced = false)
+  // record an occurrence of the given stat type for the given key string
+  private void RecordData(string key, StatType type)
   {
-    var bouncedNum = bounced ? 1 : 0;
-    var oldLooked = 0;
-    var oldBounced = 0;
-    if (_stats.TryGetValue(key, out var value))
+    var typeAsInt = (int)type;
+    var statColumn = typeAsInt + 1;
+
+    if (_statsIndexes.TryGetValue(key, out var index))
     {
-      (oldLooked, oldBounced) = value;
+      // increment existing data
+      var newCount = ++_statsData[index + typeAsInt];
+      // check if new value should increase stat column width
+      var digits = newCount.Digits();
+      if (digits > _columnWidths[statColumn])
+      {
+        _columnWidths[statColumn] = digits;
+      }
+      return;
     }
-    _stats[key] = (oldLooked + 1, oldBounced + bouncedNum);
+
+    // add new data triplet with appropriate values
+    _statsData.AddRange(type switch
+    {
+      StatType.Ignored => _newIgnored,
+      StatType.Unmoved => _newUnmoved,
+      StatType.Bounced => _newBounced,
+      _ => throw new ArgumentOutOfRangeException(nameof(type), type, null)
+    });
+    // record new key-index pair
+    index = _statsIndexes.Count * 3;
+    _statsIndexes.Add(key, index);
+    // check if new key should increase stat column width
+    if (key.Length > _columnWidths[0]) _columnWidths[0] = key.Length;
   }
 
-  private void RecordBounce(string key) => RecordLook(key, true);
+  private void RecordIgnored(string key) => RecordData(key, StatType.Ignored);
 
-  private static string ToString(Vector3 position) =>
-    $"{position}/{MapHelper.PositionToString(position)}";
+  private void RecordUnmoved(string key) => RecordData(key, StatType.Unmoved);
+
+  private void RecordBounced(string key) => RecordData(key, StatType.Bounced);
 
   private void BounceEntity<T>(T entity) where T : BaseCombatEntity
   {
-    if (!entity || entity.HasParent() ||
+    if (!entity) return;
+    var entitySignature = $"{entity.GetType()}:{entity.ShortPrefabName}";
+    if (entity.HasParent() ||
         _config.BounceIgnorePrefabs.Contains(entity.PrefabName))
     {
+      RecordIgnored(entitySignature);
       return;
     }
     var position = entity.transform.position;
-    var entitySignature = $"{entity.GetType()}:{entity.ShortPrefabName}";
     if (ShouldMove(position) is not { } newY)
     {
-      RecordLook(entitySignature);
+      RecordUnmoved(entitySignature);
       return;
     }
     if (_config.BounceLog &&
         !_config.LogIgnorePrefabs.Contains(entity.PrefabName))
     {
-      Puts($"Moving {entitySignature} at {ToString(position)} to new Y={newY} ({newY - position.y})");
+      // use StringBuilder scratchpad to build bounce logs, because string
+      //  interpolation would perform extra heap allocations when converting
+      //  numeric primitive values to string representations
+      _sb
+        .Clear().Append("Moving ").Append(entitySignature).Append(" at ")
+        .AppendPosition(position).Append(" to new Y=").Append(newY).Append(" (")
+        .Append(newY - position.y).Append(')');
+      Puts(_sb.ToString());
+      _sb.Clear();
     }
     MoveEntityY(entity, newY);
-    RecordBounce(entitySignature);
+    RecordBounced(entitySignature);
   }
 
   private static Collider GetDeepSeaCollider(DeepSeaManager deepSeaManager)
@@ -279,17 +281,6 @@ public class PlayerSafetyNet : RustPlugin
       }
     }
     return null;
-  }
-
-  private static int NumDigits(ulong n)
-  {
-    var retVal = 1;
-    while (n >= 10)
-    {
-      ++retVal;
-      n /= 10;
-    }
-    return retVal;
   }
 
   #endregion
@@ -362,14 +353,6 @@ public class PlayerSafetyNet : RustPlugin
     if (deepSeaManager && deepSeaManager.IsOpen())
     {
       _deepSeaBottomCollider = GetDeepSeaCollider(deepSeaManager);
-      if (_deepSeaBottomCollider)
-      {
-        Puts($"OnServerInitialized(): Found Deep Sea Bottom collider: {_deepSeaBottomCollider}");
-      }
-      else
-      {
-        PrintWarning("OnServerInitialized(): Deep Sea is open, but failed to find bottom collider");
-      }
     }
   }
 
@@ -383,14 +366,6 @@ public class PlayerSafetyNet : RustPlugin
   {
     if (!deepSeaManager) return;
     _deepSeaBottomCollider = GetDeepSeaCollider(deepSeaManager);
-    if (_deepSeaBottomCollider)
-    {
-      Puts($"OnDeepSeaOpened(): Found Deep Sea Bottom collider: {_deepSeaBottomCollider}");
-    }
-    else
-    {
-      PrintWarning("OnDeepSeaOpened(): Deep Sea is open, but failed to find bottom collider");
-    }
   }
 
   private void OnDeepSeaClose(DeepSeaManager deepSeaManager)
@@ -402,7 +377,7 @@ public class PlayerSafetyNet : RustPlugin
   private void CmdReport(ConsoleSystem.Arg arg)
   {
     _sb.Clear().Append(Name).Append(" statistics:");
-    if (_stats.IsEmpty())
+    if (_statsIndexes.IsEmpty())
     {
       _sb.AppendLine(" [none yet]");
       Puts(_sb.ToString());
@@ -412,45 +387,28 @@ public class PlayerSafetyNet : RustPlugin
 
     _sb.AppendLine().AppendLine();
 
-    foreach (var (key, (looked, bounced)) in _stats)
+    _sb.Append(' ').AppendPadded(
+      nameof(StatColumn.HookAndPrefab), _columnWidths[0]);
+    _sb.Append('|').AppendPadded(
+      nameof(StatColumn.Ignored), _columnWidths[1]);
+    _sb.Append('|').AppendPadded(
+      nameof(StatColumn.Unmoved), _columnWidths[2]);
+    _sb.Append('|').Append(nameof(StatColumn.Bounced)).AppendLine();
+    for (var i = 0; i < _columnWidths.Length; ++i)
     {
-      if (key.Length > _columnWidths[0]) _columnWidths[0] = key.Length;
-      var lookedLen = looked.Digits();
-      if (lookedLen > _columnWidths[1]) _columnWidths[1] = lookedLen;
-      var bouncedLen = bounced.Digits();
-      if (bouncedLen > _columnWidths[2]) _columnWidths[2] = bouncedLen;
+      _sb.Append(i > 0 ? '+' : ' ').Append('-', _columnWidths[i]);
     }
+    _sb.AppendLine();
 
-    _sb
-      .Append(' ')
-      .Append(nameof(Columns.EntityOrHook))
-      .Append(' ', 1 + _columnWidths[0] - nameof(Columns.EntityOrHook).Length)
-      .Append(nameof(Columns.Looked))
-      .Append(' ', 1 + _columnWidths[1] - nameof(Columns.Looked).Length)
-      .Append(nameof(Columns.Bounced))
-      .AppendLine();
-    _sb
-      .Append(' ')
-      .Append('-', _columnWidths[0])
-      .Append(' ')
-      .Append('-', _columnWidths[1])
-      .Append(' ')
-      .Append('-', _columnWidths[2])
-      .AppendLine();
-
-    foreach (var (key, (looked, bounced)) in _stats)
+    foreach (var (key, index) in _statsIndexes)
     {
-      _sb
-        .Append(' ')
-        .AppendPadded(key, _columnWidths[0]);
-      _sb
-        .Append(' ')
-        .AppendPadded(looked, _columnWidths[1]);
-      _sb
-        .Append(' ')
-        .AppendPadded(bounced, _columnWidths[2]);
-      _sb
-        .AppendLine();
+      _sb.Append(' ').AppendPadded(key, _columnWidths[0]);
+      for (var i = 0; i < 3; ++i)
+      {
+        _sb.Append('|').AppendPadded(
+          _statsData[index + i], _columnWidths[i + 1]);
+      }
+      _sb.AppendLine();
     }
 
     _sb.AppendLine();
@@ -460,36 +418,59 @@ public class PlayerSafetyNet : RustPlugin
 
   private object OnPlayerDeath(BasePlayer player, HitInfo info)
   {
-    if (player?.userID.IsSteamId() is not true) return null;
+    if (player?.userID.IsSteamId() is not true)
+    {
+      RecordIgnored(OnPlayerDeathKey);
+      return null;
+    }
     var position = player.transform.position;
     if (ShouldMove(position) is not { } newY)
     {
-      RecordLook("OnPlayerDeath");
+      RecordUnmoved(OnPlayerDeathKey);
       return null;
     }
     if (_config.BounceLog)
     {
-      Puts($"Moving BasePlayer={player.displayName}({player})@{ToString(position)} to new Y={newY} ({newY - position.y})");
+      _sb
+        .Clear().Append("Moving BasePlayer=").Append(player.displayName)
+        .Append('(').Append(player.ToString()).Append(")@")
+        .AppendPosition(position).Append(" to new Y=").Append(newY).Append(" (")
+        .Append(newY - position.y).Append(')');
+      Puts(_sb.ToString());
+      _sb.Clear();
     }
     player.Teleport(new Vector3(position.x, newY, position.z));
-    RecordBounce("OnPlayerDeath");
+    RecordBounced(OnPlayerDeathKey);
     return null;
   }
 
+  // silently ignore NPCPlayer deaths to prevent triggering
+  //  OnPlayerDeath(BasePlayer)
+  private object OnPlayerDeath(NPCPlayer npcPlayer, HitInfo info) => null;
+
   private bool? CanDropActiveItem(BasePlayer player)
   {
-    if (player?.userID.IsSteamId() is not true) return null;
+    if (player?.userID.IsSteamId() is not true)
+    {
+      RecordIgnored(CanDropActiveItemKey);
+      return null;
+    }
     var position = player.transform.position;
     if (ShouldMove(position) is null)
     {
-      RecordLook("CanDropActiveItem");
+      RecordUnmoved(CanDropActiveItemKey);
       return null;
     }
     if (_config.BounceLog)
     {
-      Puts($"Preventing item drop for BasePlayer={player.displayName}({player})@{ToString(position)}");
+      _sb
+        .Clear().Append("Preventing item drop for BasePlayer=")
+        .Append(player.displayName).Append('(').Append(player.ToString())
+        .Append(")@").AppendPosition(position);
+      Puts(_sb.ToString());
+      _sb.Clear();
     }
-    RecordBounce("CanDropActiveItem");
+    RecordBounced(CanDropActiveItemKey);
     return false;
   }
 
@@ -583,4 +564,12 @@ public class PlayerSafetyNet : RustPlugin
   }
 
   #endregion
+}
+
+file static class StringBuilderEx
+{
+  internal static StringBuilder AppendPosition(
+    this StringBuilder sb, Vector3 position) =>
+    sb.Append(position).Append('/').Append(
+      MapHelper.PositionToString(position));
 }
