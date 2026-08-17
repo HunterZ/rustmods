@@ -13,7 +13,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Player Base PvP Zones", "HunterZ", "1.5.0")]
+[Info("Player Base PvP Zones", "HunterZ", "1.6.0")]
 [Description("Maintains Zone Manager / TruePVE exclusion zones around player bases")]
 public class PlayerBasePvpZones : RustPlugin
 {
@@ -107,60 +107,76 @@ public class PlayerBasePvpZones : RustPlugin
   private const string CommandToggle = "toggle";
   private const string TogglePermission = "toggleZones";
 
+  private readonly List<DecayEntityData> _decayEntityData = new(1000);
+
   #endregion Fields
 
   #region Core Methods
 
   private string GetPermission(string suffix) => $"{Name}.{suffix}";
 
-  // generate a current 3D bounding box around a base
-  private Bounds CalculateBuildingBounds(BuildingPrivlidge toolCupboard)
+  // calculate a sphere around the building to which the given TC is attached
+  private (Vector3, float) CalculateBuildingSphere(
+    BuildingPrivlidge toolCupboard)
   {
-    // start with a box around the TC, whose space diagonal is the minimum
-    //  total building radius
-    var buildingBounds = new Bounds(
-      toolCupboard.CenterPoint(),
-      Vector3.one *
-      _configData.Building.MinimumBuildingRadius / Mathf.Sqrt(3f));
+    // lower-bound the radius at the configured value
+    var radius = _configData.Building.MinimumBuildingRadius;
 
     // get building, aborting if not found
-    var building = toolCupboard.GetBuilding();
-    if (null == building) return buildingBounds;
-
-    // precalculate extents for a cube whose space diagonal is the radius
-    var minimumBlockExtents =
-      Vector3.one * _configData.Building.MinimumBlockRadius / Mathf.Sqrt(3f);
-    // precalculate square of minimum block magnitude for comparison purposes
-    var minimumBlockSqrMagnitude =
-      _configData.Building.MinimumBlockRadius *
-      _configData.Building.MinimumBlockRadius;
-
-    // grow buildingBounds volume to contain all building blocks
-    foreach (var buildingBlock in building.buildingBlocks)
+    var building = toolCupboard?.GetBuilding();
+    if (building is null)
     {
-      // get the block's bounds and center those on its world coordinates
-      var blockBounds =
-        new Bounds(buildingBlock.CenterPoint(), buildingBlock.bounds.size);
-      // try to be efficient by checking the largest dimension followed by
-      //  the squared magnitude
-      // this will probably always return true, unless minimumBlockRadius is
-      //  set to a very small value
-      if (blockBounds.extents.Max() < _configData.Building.MinimumBlockRadius
-          && blockBounds.extents.sqrMagnitude < minimumBlockSqrMagnitude)
-      {
-        // block is smaller than the minimum, so substitute in the minimum
-        blockBounds.extents = minimumBlockExtents;
-      }
-      // grow volume to contain this block
-      buildingBounds.Encapsulate(blockBounds);
+      PrintError($"Tool cupboard {toolCupboard} has no attached building; aborting");
+      return (toolCupboard?.CenterPoint() ?? Vector3.zero, radius);
     }
 
-    return buildingBounds;
-  }
+    // get an overall building center by averaging all relevant building
+    //  entities' center points
+    _decayEntityData.Clear();
+    var positionSum = Vector3.zero;
 
-  // derive a radius from building bounding box
-  private static float CalculateBuildingRadius(Bounds buildingBounds) =>
-    buildingBounds.extents.magnitude;
+    foreach (var buildingBlock in building.buildingBlocks)
+    {
+      var obb = buildingBlock.WorldSpaceBounds();
+      var position = obb.position;
+      positionSum += position;
+      var blockRadius = Mathf.Max(
+        obb.extents.magnitude, _configData.Building.MinimumBlockRadius);
+      _decayEntityData.Add(
+        new DecayEntityData(position, blockRadius));
+    }
+
+    if (_configData.Building.IncludeTurretRadius)
+    {
+      foreach (var entity in building.decayEntities)
+      {
+        if (entity is not AutoTurret turret) continue;
+        var position = turret.CenterPoint();
+        positionSum += position;
+        _decayEntityData.Add(
+          new DecayEntityData(position, turret.sightRange));
+      }
+    }
+
+    // protect from division by zero
+    if (_decayEntityData.IsEmpty())
+    {
+      PrintError($"Tool cupboard {toolCupboard} has no usable entities; aborting");
+      return (toolCupboard.CenterPoint(), radius);
+    }
+
+    var center = positionSum / _decayEntityData.Count;
+
+    // get an overall building size by finding the longest distance from the
+    //  building center to the most distant point on a relevant entity's sphere
+    foreach (var data in _decayEntityData)
+    {
+      var dist = Vector3.Distance(center, data.Position) + data.Radius;
+      if (dist > radius) radius = dist;
+    }
+
+    return (center, radius);
+  }
 
   // remove+destroy timer stored in the given dictionary under the given key
   private static bool CancelDictionaryTimer<T>(
@@ -171,40 +187,22 @@ public class PlayerBasePvpZones : RustPlugin
     return true;
   }
 
-  // BuildingBlock wrapper for GetToolCupboard()
+  // Return TC to which given decay entity is physically attached via a
+  //  building, or null if none found
+  //
+  // Note that this will return null for entities deployed on bare ground; this
+  //  is intentional for now
   private static BuildingPrivlidge GetToolCupboard(
-    BuildingBlock buildingBlock) =>
-    GetToolCupboard(buildingBlock.GetBuilding());
+    DecayEntity decayEntity) => GetToolCupboard(decayEntity?.GetBuilding());
 
   // try to find and return a physically-attached TC for the given building, or
   //  null if no suitable result found
   // only supports player-owned TCs (NOT to be confused with player-authed!)
   // this is our differentiator of whether a building should have a zone
   private static BuildingPrivlidge GetToolCupboard(
-    BuildingManager.Building building)
-  {
-    // check the easy stuff first
-    if (null == building ||
-        !building.HasBuildingBlocks() ||
-        !building.HasBuildingPrivileges())
-    {
-      return null;
-    }
-
-    // since the building is in *some* TC range, see if any of those are
-    //  physically attached (credit: Kulltero for this more efficient method)
-    // TODO: can't we compare the building's ID to toolCupboard.buildingID?
-    foreach (var toolCupboard in building.buildingPrivileges)
-    {
-      if (!building.decayEntities.Contains(toolCupboard)) continue;
-      // only one TC can be connected, so return it - or null if it's not
-      //  player-owned
-      return IsPlayerOwned(toolCupboard) ? toolCupboard : null;
-    }
-
-    // no attached player-owned TC found
-    return null;
-  }
+    BuildingManager.Building building) =>
+    building?.GetDominatingBuildingPrivilege() is { } toolCupboard &&
+    IsPlayerOwned(toolCupboard) ? toolCupboard : null;
 
   // get unique ID for any BaseNetworkable object
   // credit: Karuza for suggesting this as the best unique ID approach
@@ -260,6 +258,7 @@ public class PlayerBasePvpZones : RustPlugin
     if (!IsValid(legacyShelter)) return null;
     // OwnerID is zero for shelters for some reason, so find the first
     //  authorized player (if any)
+    //
     // only one player can normally auth to a shelter, but we also want to
     //  account for the possibility of plugin-spawned shelters that are authed
     //  to non-player(s)
@@ -288,7 +287,7 @@ public class PlayerBasePvpZones : RustPlugin
 
   // OwnerID is zero for modular boats for some reason, so check owner of
   //  steering wheel(s)
-  private bool IsPlayerOwned(PlayerBoat modularBoat) =>
+  private static bool IsPlayerOwned(PlayerBoat modularBoat) =>
     GetOwnerID(modularBoat) is not null;
 
   // OwnerID is zero for shelters for some reason, so check auth list instead
@@ -371,18 +370,17 @@ public class PlayerBasePvpZones : RustPlugin
     if (null == building) return;
 
     // get updated building footprint data
-    var buildingBounds = CalculateBuildingBounds(toolCupboard);
-    var radius = CalculateBuildingRadius(buildingBounds);
+    var (position, radius) = CalculateBuildingSphere(toolCupboard);
 
     // abort if footprint basically unchanged
-    if (buildingData.Location == buildingBounds.center &&
+    if (buildingData.Location == position &&
         Mathf.Approximately(buildingData.Radius, radius))
     {
       return;
     }
 
     // update existing building data record
-    buildingData.Update(buildingBounds.center, radius);
+    buildingData.Update(position, radius);
     // update zone
     ZM_CreateOrUpdateZone(buildingData, toolCupboardID);
 
@@ -411,12 +409,11 @@ public class PlayerBasePvpZones : RustPlugin
     }
 
     // get initial building footprint data
-    var buildingBounds = CalculateBuildingBounds(toolCupboard);
-    var radius = CalculateBuildingRadius(buildingBounds);
+    var (position, radius) = CalculateBuildingSphere(toolCupboard);
 
     // create + record new building data record
     var buildingData = Pool.Get<BuildingData>();
-    buildingData.Init(toolCupboard, buildingBounds.center, radius);
+    buildingData.Init(toolCupboard, position, radius);
     _buildingData.Add(toolCupboardID, buildingData);
 
     // create zone
@@ -1047,7 +1044,7 @@ public class PlayerBasePvpZones : RustPlugin
 
     // unsubscribe from OnEntitySpawned() hook calls under OnServerInitialized()
     // PBPZ is not dependent on OnEntitySpawned() during server startup, because
-    //  it scans all entities instead
+    //  it scans all relevant entities instead
     Unsubscribe(nameof(OnEntitySpawned));
     // also initially unsubscribe from damage hooks, because they're expensive
     Unsubscribe(nameof(OnEntityTakeDamage));
@@ -1057,6 +1054,7 @@ public class PlayerBasePvpZones : RustPlugin
     permission.RegisterPermission(GetPermission(TogglePermission), this);
 
     if (null == _configData) return;
+    _decayEntityData.Clear();
     BaseData.SphereDarkness = _configData.SphereDarkness;
   }
 
@@ -1232,6 +1230,9 @@ public class PlayerBasePvpZones : RustPlugin
       }
       _pvpDelayTimers.Clear();
     }
+
+    _decayEntityData.Clear();
+
     Puts("Unload(): ...Cleanup complete.");
   }
 
@@ -1352,16 +1353,15 @@ public class PlayerBasePvpZones : RustPlugin
     //  to minimize side effects
     // NOTE: don't abort here if we have no record, as we need to also handle
     //  the case of a modular boat that is pending creation
-    if (_modularBoatData.TryGetValue(modularBoatID, out var modularBoatData))
+    if (disconnect &&
+        _modularBoatData.TryGetValue(modularBoatID, out var modularBoatData))
     {
-      // disconnect sphere(s) and/or zone if requested
-      if (disconnect)
-      {
-        // release entity reference immediately to minimize side effects
-        modularBoatData.ClearEntity();
-        // also untether ZoneManager zone if present, so that it doesn't disappear
-        UntetherZone(GetZoneID(modularBoatID));
-      }
+      // release entity reference and disconnect spheres immediately to
+      //  minimize side effects
+      modularBoatData.ClearEntity();
+      // also untether ZoneManager zone if present, so that it doesn't
+      //  disappear
+      UntetherZone(GetZoneID(modularBoatID));
     }
 
     // schedule deletion of the dropped modular boat
@@ -1409,6 +1409,26 @@ public class PlayerBasePvpZones : RustPlugin
   // called when a tugboat reaches zero health and sinks
   // NOTE: this only fires for Tugboat and not VehiclePrivilege
   private void OnEntityDeath(Tugboat tugboat) => HandleTugboatEol(tugboat);
+
+  private void OnEntityKill(AutoTurret autoTurret)
+  {
+    if (!_configData.Building.IncludeTurretRadius || !IsPlayerOwned(autoTurret))
+    {
+      return;
+    }
+
+    // attempt to find an attached TC
+    var toolCupboard = GetToolCupboard(autoTurret);
+
+    // abort if no TC found, or if TC is not player-owned
+    if (!IsPlayerOwned(toolCupboard)) return;
+
+    // cache TC ID
+    var toolCupboardID = GetNetworkableID(toolCupboard);
+
+    // schedule a check of the updated player base
+    NextTick(() => ScheduleCheckBuildingData(toolCupboardID));
+  }
 
   // called when a building block is destroyed
   // NOTE: also called when a modular boat building block is destroyed, but we
@@ -1494,15 +1514,23 @@ public class PlayerBasePvpZones : RustPlugin
   //  bunch of stuff to that
   private void OnEntityKill(Tugboat tugboat) => HandleTugboatEol(tugboat);
 
+  // called when an auto turret is spawned
+  // this is preferred over OnEntityBuilt both because it's more
+  //  straightforward, and because it catches things like CopyPaste spawning
+  //  with player owner set
+  private void OnEntitySpawned(AutoTurret autoTurret)
+  {
+    // same logic for spawn or kill
+    OnEntityKill(autoTurret);
+  }
+
   // called when a building block or modular boat block is spawned
   // this is preferred over OnEntityBuilt both because it's more
   //  straightforward, and because it catches things like CopyPaste spawning
   //  with player owner set
   private void OnEntitySpawned(BuildingBlock buildingBlock)
   {
-    // ignore boat blocks
-    if (buildingBlock is BoatBuildingBlock) return;
-    // non-boat building blocks have the same logic for spawn or kill
+    // same logic for spawn or kill
     OnEntityKill(buildingBlock);
   }
 
@@ -1522,11 +1550,11 @@ public class PlayerBasePvpZones : RustPlugin
   // called when a modular boat is spawned
   private void OnEntitySpawned(PlayerBoat modularBoat)
   {
-    // schedule creation of new modular boat record + zone
+    // this needs to be wrapped in NextTick() because boat children are not
+    //  attached at the time the hook fires
     NextTick(() =>
     {
-      // this needs to be checked inside of NextTick() because boat children
-      //  aren't attached at the time the hook fires
+      // schedule creation of new modular boat record + zone
       if (!IsPlayerOwned(modularBoat)) return;
       ScheduleCreateModularBoatData(modularBoat);
     });
@@ -1538,11 +1566,11 @@ public class PlayerBasePvpZones : RustPlugin
   //  with player owner set
   private void OnEntitySpawned(EntityPrivilege legacyShelter)
   {
+    // this needs to be wrapped in NextTick() because Raidable Shelters does not
+    //  clear auth until after spawning
     NextTick(() =>
     {
       // abort if this isn't a player-owned shelter
-      // this needs to be checked inside of NextTick() because Raidable Shelters
-      //  doesn't clear auth until after spawning
       if (!IsPlayerOwned(legacyShelter)) return;
       // schedule creation of new player base record + zone
       ScheduleCreateShelterData(legacyShelter);
@@ -1717,7 +1745,7 @@ public class PlayerBasePvpZones : RustPlugin
   // get non-dying modular boat that player is mounted to
   // don't bother checking auth; mounting requires code lock access, and I'm not
   //  entirely sure how build privileges work for modular boats
-  private PlayerBoat GetPlayerModularBoat(BasePlayer player) =>
+  private static PlayerBoat GetPlayerModularBoat(BasePlayer player) =>
     player?.GetMounted() is SteeringWheel wheel &&
     IsValid(wheel) &&
     wheel.ParentBoat is { IsDying: false }
@@ -1726,7 +1754,7 @@ public class PlayerBasePvpZones : RustPlugin
 
   // get legacy shelter whose build privilege the player is both inside of and
   //  authorized to
-  private EntityPrivilege GetPlayerShelter(BasePlayer player) =>
+  private static EntityPrivilege GetPlayerShelter(BasePlayer player) =>
     // this first step is really here to force a
     //  player.cachedEntityBuildingPrivilege cache update when applicable
     player &&
@@ -1739,20 +1767,21 @@ public class PlayerBasePvpZones : RustPlugin
 
   // get non-dying tugboat that player is mounted and authorized to, or null if
   //  none
-  private VehiclePrivilege GetPlayerTugboat(BasePlayer player) =>
+  private static VehiclePrivilege GetPlayerTugboat(BasePlayer player) =>
     player?.GetMountedVehicle() is Tugboat { IsDying: false } tugboat &&
     GetVehiclePrivilege(tugboat) is {} privilege &&
     privilege.IsAuthed(player)
       ? privilege
       : null;
 
-  private string GetLockoutMessageName(LockoutReason reason) => reason switch
-  {
-    LockoutReason.None => null,
-    LockoutReason.Damage => "ToggleLockoutDamage",
-    LockoutReason.Toggle => "ToggleLockoutToggle",
-    _ => null
-  };
+  private static string GetLockoutMessageName(LockoutReason reason) =>
+    reason switch
+    {
+      LockoutReason.None => null,
+      LockoutReason.Damage => "ToggleLockoutDamage",
+      LockoutReason.Toggle => "ToggleLockoutToggle",
+      _ => null
+    };
 
   // apply zone toggle logic for given player and data set
   private void ToggleZone<T>(
@@ -2265,6 +2294,19 @@ public class PlayerBasePvpZones : RustPlugin
 
   // internal classes
 
+  // struct for tracking bounding spheres around individual DecayEntity objects
+  private struct DecayEntityData
+  {
+    public readonly Vector3 Position;
+    public readonly float Radius;
+
+    public DecayEntityData(Vector3 position, float radius)
+    {
+      Position = position;
+      Radius = radius;
+    }
+  }
+
   // base class for tracking player base data
   private abstract class BaseData : Pool.IPooled
   {
@@ -2575,6 +2617,9 @@ public class PlayerBasePvpZones : RustPlugin
 
     [JsonProperty(PropertyName = "Building zone per-block minimum radius")]
     public float MinimumBlockRadius = 16.0f;
+
+    [JsonProperty(PropertyName = "Building zone includes turret sight range")]
+    public bool IncludeTurretRadius = true;
   }
 
   private sealed class ModularBoatConfigData
@@ -2626,7 +2671,7 @@ public class PlayerBasePvpZones : RustPlugin
   }
 
   // state data pertaining to zone toggling
-  private class ToggleData
+  private sealed class ToggleData
   {
     public ToggleData()
     {
@@ -2656,17 +2701,17 @@ public class PlayerBasePvpZones : RustPlugin
 
   // result flags for CleanupToggleData()
   [Flags]
-  private enum CleanupToggleResult
+  private enum CleanupToggleResults
   {
     None    = 0,
     Changed = 1,
     Defunct = 2
   }
 
-  private static CleanupToggleResult CleanupToggleData(
+  private static CleanupToggleResults CleanupToggleData(
     ToggleData toggleData, DateTime curTime)
   {
-    var retVal = CleanupToggleResult.None;
+    var retVal = CleanupToggleResults.None;
 
     if (LockoutReason.None != toggleData.LockReason &&
         curTime >= toggleData.UnlockTime)
@@ -2674,14 +2719,14 @@ public class PlayerBasePvpZones : RustPlugin
       // lockout expired; reset state to None + MinValue
       toggleData.LockReason = LockoutReason.None;
       toggleData.UnlockTime = DateTime.MinValue;
-      retVal |= CleanupToggleResult.Changed;
+      retVal |= CleanupToggleResults.Changed;
     }
 
     if (LockoutReason.None == toggleData.LockReason && toggleData.ZoneEnabled)
     {
       // no reason to track enabled zone with no lockout in effect, as this is
       //  the default state
-      retVal |= CleanupToggleResult.Defunct;
+      retVal |= CleanupToggleResults.Defunct;
     }
 
     return retVal;
@@ -2690,7 +2735,7 @@ public class PlayerBasePvpZones : RustPlugin
   // prune any dead entities from given toggle dictionary
   // NOTE: doesn't bother expiring lockouts or pruning redundant entries, as
   //  this will get done when checking remaining entries during zone creation
-  private int CleanupToggleDict(
+  private static int CleanupToggleDict(
     Dictionary<ulong, ToggleData> toggleDict)
   {
     // not worth using pooling here, as it will be 3 lists per plugin lifetime
@@ -2737,12 +2782,12 @@ public class PlayerBasePvpZones : RustPlugin
     var changed = false;
     var curTime = DateTime.UtcNow;
     var cleanupState = CleanupToggleData(toggleData, curTime);
-    if (cleanupState.HasFlag(CleanupToggleResult.Defunct))
+    if (cleanupState.HasFlag(CleanupToggleResults.Defunct))
     {
       toggleDict.Remove(netId.Value);
       changed = true;
     }
-    else if (cleanupState.HasFlag(CleanupToggleResult.Changed))
+    else if (cleanupState.HasFlag(CleanupToggleResults.Changed))
     {
       changed = true;
     }
