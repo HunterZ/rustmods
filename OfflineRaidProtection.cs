@@ -34,7 +34,7 @@ namespace
   Oxide.Plugins
 #endif
 {
-  [Info("Offline Raid Protection", "realedwin/HunterZ", "1.7.1"), Description("Prevents/reduces offline raids by other players")]
+  [Info("Offline Raid Protection", "realedwin/HunterZ", "1.7.2"), Description("Prevents/reduces offline raids by other players")]
   public sealed class OfflineRaidProtection :
 #if CARBON
     CarbonPlugin
@@ -58,6 +58,10 @@ namespace
     private readonly Dictionary<uint, TcState> _tcCache = new();
     private readonly Dictionary<uint, CodeLockWhitelistIndex> _codeLockWhitelistCache = new();
     private readonly Dictionary<ulong, uint> _codeLockBuildingIds = new();
+    private readonly List<CodeLock> _queuedSpawnedCodeLocks = new();
+    private readonly Queue<uint> _queuedTcCacheRefreshes = new();
+    private readonly HashSet<uint> _queuedTcCacheRefreshIds = new();
+    private readonly List<uint> _tcCacheRefreshScratch = new();
     private readonly Dictionary<ulong, TcCreationData> _tcCreationData = new();
     private readonly HashSet<ulong> _griefCupboardIds = new();
     private readonly HashSet<ulong> _adminIDCache = new();
@@ -68,9 +72,16 @@ namespace
     private bool _dataDirty;
     private bool _saveQueued;
     private bool _serverInitialized;
+    private bool _spawnedCodeLocksQueued;
+    private System.Action _processQueuedSpawnedCodeLocksAction;
+    private bool _tcCacheRefreshQueued;
+    private System.Action _processQueuedTcCacheRefreshesAction;
 
-    // default to UTC
-    private System.TimeZoneInfo _timeZone = System.TimeZoneInfo.Utc;
+    private static readonly object
+      BoxedFalse = false,
+      BoxedTrue = true;
+
+    private System.TimeZoneInfo _timeZone;
 
 #region Temp
 
@@ -125,6 +136,9 @@ namespace
       [JsonProperty(PropertyName = "Raid Protection Options")]
       public RaidProtectionOptions RaidProtection { get; set; }
 
+      [JsonProperty(PropertyName = "Tax Protection Options")]
+      public TaxProtectionOptions TaxProtection { get; set; }
+
       [JsonProperty(PropertyName = "Apartment Complex Options")]
       public ApartmentOptions ApartmentProtection { get; set; }
 
@@ -148,9 +162,6 @@ namespace
 
       [JsonProperty(PropertyName = "Map Marker Options")]
       public MapMarkerOptions MapMarker { get; set; }
-
-      [JsonProperty(PropertyName = "Tax Protection Options")]
-      public TaxProtectionOptions TaxProtection { get; set; }
 
       public VersionNumber Version { get; set; }
 
@@ -248,6 +259,28 @@ namespace
           set => _maxPurchaseHours = System.Math.Max(1, System.Math.Min(value,
             (int)(System.DateTime.MaxValue.Ticks /
               System.TimeSpan.TicksPerHour)));
+        }
+
+        [JsonProperty(PropertyName = "Tax Overlay Options")]
+        public TaxOverlayOptions TaxOverlay { get; set; } = new();
+
+        public sealed class TaxOverlayOptions
+        {
+          [JsonProperty(PropertyName = "Enabled")]
+          public bool Enabled { get; set; }
+
+          [JsonProperty(PropertyName = "Anchor minimum")]
+          public string AnchorMin { get; set; }
+
+          [JsonProperty(PropertyName = "Anchor maximum")]
+          public string AnchorMax { get; set; }
+
+          [JsonProperty(PropertyName = "Offset minimum")]
+          public string OffsetMin { get; set; }
+
+          [JsonProperty(PropertyName = "Offset maximum")]
+          public string OffsetMax { get; set; }
+
         }
       }
 
@@ -356,6 +389,9 @@ namespace
           RegisterConsoleCommands(new[] {CommandUpdatePermissions}, plugin, nameof(Instance.ccUpdatePermissions), Configuration.Permission.Admin);
           RegisterConsoleCommands(new[] {CommandUpdatePrefabList}, plugin, nameof(Instance.ccUpdatePrefabList), Configuration.Permission.Admin);
           RegisterConsoleCommands(new[] {CommandDumpPrefabList}, plugin, nameof(Instance.ccDumpPrefabList), Configuration.Permission.Admin);
+#if !CARBON
+          RegisterConsoleCommands(new[] {TAX_OVERLAY_COMMAND}, plugin, nameof(Instance.ccTaxOverlay), string.Empty);
+#endif
         }
 
         private void RegisterChatCommands(string[] commands, Plugin plugin, System.Action<BasePlayer, string, string[]> callback, string permission)
@@ -645,7 +681,8 @@ namespace
         LastConnectDT = connected ? currentTime : LastConnectDT;
       }
 
-      public void EnablePenalty(float duration) => PenaltyEndDT = System.DateTime.UtcNow.AddHours(duration);
+      public void EnablePenalty(System.DateTime penaltyEndUtc) =>
+        PenaltyEndDT = penaltyEndUtc;
 
       public void DisablePenalty() => PenaltyEnd = 0L;
 
@@ -660,7 +697,7 @@ namespace
     private sealed class PlayerScaleCache
     {
       public float Scale { get; set; }
-      public long ExpiresTicks { get; private set; }
+      public long ExpiresTicks { get; set; }
       public bool ActiveGameTipMessage { get; set; }
       public System.TimeSpan RemainingTime { get; set; }
       public bool HasProtectPermission { get; set; }
@@ -907,13 +944,13 @@ namespace
     private readonly struct TcState
     {
       public readonly BuildingPrivlidge Privilege;
-      public readonly ulong CupboardNetworkId;
+      public readonly ulong CupboardNetworkID;
       public readonly bool IsDecaying;
 
-      public TcState(BuildingPrivlidge privilege, ulong cupboardNetworkId, bool isDecaying)
+      public TcState(BuildingPrivlidge privilege, ulong cupboardNetworkID, bool isDecaying)
       {
         Privilege = privilege;
-        CupboardNetworkId = cupboardNetworkId;
+        CupboardNetworkID = cupboardNetworkID;
         IsDecaying = isDecaying;
       }
     }
@@ -1001,7 +1038,7 @@ namespace
     {
       public Dictionary<ulong, LastOnlineData> LastOnline { get; init; } = new();
       public Dictionary<ulong, TcCreationData> TcCreation { get; init; } = new();
-      public Dictionary<ulong, TaxProtectionState> TaxProtection { get; init; }
+      public Dictionary<ulong, TaxProtectionState> TaxProtection { get; init; } = new();
     }
 
     private void MarkDataDirty() => _dataDirty = true;
@@ -1042,8 +1079,7 @@ namespace
           var data = Interface.Oxide.DataFileSystem.ReadObject<StoredData>(dataFileName);
           _lastOnline.ClearAndMergeWith(data.LastOnline);
           _tcCreationData.ClearAndMergeWith(data.TcCreation);
-          if (data.TaxProtection is not null)
-            _taxProtection.ClearAndMergeWith(data.TaxProtection);
+          _taxProtection.ClearAndMergeWith(data.TaxProtection);
         }
         else
           LoadLegacyData();
@@ -1095,20 +1131,62 @@ namespace
 
     private void NormalizeLastOnlineData()
     {
-      foreach (var lastOnline in _lastOnline.Values)
-        lastOnline?.RefreshRuntimeTicks();
+      _tmpIdsScratch.Clear();
+      var requiresSave = false;
+      foreach (var (userID, lastOnline) in _lastOnline)
+      {
+        if (!userID.IsSteamID() || lastOnline is null)
+        {
+          _tmpIdsScratch.Add(userID);
+          continue;
+        }
+
+        try
+        {
+          lastOnline.RefreshRuntimeTicks();
+        }
+        catch (System.ArgumentException)
+        {
+          _tmpIdsScratch.Add(userID);
+          continue;
+        }
+
+        if (lastOnline.UserID != userID)
+        {
+          lastOnline.UserID = userID;
+          requiresSave = true;
+        }
+
+        if (lastOnline.PenaltyEndTicks < 0L ||
+            lastOnline.PenaltyEndTicks > System.DateTime.MaxValue.Ticks)
+        {
+          lastOnline.DisablePenalty();
+          requiresSave = true;
+        }
+      }
+
+      if (_tmpIdsScratch.Count is not 0)
+      {
+        foreach (var userID in _tmpIdsScratch)
+          _lastOnline.Remove(userID);
+        requiresSave = true;
+      }
+
+      if (requiresSave)
+        MarkDataDirty();
+      _tmpIdsScratch.Clear();
     }
 
     private void RecordCupboardCreation(BuildingPrivlidge buildingPrivlidge)
     {
-      var cupboardNetworkId = GetNetworkId(buildingPrivlidge);
-      if (cupboardNetworkId is 0UL)
+      var cupboardNetworkID = GetNetworkId(buildingPrivlidge);
+      if (cupboardNetworkID is 0UL)
         return;
 
-      if (!_tcCreationData.TryGetValue(cupboardNetworkId, out var creationData))
+      if (!_tcCreationData.TryGetValue(cupboardNetworkID, out var creationData))
       {
         creationData = new();
-        _tcCreationData[cupboardNetworkId] = creationData;
+        _tcCreationData[cupboardNetworkID] = creationData;
       }
 
       if (creationData.HasTrustedCreationTime)
@@ -1119,23 +1197,23 @@ namespace
       MarkDataDirty();
     }
 
-    private void EnsureCupboardCreationData(ulong cupboardNetworkId)
+    private void EnsureCupboardCreationData(ulong cupboardNetworkID)
     {
-      if (cupboardNetworkId is 0U ||
-          _tcCreationData.ContainsKey(cupboardNetworkId))
+      if (cupboardNetworkID is 0UL ||
+          _tcCreationData.TryGetValue(cupboardNetworkID, out _))
         return;
 
       // A TC found after plugin loading has no trustworthy build timestamp
       // It can establish that a later TC is griefing it, but can never itself
       // lose protection solely because of this fallback observation
-      _tcCreationData[cupboardNetworkId] = new();
+      _tcCreationData[cupboardNetworkID] = new();
       MarkDataDirty();
     }
 
-    private void RemoveCupboardCreationData(ulong cupboardNetworkId)
+    private void RemoveCupboardCreationData(ulong cupboardNetworkID)
     {
-      if (cupboardNetworkId is not 0U &&
-          _tcCreationData.Remove(cupboardNetworkId))
+      if (cupboardNetworkID is not 0UL &&
+          _tcCreationData.Remove(cupboardNetworkID))
         MarkDataDirty();
     }
 
@@ -1143,8 +1221,13 @@ namespace
 
 #region Config
 
-    protected override void LoadDefaultConfig() =>
+    protected override void LoadDefaultConfig()
+    {
       Configuration = GetBaseConfig(Version);
+      SetTimeZone();
+      CacheTaxProtectionLimits();
+      CacheTaxOverlayEnabled();
+    }
 
     protected override void SaveConfig() =>
       Config.WriteObject(Configuration, true);
@@ -1164,6 +1247,8 @@ namespace
         Config.WriteObject(Configuration, true);
 
         SetTimeZone();
+        CacheTaxProtectionLimits();
+        CacheTaxOverlayEnabled();
       }
       catch (System.Exception ex)
       {
@@ -1239,6 +1324,9 @@ namespace
       if (Configuration.Version < new VersionNumber(1, 7, 1))
         Configuration.Permission.OnlineProtect = baseConfig.Permission.OnlineProtect;
 
+      if (Configuration.Version < new VersionNumber(1, 7, 2))
+        Configuration.TaxProtection.TaxOverlay = baseConfig.TaxProtection.TaxOverlay;
+
       Configuration.Version = Version;
 
       SaveConfig();
@@ -1247,6 +1335,7 @@ namespace
 
     private void SetTimeZone()
     {
+      _timeZone = System.TimeZoneInfo.Utc;
       var id =
 #if CARBON
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ?
@@ -1255,16 +1344,21 @@ namespace
 #else
         Configuration.TimeZone.TimeZone;
 #endif
-      if (!string.IsNullOrEmpty(id)) _timeZone = GetTimeZoneByID(id);
-    }
+      if (string.IsNullOrWhiteSpace(id))
+        return;
 
-    private static System.TimeZoneInfo GetTimeZoneByID(string id)
-    {
-      foreach (var tz in System.TimeZoneInfo.GetSystemTimeZones())
+      try
       {
-        if (tz.Id == id) return tz;
+        _timeZone = System.TimeZoneInfo.FindSystemTimeZoneById(id);
       }
-      return System.TimeZoneInfo.Utc;
+      catch (System.TimeZoneNotFoundException)
+      {
+        PrintWarning($"Timezone '{id}' was not found; using UTC.");
+      }
+      catch (System.InvalidTimeZoneException)
+      {
+        PrintWarning($"Timezone '{id}' is invalid; using UTC.");
+      }
     }
 
     private static ConfigData GetBaseConfig(VersionNumber version) => new()
@@ -1303,7 +1397,15 @@ namespace
         CostPerHour = 100,
         RefundOnDestruction = true,
         MaxCurrencyReserves = 1000,
-        MaxPurchaseHours = 48
+        MaxPurchaseHours = 48,
+        TaxOverlay = new()
+        {
+          Enabled = false,
+          AnchorMin = "0.5 0.5",
+          AnchorMax = "0.5 0.5",
+          OffsetMin = "-130 35",
+          OffsetMax = "130 180"
+        }
       },
       ApartmentProtection = new()
       {
@@ -1441,6 +1543,7 @@ namespace
       Configuration.StatusHud ??= baseConfig.StatusHud;
       Configuration.MapMarker ??= baseConfig.MapMarker;
       Configuration.TaxProtection ??= baseConfig.TaxProtection;
+      Configuration.TaxProtection.TaxOverlay ??= baseConfig.TaxProtection.TaxOverlay;
       Configuration.RaidProtection.PrefabProtectionMultipliers =
         NormalizePrefabProtectionMultipliers(
           Configuration.RaidProtection.PrefabProtectionMultipliers);
@@ -1465,6 +1568,24 @@ namespace
       {
         hud.OffsetMin = baseConfig.StatusHud.OffsetMin;
         hud.OffsetMax = baseConfig.StatusHud.OffsetMax;
+      }
+
+      var taxOverlay = Configuration.TaxProtection.TaxOverlay;
+      if (!TryParseAnchor(taxOverlay.AnchorMin, out var taxMinX, out var taxMinY) ||
+          !TryParseAnchor(taxOverlay.AnchorMax, out var taxMaxX, out var taxMaxY) ||
+          taxMinX > taxMaxX || taxMinY > taxMaxY)
+      {
+        taxOverlay.AnchorMin = baseConfig.TaxProtection.TaxOverlay.AnchorMin;
+        taxOverlay.AnchorMax = baseConfig.TaxProtection.TaxOverlay.AnchorMax;
+      }
+      if (!TryParseOffset(taxOverlay.OffsetMin, out _, out _) ||
+          !TryParseOffset(taxOverlay.OffsetMax, out _, out _) ||
+          !HasMinimumPointAnchoredBounds(
+            taxOverlay.AnchorMin, taxOverlay.AnchorMax,
+            taxOverlay.OffsetMin, taxOverlay.OffsetMax))
+      {
+        taxOverlay.OffsetMin = baseConfig.TaxProtection.TaxOverlay.OffsetMin;
+        taxOverlay.OffsetMax = baseConfig.TaxProtection.TaxOverlay.OffsetMax;
       }
 
       var marker = Configuration.MapMarker;
@@ -1558,15 +1679,22 @@ namespace
              !float.IsNaN(y) && !float.IsInfinity(y);
     }
 
-    private static bool HasMinimumPointAnchoredHudBounds(ConfigData.StatusHudOptions hud)
+    private static bool HasMinimumPointAnchoredBounds(
+      string minAnchor, string maxAnchor, string minOffset, string maxOffset)
     {
-      TryParseAnchor(hud.AnchorMin, out var minAnchorX, out var minAnchorY);
-      TryParseAnchor(hud.AnchorMax, out var maxAnchorX, out var maxAnchorY);
-      TryParseOffset(hud.OffsetMin, out var minOffsetX, out var minOffsetY);
-      TryParseOffset(hud.OffsetMax, out var maxOffsetX, out var maxOffsetY);
+      if (!TryParseAnchor(minAnchor, out var minAnchorX, out var minAnchorY) ||
+          !TryParseAnchor(maxAnchor, out var maxAnchorX, out var maxAnchorY) ||
+          !TryParseOffset(minOffset, out var minOffsetX, out var minOffsetY) ||
+          !TryParseOffset(maxOffset, out var maxOffsetX, out var maxOffsetY))
+        return false;
+
       return (minAnchorX != maxAnchorX || maxOffsetX - minOffsetX > 10f) &&
              (minAnchorY != maxAnchorY || maxOffsetY - minOffsetY > 10f);
     }
+
+    private static bool HasMinimumPointAnchoredHudBounds(ConfigData.StatusHudOptions hud) =>
+      HasMinimumPointAnchoredBounds(
+        hud.AnchorMin, hud.AnchorMax, hud.OffsetMin, hud.OffsetMax);
 
     private static string NormalizeColor(string value, string fallback) =>
       UnityEngine.ColorUtility.TryParseHtmlString(value, out _) ? value : fallback;
@@ -1637,6 +1765,7 @@ namespace
       UnloadStatusHud();
       UnloadMapMarkers();
       UnloadTaxProtection();
+      UnloadTaxOverlay();
 
       Configuration = null;
       Instance = null;
@@ -1648,9 +1777,16 @@ namespace
       _lastOnline.Clear();
       _tcCache.Clear();
       ClearCodeLockWhitelistCache();
+      _queuedSpawnedCodeLocks.Clear();
+      _spawnedCodeLocksQueued = false;
+      _processQueuedSpawnedCodeLocksAction = null;
+      _queuedTcCacheRefreshes.Clear();
+      _queuedTcCacheRefreshIds.Clear();
+      _tcCacheRefreshScratch.Clear();
+      _tcCacheRefreshQueued = false;
+      _processQueuedTcCacheRefreshesAction = null;
       _tcCreationData.Clear();
       _taxProtection.Clear();
-      ClearTaxProtectionRefunds();
       _taxProtectionCurrencyDefinition = null;
       _taxProtectionCurrencyName = string.Empty;
       _griefCupboardIds.Clear();
@@ -1706,7 +1842,8 @@ namespace
 
       var playerID = player.userID.Get();
       var hasProtectPerm = playerID.HasPermission(Configuration.Permission.Protect);
-      var hasTaxPerm = Configuration.TaxProtection.Enabled && playerID.HasPermission(Configuration.Permission.TaxProtection);
+      var hasTaxPerm = Configuration.TaxProtection.Enabled &&
+        playerID.HasPermission(Configuration.Permission.TaxProtection);
       var hasOnlinePerm = playerID.HasPermission(Configuration.Permission.OnlineProtect);
 
       if (_scaleCache.TryGetValue(playerID, out var scaleCache))
@@ -1741,6 +1878,7 @@ namespace
         UnityEngine.Time.realtimeSinceStartup +
         UnityEngine.Random.Range(
           0f, Configuration.StatusHud.RefreshInterval);
+      ScheduleStatusHudRefresh(playerID, hudState);
 
       QueueStatusHudRefresh(player);
       QueueMapMarkerRefresh(
@@ -1756,6 +1894,7 @@ namespace
       CloseScheduledTimescaleEditor(player);
 #endif
       var playerID = player.userID.Get();
+      CloseTaxOverlay(player, playerID);
       _adminIDCache.Remove(playerID);
 
       if (_hudStates.TryGetValue(playerID, out var hudState))
@@ -1797,6 +1936,7 @@ namespace
     {
       var userID = ulong.Parse(id);
       _players.UpdateName(userID, _oldName, newName);
+      InvalidateMapMarkerAuthorizedPlayers();
 
       if (!_lastOnline.TryGetValue(userID, out var lastOnline))
         return;
@@ -1843,19 +1983,19 @@ namespace
       if (!buildingPrivlidge || buildingPrivlidge.buildingID is 0U)
         return;
 
-      var cupboardNetworkId = GetNetworkId(buildingPrivlidge);
+      var cupboardNetworkID = GetNetworkId(buildingPrivlidge);
       if (!Configuration.RaidProtection.ProtectGriefTcs)
-        EnsureCupboardCreationData(cupboardNetworkId);
+        EnsureCupboardCreationData(cupboardNetworkID);
 
       _tcCache[buildingPrivlidge.buildingID] =
         new TcState(
           buildingPrivlidge,
-          cupboardNetworkId,
+          cupboardNetworkID,
           IsBuildingDecaying(buildingPrivlidge, cachedProtectedMinutes > 0));
 
       if (Configuration.TaxProtection.Enabled)
         SyncPurchasedProtection(
-          buildingPrivlidge, cupboardNetworkId, System.DateTime.UtcNow);
+          buildingPrivlidge, cupboardNetworkID, System.DateTime.UtcNow);
 
       if (Configuration.MapMarker.Enabled)
         QueueBuildingMapMarkerSync(buildingPrivlidge.buildingID);
@@ -1867,8 +2007,11 @@ namespace
 
     private void OnCupboardAssign(
       BuildingPrivlidge buildingPrivlidge, ulong _userID,
-      BasePlayer _player) =>
+      BasePlayer _player)
+    {
+      InvalidateMapMarkerAuthorizedPlayers();
       UpdateTcMarkerLabel(buildingPrivlidge);
+    }
 
     private void OnCupboardDeauthorize(
       BuildingPrivlidge buildingPrivlidge, BasePlayer player) =>
@@ -1890,7 +2033,7 @@ namespace
         return;
 
       RecordCupboardCreation(buildingPrivlidge);
-      RefreshTcCache(buildingPrivlidge.buildingID);
+      QueueTcCacheRefresh(buildingPrivlidge.buildingID);
     }
 
     private void OnEntitySpawned(CodeLock codeLock)
@@ -1898,23 +2041,24 @@ namespace
       if (!Configuration.Team.IncludeWhitelistPlayers || !codeLock)
         return;
 
-#if CARBON
-      Community.Runtime.Core.NextFrame(() => TrackSpawnedCodeLock(codeLock));
-#else
-      NextFrame(() => TrackSpawnedCodeLock(codeLock));
-#endif
-    }
-
-    private void OnEntityKill(BaseNetworkable baseNetworkable)
-    {
-      if (baseNetworkable is not BaseEntity entity)
+      _queuedSpawnedCodeLocks.Add(codeLock);
+      if (_spawnedCodeLocksQueued)
         return;
 
+      _spawnedCodeLocksQueued = true;
+      _processQueuedSpawnedCodeLocksAction ??= ProcessQueuedSpawnedCodeLocks;
+      NextFrame(_processQueuedSpawnedCodeLocksAction);
+    }
+
+    private void OnEntityKill(BaseEntity entity)
+    {
       if (entity is DroppedItemContainer &&
           _taxProtectionRefundPouches.Remove(
             GetNetworkId(entity), out var pouchRefund))
       {
         Facepunch.Pool.Free(ref pouchRefund);
+        if (_taxProtectionRefundPouches.Count is 0)
+          Unsubscribe(nameof(CanLootEntity));
         return;
       }
 
@@ -1928,24 +2072,25 @@ namespace
 
       if (entity is BuildingPrivlidge buildingPrivlidge)
       {
-        var cupboardNetworkId = GetNetworkId(baseNetworkable);
-        if (cupboardNetworkId is not 0U)
+        var cupboardNetworkID = GetNetworkId(entity);
+        CloseTaxOverlayViewers(cupboardNetworkID);
+        if (cupboardNetworkID is not 0UL)
         {
-          RemoveCupboardCreationData(cupboardNetworkId);
+          RemoveCupboardCreationData(cupboardNetworkID);
           if (_pendingTaxProtectionRefunds.Remove(
-                cupboardNetworkId, out var refund))
+                cupboardNetworkID, out var refund))
           {
             if (Configuration.TaxProtection.RefundOnDestruction)
               QueueTaxProtectionRefund(refund);
             else
               Facepunch.Pool.Free(ref refund);
           }
-          if (_taxProtection.Remove(cupboardNetworkId))
+          if (_taxProtection.Remove(cupboardNetworkID))
             MarkDataDirty();
-          RemoveMapMarker(cupboardNetworkId);
+          RemoveMapMarker(cupboardNetworkID);
         }
 
-        RefreshTcCache(buildingPrivlidge.buildingID);
+        QueueTcCacheRefresh(buildingPrivlidge.buildingID);
         return;
       }
 
@@ -1963,12 +2108,12 @@ namespace
       }
     }
 
-    private void OnCodeEntered(CodeLock codeLock, BasePlayer _player, string _code) =>
-      RefreshCodeLockWhitelistSnapshot(codeLock);
+    private void OnCodeEntered(CodeLock codeLock, BasePlayer _player, string _code)
+      => RefreshCodeLockWhitelistAndMapMarker(codeLock);
 
     private void OnCodeChanged(
-      BasePlayer _player, CodeLock codeLock, string _code, bool _isGuestCode) =>
-      RefreshCodeLockWhitelistSnapshot(codeLock);
+      BasePlayer _player, CodeLock codeLock, string _code, bool _isGuestCode)
+      => RefreshCodeLockWhitelistAndMapMarker(codeLock);
 
     private void OnBuildingSplit(
       BuildingManager.Building oldBuilding, uint newBuildingId)
@@ -1976,8 +2121,9 @@ namespace
       var oldBuildingID = oldBuilding?.ID ?? 0U;
       RemoveCodeLockWhitelistCache(oldBuildingID);
       RemoveCodeLockWhitelistCache(newBuildingId);
-      RefreshTcCache(oldBuildingID);
-      RefreshTcCache(newBuildingId);
+      InvalidateMapMarkerAuthorizedPlayers();
+      QueueTcCacheRefresh(oldBuildingID);
+      QueueTcCacheRefresh(newBuildingId);
     }
 
     private void OnBuildingMerge(
@@ -1989,8 +2135,9 @@ namespace
       var fromBuildingID = fromBuilding?.ID ?? 0U;
       RemoveCodeLockWhitelistCache(toBuildingID);
       RemoveCodeLockWhitelistCache(fromBuildingID);
-      RefreshTcCache(toBuildingID);
-      RefreshTcCache(fromBuildingID);
+      InvalidateMapMarkerAuthorizedPlayers();
+      QueueTcCacheRefresh(toBuildingID);
+      QueueTcCacheRefresh(fromBuildingID);
     }
 
     // provide feedback when a player knocks on a protected apartment door
@@ -2070,7 +2217,7 @@ namespace
 
       // block and notify
       NotifyApartmentOrShop(player, ownerID, damageScale);
-      return true;
+      return BoxedTrue;
     }
 
     private object OnRentableShopBreakInComplete(
@@ -2095,7 +2242,7 @@ namespace
 
       // block and notify
       NotifyApartmentOrShop(player, ownerID, damageScale);
-      return true;
+      return BoxedTrue;
     }
 
 #endregion Hooks
@@ -2159,11 +2306,21 @@ namespace
         Unsubscribe(nameof(OnCodeEntered));
         Unsubscribe(nameof(OnCodeChanged));
       }
+
       if (!needsTaxProtectionRefunds)
-      {
         Unsubscribe(nameof(OnEntityDeath));
-        Unsubscribe(nameof(CanLootEntity));
-      }
+
+
+      if (!Configuration.TaxProtection.Enabled ||
+          Configuration.TaxProtection.MaxCurrencyReserves is 0 ||
+          Configuration.TaxProtection.CurrencyItemID is 0)
+        Unsubscribe(nameof(CanAcceptItem));
+
+      if (!_isTaxOverlayEnabled)
+        Unsubscribe(nameof(OnLootEntity));
+      StopTaxOverlayViewerTracking();
+
+      Unsubscribe(nameof(CanLootEntity));
     }
 
 #endregion Hook Subscribtion
@@ -2379,6 +2536,9 @@ namespace
       if (permissionsChanged)
         RefreshAllProtectionViews();
 
+      if (permissionName == Configuration.Permission.TaxProtection)
+        CloseTaxOverlayViewersWithoutPermission();
+
       if (permissionName != Configuration.Permission.Admin ||
           !CacheAllAdmins(out var hasNewAdmin))
         return;
@@ -2402,6 +2562,13 @@ namespace
 
       if (permissionsChanged)
         RefreshProtectionViews(userID);
+
+      if (permissionsChanged && userID is not 0UL)
+      {
+        var player = _players.GetPlayer(userID);
+        if (player && !HasTaxProtectionPermission(player))
+          CloseTaxOverlay(player, userID);
+      }
 
       if (permissionName is not null &&
           permissionName != Configuration.Permission.Admin)
@@ -2516,17 +2683,51 @@ namespace
         _adminIDCache.Remove(userID);
     }
 
-    private void RefreshTcCache(uint buildingID)
+    private void QueueTcCacheRefresh(uint buildingID)
     {
-      if (buildingID is 0U)
+      if (buildingID is 0U || !_queuedTcCacheRefreshIds.Add(buildingID))
         return;
 
-      CachePhysicalCupboard(buildingID, BuildingManager.server.GetBuilding(buildingID));
-      CacheGriefCupboards();
-      QueueBuildingStatusHudRefresh(buildingID);
+      _queuedTcCacheRefreshes.Enqueue(buildingID);
+      if (_tcCacheRefreshQueued)
+        return;
 
-      if (Configuration.MapMarker.Enabled)
-        SyncBuildingMapMarker(buildingID);
+      _tcCacheRefreshQueued = true;
+      _processQueuedTcCacheRefreshesAction ??= ProcessQueuedTcCacheRefreshes;
+      NextFrame(_processQueuedTcCacheRefreshesAction);
+    }
+
+    private void ProcessQueuedTcCacheRefreshes()
+    {
+      _tcCacheRefreshQueued = false;
+      if (Configuration is null)
+      {
+        _queuedTcCacheRefreshes.Clear();
+        _queuedTcCacheRefreshIds.Clear();
+        return;
+      }
+
+      _tcCacheRefreshScratch.Clear();
+      while (_queuedTcCacheRefreshes.Count is not 0)
+      {
+        var buildingID = _queuedTcCacheRefreshes.Dequeue();
+        _queuedTcCacheRefreshIds.Remove(buildingID);
+        CachePhysicalCupboard(
+          buildingID, BuildingManager.server.GetBuilding(buildingID));
+        _tcCacheRefreshScratch.Add(buildingID);
+      }
+
+      if (!Configuration.RaidProtection.ProtectGriefTcs)
+        CacheGriefCupboards();
+
+      for (var i = 0; i < _tcCacheRefreshScratch.Count; i++)
+      {
+        var buildingID = _tcCacheRefreshScratch[i];
+        QueueBuildingStatusHudRefresh(buildingID);
+        if (Configuration.MapMarker.Enabled)
+          SyncBuildingMapMarker(buildingID);
+      }
+      _tcCacheRefreshScratch.Clear();
     }
 
     private void CacheAllCupboards()
@@ -2557,18 +2758,18 @@ namespace
       void RemoveStaleCupboardCreationData()
       {
         _tmpIdsScratch.Clear();
-        foreach (var cupboardNetworkId in _tcCreationData.Keys)
+        foreach (var cupboardNetworkID in _tcCreationData.Keys)
         {
           if (BaseNetworkable.serverEntities.Find(
-                new NetworkableId(cupboardNetworkId)) is BuildingPrivlidge)
+                new NetworkableId(cupboardNetworkID)) is BuildingPrivlidge)
             continue;
 
-          _tmpIdsScratch.Add(cupboardNetworkId);
+          _tmpIdsScratch.Add(cupboardNetworkID);
         }
 
-        foreach (var cupboardNetworkId in _tmpIdsScratch)
+        foreach (var cupboardNetworkID in _tmpIdsScratch)
         {
-          _tcCreationData.Remove(cupboardNetworkId);
+          _tcCreationData.Remove(cupboardNetworkID);
           MarkDataDirty();
         }
       }
@@ -2608,12 +2809,12 @@ namespace
       if (!physicalCupboard)
         return;
 
-      var cupboardNetworkId = GetNetworkId(physicalCupboard);
+      var cupboardNetworkID = GetNetworkId(physicalCupboard);
       var protectedMinutes = physicalCupboard.GetProtectedMinutes();
       _tcCache[buildingID] =
         new TcState(
           physicalCupboard,
-          cupboardNetworkId,
+          cupboardNetworkID,
           IsBuildingDecaying(physicalCupboard, protectedMinutes > 0));
     }
 
@@ -2642,7 +2843,7 @@ namespace
 
           if (!_tcCache.TryGetValue(
                 overlappingTc.buildingID, out var overlappingTcState) ||
-              overlappingTcState.CupboardNetworkId != GetNetworkId(overlappingTc))
+              overlappingTcState.CupboardNetworkID != GetNetworkId(overlappingTc))
             continue;
 
           // Only a foreign TC can be griefing. A shared owner or authorization
@@ -2652,17 +2853,17 @@ namespace
                 buildingTc.Privilege, overlappingTcState.Privilege))
             continue;
 
-          if (!IsCupboardNewer(overlappingTcState.CupboardNetworkId,
-                               buildingTc.CupboardNetworkId))
+          if (!IsCupboardNewer(overlappingTcState.CupboardNetworkID,
+                               buildingTc.CupboardNetworkID))
             continue;
 
           if (_tcCreationData.TryGetValue(
-                overlappingTcState.CupboardNetworkId,
+                overlappingTcState.CupboardNetworkID,
                 out var overlappingCreationData) &&
               overlappingCreationData.GriefState is TcGriefState.ForceFalse)
             continue;
 
-          _griefCupboardIds.Add(overlappingTcState.CupboardNetworkId);
+          _griefCupboardIds.Add(overlappingTcState.CupboardNetworkID);
         }
       }
 
@@ -2689,16 +2890,20 @@ namespace
       if (!firstCupboard || !secondCupboard)
         return true;
 
+      if (firstCupboard.OwnerID.IsSteamID() &&
+          firstCupboard.OwnerID == secondCupboard.OwnerID)
+        return true;
+
       _tmpIdsScratch.Clear();
       if (secondCupboard.OwnerID.IsSteamID())
         _tmpIdsScratch.Add(secondCupboard.OwnerID);
 
       if (secondCupboard.authorizedPlayers is not null)
       {
-        foreach (var authorizedPlayerId in secondCupboard.authorizedPlayers)
+        foreach (var authorizedPlayerID in secondCupboard.authorizedPlayers)
         {
-          if (authorizedPlayerId.IsSteamID())
-            _tmpIdsScratch.Add(authorizedPlayerId);
+          if (authorizedPlayerID.IsSteamID())
+            _tmpIdsScratch.Add(authorizedPlayerID);
         }
       }
 
@@ -2709,30 +2914,31 @@ namespace
       if (firstCupboard.authorizedPlayers is null)
         return false;
 
-      foreach (var authorizedPlayerId in firstCupboard.authorizedPlayers)
+      foreach (var authorizedPlayerID in firstCupboard.authorizedPlayers)
       {
-        if (authorizedPlayerId.IsSteamID() &&
-            _tmpIdsScratch.Contains(authorizedPlayerId))
+        if (authorizedPlayerID.IsSteamID() &&
+            _tmpIdsScratch.Contains(authorizedPlayerID))
           return true;
       }
 
       return false;
     }
 
-    private void RemoveCodeLockWhitelistCache(uint buildingID)
+    private bool RemoveCodeLockWhitelistCache(uint buildingID)
     {
       if (buildingID is 0U ||
           !_codeLockWhitelistCache.Remove(buildingID, out var cacheEntry))
-        return;
+        return false;
 
-      foreach (var lockNetworkId in cacheEntry.Locks.Keys)
+      foreach (var lockNetworkID in cacheEntry.Locks.Keys)
       {
-        if (_codeLockBuildingIds.TryGetValue(lockNetworkId, out var trackedBuildingID) &&
+        if (_codeLockBuildingIds.TryGetValue(lockNetworkID, out var trackedBuildingID) &&
             trackedBuildingID == buildingID)
-          _codeLockBuildingIds.Remove(lockNetworkId);
+          _codeLockBuildingIds.Remove(lockNetworkID);
       }
 
       Facepunch.Pool.Free(ref cacheEntry);
+      return true;
     }
 
     private void ClearCodeLockWhitelistCache()
@@ -2747,18 +2953,27 @@ namespace
       _codeLockBuildingIds.Clear();
     }
 
+    private void ProcessQueuedSpawnedCodeLocks()
+    {
+      _spawnedCodeLocksQueued = false;
+      var count = _queuedSpawnedCodeLocks.Count;
+      for (var i = 0; i < count; i++)
+        TrackSpawnedCodeLock(_queuedSpawnedCodeLocks[i]);
+      _queuedSpawnedCodeLocks.Clear();
+    }
+
     private void TrackSpawnedCodeLock(CodeLock codeLock)
     {
       if (!codeLock || !TryGetCodeLockBuildingID(
           codeLock, out var buildingID))
         return;
 
-      var lockNetworkId = GetNetworkId(codeLock);
-      if (lockNetworkId is 0UL)
+      var lockNetworkID = GetNetworkId(codeLock);
+      if (lockNetworkID is 0UL)
         return;
 
       if (_codeLockBuildingIds.TryGetValue(
-            lockNetworkId, out var trackedBuildingID) &&
+            lockNetworkID, out var trackedBuildingID) &&
           trackedBuildingID != buildingID)
       {
         RemoveCodeLockWhitelistCache(trackedBuildingID);
@@ -2768,85 +2983,100 @@ namespace
 
       if (_codeLockWhitelistCache.TryGetValue(buildingID, out var cacheEntry))
         RegisterCodeLockWhitelistSnapshot(buildingID, codeLock, cacheEntry);
+
+      QueueMapMarkerAuthorizationRefresh(buildingID);
     }
 
-    private void RefreshCodeLockWhitelistSnapshot(CodeLock codeLock)
+    private void RefreshCodeLockWhitelistAndMapMarker(CodeLock codeLock)
     {
-      var lockNetworkId = GetNetworkId(codeLock);
-      if (lockNetworkId is 0UL ||
-          !_codeLockBuildingIds.TryGetValue(lockNetworkId, out var buildingID))
-      {
-        if (TryGetCodeLockBuildingID(codeLock, out buildingID))
-          RemoveCodeLockWhitelistCache(buildingID);
+      var lockNetworkID = GetNetworkId(codeLock);
+      var trackedBuildingID = lockNetworkID is not 0UL &&
+        _codeLockBuildingIds.TryGetValue(lockNetworkID, out var buildingID) ?
+          buildingID : 0U;
+      if (!RefreshCodeLockWhitelistSnapshot(codeLock))
         return;
+
+      QueueCodeLockMapMarkerAuthorizationRefresh(codeLock, trackedBuildingID);
+    }
+
+    private bool RefreshCodeLockWhitelistSnapshot(CodeLock codeLock)
+    {
+      var lockNetworkID = GetNetworkId(codeLock);
+      if (lockNetworkID is 0UL ||
+          !_codeLockBuildingIds.TryGetValue(lockNetworkID, out var buildingID))
+      {
+        return TryGetCodeLockBuildingID(codeLock, out buildingID) &&
+          RemoveCodeLockWhitelistCache(buildingID);
       }
 
+      var changed = false;
       if (!TryGetCodeLockBuildingID(codeLock, out var currentBuildingID) ||
           currentBuildingID != buildingID)
       {
-        RemoveCodeLockWhitelistCache(buildingID);
-        RemoveCodeLockWhitelistCache(currentBuildingID);
-        return;
+        changed = RemoveCodeLockWhitelistCache(buildingID);
+        changed |= RemoveCodeLockWhitelistCache(currentBuildingID);
+        return changed;
       }
 
       if (!_codeLockWhitelistCache.TryGetValue(buildingID, out var cacheEntry) ||
-          !cacheEntry.Locks.TryGetValue(lockNetworkId, out var snapshot))
+          !cacheEntry.Locks.TryGetValue(lockNetworkID, out var snapshot))
       {
-        RemoveCodeLockWhitelistCache(buildingID);
-        return;
+        return RemoveCodeLockWhitelistCache(buildingID);
       }
 
       var whitelistPlayers = codeLock.whitelistPlayers;
-      foreach (var playerId in snapshot.PlayerIds)
+      foreach (var playerID in snapshot.PlayerIds)
       {
-        if (whitelistPlayers?.Contains(playerId) is true)
+        if (whitelistPlayers?.Contains(playerID) is true)
           continue;
 
-        RemoveCodeLockWhitelistPlayer(cacheEntry, playerId);
+        changed |= RemoveCodeLockWhitelistPlayer(cacheEntry, playerID);
       }
 
       if (whitelistPlayers is not null)
       {
-        foreach (var playerId in whitelistPlayers)
+        foreach (var playerID in whitelistPlayers)
         {
-          if (snapshot.PlayerIds.Contains(playerId))
+          if (snapshot.PlayerIds.Contains(playerID))
             continue;
 
-          AddCodeLockWhitelistPlayer(cacheEntry, playerId);
+          changed |= AddCodeLockWhitelistPlayer(cacheEntry, playerID);
         }
       }
 
       snapshot.PlayerIds.Clear();
       if (whitelistPlayers is not null)
         snapshot.PlayerIds.UnionWith(whitelistPlayers);
+      return changed;
     }
 
-    private void RemoveTrackedCodeLock(ulong lockNetworkId)
+    private void RemoveTrackedCodeLock(ulong lockNetworkID)
     {
-      if (lockNetworkId is 0UL ||
-          !_codeLockBuildingIds.Remove(lockNetworkId, out var buildingID) ||
+      if (lockNetworkID is 0UL ||
+          !_codeLockBuildingIds.Remove(lockNetworkID, out var buildingID) ||
           !_codeLockWhitelistCache.TryGetValue(buildingID, out var cacheEntry) ||
-          !cacheEntry.Locks.Remove(lockNetworkId, out var snapshot))
+          !cacheEntry.Locks.Remove(lockNetworkID, out var snapshot))
         return;
 
-      foreach (var playerId in snapshot.PlayerIds)
-        RemoveCodeLockWhitelistPlayer(cacheEntry, playerId);
+      foreach (var playerID in snapshot.PlayerIds)
+        RemoveCodeLockWhitelistPlayer(cacheEntry, playerID);
 
       Facepunch.Pool.Free(ref snapshot);
+      QueueMapMarkerAuthorizationRefresh(buildingID);
     }
 
     private void RegisterCodeLockWhitelistSnapshot(
       uint buildingID, CodeLock codeLock, CodeLockWhitelistIndex cacheEntry)
     {
-      var lockNetworkId = GetNetworkId(codeLock);
-      if (lockNetworkId is 0UL)
+      var lockNetworkID = GetNetworkId(codeLock);
+      if (lockNetworkID is 0UL)
         return;
 
-      if (_codeLockBuildingIds.TryGetValue(lockNetworkId, out var trackedBuildingID) &&
+      if (_codeLockBuildingIds.TryGetValue(lockNetworkID, out var trackedBuildingID) &&
           trackedBuildingID != buildingID)
         RemoveCodeLockWhitelistCache(trackedBuildingID);
 
-      if (cacheEntry.Locks.ContainsKey(lockNetworkId))
+      if (cacheEntry.Locks.ContainsKey(lockNetworkID))
       {
         RefreshCodeLockWhitelistSnapshot(codeLock);
         return;
@@ -2856,47 +3086,49 @@ namespace
       var whitelistPlayers = codeLock.whitelistPlayers;
       if (whitelistPlayers is not null)
       {
-        foreach (var playerId in whitelistPlayers)
+        foreach (var playerID in whitelistPlayers)
         {
-          snapshot.PlayerIds.Add(playerId);
-          AddCodeLockWhitelistPlayer(cacheEntry, playerId);
+          snapshot.PlayerIds.Add(playerID);
+          AddCodeLockWhitelistPlayer(cacheEntry, playerID);
         }
       }
 
-      cacheEntry.Locks[lockNetworkId] = snapshot;
-      _codeLockBuildingIds[lockNetworkId] = buildingID;
+      cacheEntry.Locks[lockNetworkID] = snapshot;
+      _codeLockBuildingIds[lockNetworkID] = buildingID;
     }
 
-    private static void AddCodeLockWhitelistPlayer(
-      CodeLockWhitelistIndex cacheEntry, ulong playerId)
+    private static bool AddCodeLockWhitelistPlayer(
+      CodeLockWhitelistIndex cacheEntry, ulong playerID)
     {
-      if (playerId is 0UL)
-        return;
+      if (playerID is 0UL)
+        return false;
 
-      if (!cacheEntry.PlayerReferences.TryGetValue(playerId, out var references))
+      if (!cacheEntry.PlayerReferences.TryGetValue(playerID, out var references))
       {
-        cacheEntry.PlayerReferences[playerId] = 1;
-        cacheEntry.AuthorizedPlayers.Add(playerId);
-        return;
+        cacheEntry.PlayerReferences[playerID] = 1;
+        cacheEntry.AuthorizedPlayers.Add(playerID);
+        return true;
       }
 
-      cacheEntry.PlayerReferences[playerId] = references + 1;
+      cacheEntry.PlayerReferences[playerID] = references + 1;
+      return false;
     }
 
-    private static void RemoveCodeLockWhitelistPlayer(
-      CodeLockWhitelistIndex cacheEntry, ulong playerId)
+    private static bool RemoveCodeLockWhitelistPlayer(
+      CodeLockWhitelistIndex cacheEntry, ulong playerID)
     {
-      if (!cacheEntry.PlayerReferences.TryGetValue(playerId, out var references))
-        return;
+      if (!cacheEntry.PlayerReferences.TryGetValue(playerID, out var references))
+        return false;
 
       if (references > 1)
       {
-        cacheEntry.PlayerReferences[playerId] = references - 1;
-        return;
+        cacheEntry.PlayerReferences[playerID] = references - 1;
+        return false;
       }
 
-      cacheEntry.PlayerReferences.Remove(playerId);
-      cacheEntry.AuthorizedPlayers.Remove(playerId);
+      cacheEntry.PlayerReferences.Remove(playerID);
+      cacheEntry.AuthorizedPlayers.Remove(playerID);
+      return true;
     }
 
     private static bool TryGetCodeLockBuildingID(CodeLock codeLock,
@@ -3096,7 +3328,7 @@ namespace
           TryGetTcState(entity, out var physicalTc))
       {
         physicalPrivilege = physicalTc.Privilege;
-        if (_griefCupboardIds.Contains(physicalTc.CupboardNetworkId))
+        if (_griefCupboardIds.Contains(physicalTc.CupboardNetworkID))
           return DamageDecision.Allow(entity.OwnerID, isGrief: true);
       }
 
@@ -3133,12 +3365,13 @@ namespace
       // Get the most recent team member based on the configuration setting
       targetID = GetRecentActiveMemberAll(
         targetID, authorizedPlayers, nowUtc);
-      var targetScaleCache = GetOrCreateScaleCache(targetID, nowUtc);
 
       // Penalty status should be checked first
       if (!_lastOnline.TryGetValue(targetID, out var targetLastOnline) ||
           IsApiPenaltyActive(targetLastOnline, nowUtc))
         return DamageDecision.Allow(targetID, isVehicle);
+
+      var targetScaleCache = GetOrCreateScaleCache(targetID);
 
       // --- Tax Protection ---
       long taxProtEndTicks = 0L;
@@ -3327,8 +3560,8 @@ namespace
       if (lockEntity?.whitelistPlayers is null)
         return;
 
-      foreach (var playerId in lockEntity.whitelistPlayers)
-        targetSet.Add(playerId);
+      foreach (var playerID in lockEntity.whitelistPlayers)
+        targetSet.Add(playerID);
     }
 
     private ulong GetRecentActiveMemberAll(ulong targetID) =>
@@ -3461,8 +3694,7 @@ namespace
         (nowUtc.Ticks - lastOnlinePlayer.LastOnlineTicks) /
           (float)System.TimeSpan.TicksPerHour;
 
-    private PlayerScaleCache GetOrCreateScaleCache(
-      ulong targetID, System.DateTime nowUtc)
+    private PlayerScaleCache GetOrCreateScaleCache(ulong targetID)
     {
       if (_scaleCache.TryGetValue(targetID, out var scaleCache))
         return scaleCache;
@@ -3504,7 +3736,7 @@ namespace
       }
 
       var expiresTicks = CalcExpiryTicks(nowUtcTicks, boundaryTicks);
-      targetScaleCache.ExpiresDT = new System.DateTime(expiresTicks);
+      targetScaleCache.ExpiresTicks = expiresTicks;
       targetScaleCache.Scale = scale;
       return scale;
     }
@@ -3515,7 +3747,7 @@ namespace
       if (!_lastOnline.TryGetValue(targetID, out var targetLastOnline))
         return -1f;
 
-      var targetScaleCache = GetOrCreateScaleCache(targetID, nowUtc);
+      var targetScaleCache = GetOrCreateScaleCache(targetID);
       return GetCachedDamageScale(
         targetID, targetLastOnline, targetScaleCache, nowUtc);
     }
@@ -3565,7 +3797,7 @@ namespace
         timeScales.AbsoluteTimeScale, timeScales.AbsoluteTimeScaleKeys,
         timeScales.DamageScale, damageScaleKeys,
         targetID, targetLastOnline, nowUtc,
-        isOnlineRaidProtectionEnabled,
+        scaleCache is not null && scaleCache.HasOnlineProtectPermission,
         out var offlineTimeScaleApplies);
 
       UpdateRemainingTime(
@@ -3590,8 +3822,7 @@ namespace
       {
         var remainingHours =
           damageScaleKeys[^1] - GetOfflineHours(targetLastOnline, nowUtc);
-        scaleCache.RemainingTime =
-          System.TimeSpan.FromHours(remainingHours > 0 ? remainingHours : 0d);
+        scaleCache.RemainingTime = GetClampedTimeSpanFromHours(remainingHours);
       }
       else
         scaleCache.RemainingTime = System.TimeSpan.Zero;
@@ -3617,10 +3848,13 @@ namespace
           return scale;
       }
 
+      if (damageScaleKeys.Length is 0)
+        return -1f;
+
       var isOnline = IsOnline(targetID);
-      if (damageScaleKeys.Length is 0 ||
-          (!allowOnlineProtection &&
-           !IsOffline(targetID, targetLastOnline, nowUtc)))
+      if (!allowOnlineProtection &&
+          (isOnline || GetOfflineMinutesUnchecked(targetLastOnline, nowUtc) <
+           Configuration.RaidProtection.CooldownMinutes))
         return -1f;
 
       if (!isOnline && Configuration.RaidProtection.CooldownQualifyMinutes > 0)
@@ -3643,18 +3877,19 @@ namespace
         return Configuration.RaidProtection.InterimDamage;
       }
 
-      for (var i = damageScaleKeys.Length - 1; i > 0; i--)
+      var low = 0;
+      var high = damageScaleKeys.Length - 1;
+      while (low <= high)
       {
-        var key = damageScaleKeys[i];
-        if (hours >= key)
-        {
-          offlineTimeScaleApplies = true;
-          return damageScale[key];
-        }
+        var middle = low + ((high - low) >> 1);
+        if (hours >= damageScaleKeys[middle])
+          low = middle + 1;
+        else
+          high = middle - 1;
       }
 
       offlineTimeScaleApplies = true;
-      return damageScale[damageScaleKeys[0]];
+      return damageScale[damageScaleKeys[high]];
     }
 
     private object MitigateDamage(
@@ -3682,7 +3917,7 @@ namespace
         if (scale is not 0f)
           hitInfo.damageTypes.ScaleAll(scale);
 
-        return scale is 0f ? true : null;
+        return scale is 0f ? BoxedTrue : null;
       }
 
       var isFire = hitInfo.damageTypes.GetMajorityDamageType()
@@ -3708,7 +3943,7 @@ namespace
           UnityEngine.Vector3.zero);
       }
 
-      return scale is 0f ? true : null;
+      return scale is 0f ? BoxedTrue : null;
     }
 
 #endregion Core Methods
@@ -3756,8 +3991,13 @@ namespace
 
     private ulong GetApartmentOwnerID(ApartmentRoom apartmentRoom)
     {
-      using var e = apartmentRoom.Owners.GetEnumerator();
-      return e.MoveNext() && e.Current.IsSteamId() ? e.Current : 0UL;
+      if (apartmentRoom.owners?.Count is not > 0)
+        return 0UL;
+
+      foreach (var ownerID in apartmentRoom.owners)
+        return ownerID.IsSteamId() ? ownerID : 0UL;
+
+      return 0UL;
     }
 
     private (ApartmentProtectionState, ulong, float) GetApartmentProtection(
@@ -3869,7 +4109,7 @@ namespace
         return;
 
       var nowUtc = System.DateTime.UtcNow;
-      var targetScaleCache = GetOrCreateScaleCache(targetID, nowUtc);
+      var targetScaleCache = GetOrCreateScaleCache(targetID);
       ShowMessageTip(
         player, amount, isVehicle, playerScaleCache, targetScaleCache);
       playerScaleCache.ActiveGameTipMessage = true;
@@ -3954,9 +4194,12 @@ namespace
 
     private readonly Dictionary<ulong, HudPlayerState> _hudStates = new();
     private readonly HashSet<ulong> _queuedStatusHudPlayerIds = new();
-    private readonly List<ulong> _scheduledStatusHudPlayerIds = new();
+    private readonly SortedDictionary<int, List<HudScheduleEntry>> _statusHudDueQueue = new();
+    private readonly Stack<List<HudScheduleEntry>> _statusHudDueListPool = new();
     private readonly StringBuilder _hudBuilder = new(512);
+    private long _statusHudScheduleGeneration;
     private bool _statusHudRefreshQueued;
+    private System.Action _refreshQueuedStatusHudsAction;
 #if CARBON
     private LuiPosition _statusHudPosition;
     private LuiOffset _statusHudOffset;
@@ -3967,10 +4210,10 @@ namespace
 
 #region Constants
 
+    private const string FONT_ROBOTO_CONDENSED_BOLD = "robotocondensed-bold.ttf";
     private const string STATUS_HUD_NAME = "ORP_HUD_STATUS_BANNER";
     private const string STATUS_HUD_TEXT_NAME = STATUS_HUD_NAME + ".Text";
     private const string STATUS_HUD_BACKGROUND_COLOR = "0.06 0.08 0.11 0.82";
-    private const string STATUS_HUD_FONT_NAME = "robotocondensed-bold.ttf";
     private const string STATUS_HUD_TEXT_COLOR = "1 1 1 1";
     private const string STATUS_HUD_OUTLINE_COLOR = "0 0 0 0.85";
     private const string STATUS_HUD_SUBTEXT_COLOR = "#E0E0E0";
@@ -3983,11 +4226,17 @@ namespace
     private const string STATUS_HUD_PENALTY_TEXT = "Penalty | ";
     private const int STATUS_HUD_HEADER_FONT_SIZE = 15;
     private const int STATUS_HUD_BODY_FONT_SIZE = 13;
+    private static readonly string STATUS_HUD_BODY_PREFIX =
+      "\n<size=" + STATUS_HUD_BODY_FONT_SIZE + "><color=" + STATUS_HUD_SUBTEXT_COLOR + ">";
+    private static readonly string STATUS_HUD_INCREASED_DAMAGE_PREFIX =
+      "\n<size=" + STATUS_HUD_BODY_FONT_SIZE + "><color=" + STATUS_HUD_SUBTEXT_COLOR + ">+";
+    private static readonly string STATUS_HUD_PENALTY_PREFIX =
+      "\n<size=" + STATUS_HUD_BODY_FONT_SIZE + "><color=" + STATUS_HUD_PENALTY_COLOR + ">" + STATUS_HUD_PENALTY_TEXT;
     private const float STATUS_HUD_SCHEDULER_INTERVAL = 0.5f;
 #if !CARBON
     private const string STATUS_HUD_PAYLOAD_SUFFIX =
       "\",\"fontSize\":15,\"align\":\"MiddleCenter\"," +
-      "\"verticalOverflow\":\"Overflow\",\"font\":\"robotocondensed-bold.ttf\"," +
+      "\"verticalOverflow\":\"Overflow\",\"font\":\"" + FONT_ROBOTO_CONDENSED_BOLD + "\"," +
       "\"color\":\"1 1 1 1\"},{\"type\":\"UnityEngine.UI.Outline\"," +
       "\"color\":\"0 0 0 0.85\",\"distance\":\"1 -1\"},{\"type\":\"RectTransform\"," +
       "\"anchormin\":\"0 0\",\"anchormax\":\"1 1\",\"offsetmin\":\"4 2\"," +
@@ -4024,6 +4273,7 @@ namespace
       public HudStateSnapshot Snapshot;
       public bool HasSnapshot;
       public bool IsVisible;
+      public long ScheduleGeneration;
 
       public void EnterPool()
       {
@@ -4035,9 +4285,22 @@ namespace
         Snapshot = default;
         HasSnapshot = false;
         IsVisible = false;
+        ScheduleGeneration = 0L;
       }
 
       public void LeavePool() { }
+    }
+
+    private readonly struct HudScheduleEntry
+    {
+      public readonly ulong PlayerID;
+      public readonly long Generation;
+
+      public HudScheduleEntry(ulong playerID, long generation)
+      {
+        PlayerID = playerID;
+        Generation = generation;
+      }
     }
 
     private readonly struct HudStateSnapshot
@@ -4084,6 +4347,8 @@ namespace
       if (!options.Enabled)
         return;
 
+      _refreshQueuedStatusHudsAction = RefreshQueuedStatusHuds;
+
 #if CARBON
       TryParseAnchor(options.AnchorMin, out var minX, out var minY);
       TryParseAnchor(options.AnchorMax, out var maxX, out var maxY);
@@ -4113,6 +4378,7 @@ namespace
         hudState.PrivilegeRefreshAt =
           nowRealtime + UnityEngine.Random.Range(
             0f, options.RefreshInterval);
+        ScheduleStatusHudRefresh(playerID, hudState);
       }
 
       _statusHudScheduler = timer.Every(
@@ -4125,8 +4391,11 @@ namespace
       _statusHudScheduler?.Destroy();
       _statusHudScheduler = null;
       _statusHudRefreshQueued = false;
+      _refreshQueuedStatusHudsAction = null;
       _queuedStatusHudPlayerIds.Clear();
-      _scheduledStatusHudPlayerIds.Clear();
+      _statusHudDueQueue.Clear();
+      _statusHudDueListPool.Clear();
+      _statusHudScheduleGeneration = 0L;
 
       foreach (var player in BasePlayer.activePlayerList)
         HideStatusHud(player);
@@ -4184,6 +4453,7 @@ namespace
         hudState.BuildingID = 0;
         hudState.PrivilegeRefreshAt =
           nowRealtime + Configuration.StatusHud.RefreshInterval;
+        ScheduleStatusHudRefresh(playerID, hudState);
 
         return;
       }
@@ -4212,6 +4482,7 @@ namespace
           privilege.buildingID : 0U;
         hudState.PrivilegeRefreshAt =
           nowRealtime + Configuration.StatusHud.RefreshInterval;
+        ScheduleStatusHudRefresh(playerID, hudState);
         return;
       }
 
@@ -4227,6 +4498,7 @@ namespace
           nowRealtime + Configuration.StatusHud.RefreshInterval,
           hudState.HudExpiresAt);
       }
+      ScheduleStatusHudRefresh(playerID, hudState);
     }
 
     private void ShowStatusCommandHud(
@@ -4397,11 +4669,7 @@ namespace
           if (options.ShowProtectionPercentage)
           {
             var hasOnlineProtection = HasOnlineProtection(in decision);
-            _hudBuilder.Append("\n<size=")
-            .Append(STATUS_HUD_BODY_FONT_SIZE)
-            .Append("><color=")
-            .Append(STATUS_HUD_SUBTEXT_COLOR)
-            .Append('>');
+            _hudBuilder.Append(STATUS_HUD_BODY_PREFIX);
             AppendPercentage(_hudBuilder, percent);
             _hudBuilder.Append('%');
             if (hasOnlineProtection)
@@ -4428,11 +4696,7 @@ namespace
 
           if (options.ShowProtectionPercentage)
           {
-            _hudBuilder.Append("\n<size=")
-            .Append(STATUS_HUD_BODY_FONT_SIZE)
-            .Append("><color=")
-            .Append(STATUS_HUD_SUBTEXT_COLOR)
-            .Append(">+");
+            _hudBuilder.Append(STATUS_HUD_INCREASED_DAMAGE_PREFIX);
             AppendPercentage(
             _hudBuilder, decision.Scale.ToPercent());
             _hudBuilder.Append("% Damage</color></size>");
@@ -4474,12 +4738,7 @@ namespace
           penaltyEndTicks <= nowUtc.Ticks)
         return;
 
-      _hudBuilder.Append("\n<size=")
-        .Append(STATUS_HUD_BODY_FONT_SIZE)
-        .Append("><color=")
-        .Append(STATUS_HUD_PENALTY_COLOR)
-        .Append('>')
-        .Append(STATUS_HUD_PENALTY_TEXT);
+      _hudBuilder.Append(STATUS_HUD_PENALTY_PREFIX);
       AppendHudDuration(penaltyEndTicks - nowUtc.Ticks);
       _hudBuilder.Append("</color></size>");
     }
@@ -4503,15 +4762,16 @@ namespace
 
     private void AppendHudDuration(long ticks)
     {
-      var duration = System.TimeSpan.FromTicks(ticks);
-      var totalHours = (long)duration.TotalHours;
+      var totalHours = ticks / System.TimeSpan.TicksPerHour;
       if (totalHours < 10L)
         _hudBuilder.Append('0');
 
       _hudBuilder.Append(totalHours).Append(':');
-      AppendTwoDigits(_hudBuilder, duration.Minutes);
+      AppendTwoDigits(_hudBuilder, (int)(ticks /
+        System.TimeSpan.TicksPerMinute % 60L));
       _hudBuilder.Append(':');
-      AppendTwoDigits(_hudBuilder, duration.Seconds);
+      AppendTwoDigits(_hudBuilder, (int)(ticks /
+        System.TimeSpan.TicksPerSecond % 60L));
     }
 
     private static void AppendTwoDigits(StringBuilder builder, int value)
@@ -4526,11 +4786,11 @@ namespace
       var rounded = System.Math.Round(percentage);
       if (System.Math.Abs(percentage - rounded) < 0.0001d)
       {
-        builder.Append(rounded);
+        builder.Append((int)rounded);
         return;
       }
 
-      builder.Append(percentage.ToString("0.#", CultureInfo.CurrentCulture));
+      builder.Append(percentage.ToString("0.#", CultureInfo.InvariantCulture));
     }
 
     private static void AppendRemainingTime(
@@ -4571,64 +4831,86 @@ namespace
 
     private void RefreshStatusHudScheduler()
     {
-      if (!Configuration.StatusHud.Enabled)
-        return;
-
-      if (BasePlayer.activePlayerList.Count is 0 && _hudStates.Count is 0)
+      if (!Configuration.StatusHud.Enabled || _statusHudDueQueue.Count is 0)
         return;
 
       var nowRealtime = UnityEngine.Time.realtimeSinceStartup;
-      var players = BasePlayer.activePlayerList;
-      for (var i = 0; i < players.Count; i++)
+      var dueTick = GetStatusHudScheduleTick(nowRealtime);
+      while (_statusHudDueQueue.Count is not 0)
       {
-        var player = players[i];
-        if (!player || !player.IsConnected)
-          continue;
-        var playerID = player.userID.Get();
-        if (!_hudStates.TryGetValue(playerID, out var hudState))
+        var nextTick = GetFirstStatusHudScheduleTick();
+        if (nextTick > dueTick)
+          return;
+
+        var dueEntries = _statusHudDueQueue[nextTick];
+        _statusHudDueQueue.Remove(nextTick);
+        for (var i = 0; i < dueEntries.Count; i++)
         {
-          hudState = Facepunch.Pool.Get<HudPlayerState>();
-          _hudStates[playerID] = hudState;
+          var entry = dueEntries[i];
+          if (!_hudStates.TryGetValue(entry.PlayerID, out var hudState) ||
+              hudState.ScheduleGeneration != entry.Generation)
+            continue;
+
+          RefreshScheduledStatusHudPlayer(entry.PlayerID, hudState);
         }
-        if (nowRealtime < hudState.PrivilegeRefreshAt)
-          continue;
-        RefreshPlayerStatusHud(player, hudState);
+        dueEntries.Clear();
+        _statusHudDueListPool.Push(dueEntries);
       }
-
-      _scheduledStatusHudPlayerIds.Clear();
-      foreach (var (key, hudState) in _hudStates)
-      {
-        if (hudState.HudExpiresAt <= 0f)
-          continue;
-
-        if (!hudState.CommandPrivilege ||
-            nowRealtime >= hudState.HudExpiresAt ||
-            nowRealtime >= hudState.HudRefreshAt)
-        {
-          _scheduledStatusHudPlayerIds.Add(key);
-        }
-      }
-
-      for (var i = 0; i < _scheduledStatusHudPlayerIds.Count; i++)
-        RefreshScheduledStatusHudPlayer(_scheduledStatusHudPlayerIds[i]);
     }
 
-    private void RefreshScheduledStatusHudPlayer(ulong playerID)
+    private void RefreshScheduledStatusHudPlayer(
+      ulong playerID, HudPlayerState hudState)
     {
       var player = _players.GetPlayer(playerID);
       if (!player || !player.IsConnected)
       {
-        if (_hudStates.TryGetValue(playerID, out var hudState))
-          RemoveStatusHud(player, playerID, hudState);
+        RemoveStatusHud(player, playerID, hudState);
         return;
       }
 
-      RefreshPlayerStatusHud(player);
+      RefreshPlayerStatusHud(player, hudState);
+    }
+
+    private static int GetStatusHudScheduleTick(float realtime) =>
+      (int)System.Math.Ceiling(realtime / STATUS_HUD_SCHEDULER_INTERVAL);
+
+    private int GetFirstStatusHudScheduleTick()
+    {
+      foreach (var entry in _statusHudDueQueue)
+        return entry.Key;
+
+      return int.MaxValue;
+    }
+
+    private void ScheduleStatusHudRefresh(
+      ulong playerID, HudPlayerState hudState)
+    {
+      if (hudState is null)
+        return;
+
+      var dueAt = hudState.PrivilegeRefreshAt;
+      if (hudState.CommandPrivilege)
+      {
+        dueAt = System.Math.Min(dueAt, hudState.HudExpiresAt);
+        if (hudState.HudRefreshAt > 0f)
+          dueAt = System.Math.Min(dueAt, hudState.HudRefreshAt);
+      }
+
+      var dueTick = GetStatusHudScheduleTick(dueAt);
+      hudState.ScheduleGeneration = ++_statusHudScheduleGeneration;
+      if (!_statusHudDueQueue.TryGetValue(dueTick, out var dueEntries))
+      {
+        dueEntries = _statusHudDueListPool.Count > 0 ?
+          _statusHudDueListPool.Pop() : new();
+        _statusHudDueQueue[dueTick] = dueEntries;
+      }
+      dueEntries.Add(new(playerID, hudState.ScheduleGeneration));
     }
 
     private void QueueStatusHudRefresh(BasePlayer player)
     {
-      if (!Configuration.StatusHud.Enabled || !player || !player.IsConnected)
+      if (!_serverInitialized || !Configuration.StatusHud.Enabled || !player ||
+          !player.IsConnected)
         return;
 
       _queuedStatusHudPlayerIds.Add(player.userID.Get());
@@ -4636,11 +4918,7 @@ namespace
         return;
 
       _statusHudRefreshQueued = true;
-#if CARBON
-      Community.Runtime.Core.NextFrame(RefreshQueuedStatusHuds);
-#else
-      NextFrame(RefreshQueuedStatusHuds);
-#endif
+      NextFrame(_refreshQueuedStatusHudsAction);
     }
 
     private void QueueCupboardStatusHudRefresh(
@@ -4654,7 +4932,8 @@ namespace
 
     private void QueueBuildingStatusHudRefresh(uint buildingID)
     {
-      if (buildingID is 0U || !Configuration.StatusHud.Enabled)
+      if (!_serverInitialized || buildingID is 0U ||
+          !Configuration.StatusHud.Enabled)
         return;
 
       foreach (var (key, hudStates) in _hudStates)
@@ -4667,11 +4946,7 @@ namespace
         return;
 
       _statusHudRefreshQueued = true;
-#if CARBON
-      Community.Runtime.Core.NextFrame(RefreshQueuedStatusHuds);
-#else
-      NextFrame(RefreshQueuedStatusHuds);
-#endif
+      NextFrame(_refreshQueuedStatusHudsAction);
     }
 
     private void RefreshQueuedStatusHuds()
@@ -4825,6 +5100,9 @@ namespace
     private void RefreshCupboardAuthorizationViews(
       BuildingPrivlidge buildingPrivlidge, BasePlayer player)
     {
+      InvalidateMapMarkerAuthorizedPlayers();
+      if (buildingPrivlidge)
+        QueueTaxProtectionSync(buildingPrivlidge.buildingID);
       UpdateTcMarkerLabel(buildingPrivlidge);
       QueueCupboardStatusHudRefresh(buildingPrivlidge);
       QueueStatusHudRefresh(player);
@@ -4860,6 +5138,8 @@ namespace
     private readonly HashSet<uint> _queuedBuildingMapMarkerSyncIds = new(64);
     private readonly Queue<ulong> _queuedBoatMapMarkerSyncs = new(32);
     private readonly HashSet<ulong> _queuedBoatMapMarkerSyncIds = new(32);
+    private readonly Queue<ulong> _queuedMapMarkerAuthorizationRefreshes = new(64);
+    private readonly HashSet<ulong> _queuedMapMarkerAuthorizationRefreshIds = new(64);
     private readonly List<ulong> _activeMapMarkerCupboardIds = new(128);
     private int _mapMarkerRefreshIndex;
     private int _mapMarkerRefreshGeneration;
@@ -4867,8 +5147,14 @@ namespace
     private bool _mapMarkerRefreshActive;
     private bool _mapMarkerSyncQueued;
     private bool _mapMarkerRefreshQueued;
+    private bool _mapMarkerAuthorizationRefreshQueued;
+    private bool _mapMarkerRefreshRestartRequested;
     private bool _forceRadiusReplay;
     private bool _mapMarkerRefreshForceRadiusReplay;
+    private int _mapMarkerAuthorizedPlayersVersion = 1;
+    private System.Action _processQueuedMapMarkerSyncsAction;
+    private System.Action _processQueuedMapMarkerRefreshAction;
+    private System.Action _processQueuedMapMarkerAuthorizationRefreshesAction;
     private readonly StringBuilder _mapMarkerBuilder = new(512);
     private UnityEngine.Color _markerProtectedColor;
     private UnityEngine.Color _markerPartialColor;
@@ -4917,6 +5203,7 @@ namespace
       public TcState TcState;
       public BaseCombatEntity ProtectedEntity;
       public BaseEntity ParentEntity;
+      public UnityEngine.Vector3 LastPosition;
       public bool IsBoat;
       public MapMarkerGenericRadius RadiusMarker;
       public VendingMachineMapMarker LabelMarker;
@@ -4932,6 +5219,8 @@ namespace
       public long LabelPenaltyEndTicks;
       public int LabelAuthorizedPlayerCount;
       public int LabelAuthorizedPlayerHash;
+      public int AuthorizedPlayersVersion;
+      public bool AuthorizedPlayersDirty;
       public int RefreshListIndex;
       public int RefreshGeneration;
 
@@ -4940,6 +5229,7 @@ namespace
         TcState = default;
         ProtectedEntity = null;
         ParentEntity = null;
+        LastPosition = UnityEngine.Vector3.zero;
         IsBoat = false;
         RadiusMarker = null;
         LabelMarker = null;
@@ -4955,6 +5245,8 @@ namespace
         LabelPenaltyEndTicks = 0L;
         LabelAuthorizedPlayerCount = 0;
         LabelAuthorizedPlayerHash = 0;
+        AuthorizedPlayersVersion = 0;
+        AuthorizedPlayersDirty = false;
         RefreshListIndex = -1;
         RefreshGeneration = 0;
       }
@@ -4970,6 +5262,11 @@ namespace
     {
       if (!Configuration.MapMarker.Enabled)
         return;
+
+      _processQueuedMapMarkerSyncsAction = ProcessQueuedMapMarkerSyncs;
+      _processQueuedMapMarkerRefreshAction = ProcessQueuedMapMarkerRefresh;
+      _processQueuedMapMarkerAuthorizationRefreshesAction =
+        ProcessQueuedMapMarkerAuthorizationRefreshes;
 
       foreach (var buildingID in _tcCache.Keys)
         QueueBuildingMapMarkerSync(buildingID);
@@ -5002,6 +5299,8 @@ namespace
       _queuedBuildingMapMarkerSyncIds.Clear();
       _queuedBoatMapMarkerSyncs.Clear();
       _queuedBoatMapMarkerSyncIds.Clear();
+      _queuedMapMarkerAuthorizationRefreshes.Clear();
+      _queuedMapMarkerAuthorizationRefreshIds.Clear();
       _activeMapMarkerCupboardIds.Clear();
       _mapMarkerRefreshIndex = 0;
       _mapMarkerRefreshGeneration = 0;
@@ -5009,8 +5308,14 @@ namespace
       _mapMarkerRefreshActive = false;
       _mapMarkerSyncQueued = false;
       _mapMarkerRefreshQueued = false;
+      _mapMarkerAuthorizationRefreshQueued = false;
+      _mapMarkerRefreshRestartRequested = false;
+      _processQueuedMapMarkerSyncsAction = null;
+      _processQueuedMapMarkerRefreshAction = null;
+      _processQueuedMapMarkerAuthorizationRefreshesAction = null;
       _forceRadiusReplay = false;
       _mapMarkerRefreshForceRadiusReplay = false;
+      _mapMarkerAuthorizedPlayersVersion = 1;
       RemoveAllMapMarkers();
       _mapMarkerBuilder.Clear();
     }
@@ -5044,7 +5349,8 @@ namespace
 
     private void QueueBuildingMapMarkerSync(uint buildingID)
     {
-      if (!Configuration.MapMarker.Enabled || buildingID is 0U)
+      if (!_serverInitialized || !Configuration.MapMarker.Enabled ||
+          buildingID is 0U)
         return;
 
       if (!_queuedBuildingMapMarkerSyncIds.Add(buildingID))
@@ -5055,6 +5361,111 @@ namespace
         return;
 
       QueueMapMarkerSyncProcessing();
+    }
+
+    private void InvalidateMapMarkerAuthorizedPlayers()
+    {
+      if (_mapMarkerAuthorizedPlayersVersion == int.MaxValue)
+        _mapMarkerAuthorizedPlayersVersion = 1;
+      else
+        _mapMarkerAuthorizedPlayersVersion++;
+
+      if (_mapMarkerRefreshActive)
+        _mapMarkerRefreshRestartRequested = true;
+
+      QueueMapMarkerRefresh();
+    }
+
+    private void QueueCodeLockMapMarkerAuthorizationRefresh(
+      CodeLock codeLock, uint trackedBuildingID = 0U)
+    {
+      var hasTrackedBuilding = trackedBuildingID is not 0U;
+      if (!hasTrackedBuilding)
+      {
+        var lockNetworkID = GetNetworkId(codeLock);
+        hasTrackedBuilding = lockNetworkID is not 0UL &&
+          _codeLockBuildingIds.TryGetValue(lockNetworkID, out trackedBuildingID);
+      }
+      if (hasTrackedBuilding)
+        QueueMapMarkerAuthorizationRefresh(trackedBuildingID);
+
+      if (TryGetCodeLockBuildingID(codeLock, out var buildingID))
+      {
+        if (!hasTrackedBuilding || buildingID != trackedBuildingID)
+          QueueMapMarkerAuthorizationRefresh(buildingID);
+        return;
+      }
+
+      if (!hasTrackedBuilding)
+        QueueBoatMapMarkerAuthorizationRefresh(codeLock);
+    }
+
+    private void QueueMapMarkerAuthorizationRefresh(uint buildingID)
+    {
+      if (buildingID is 0U ||
+          !_tcCache.TryGetValue(buildingID, out var tcState) ||
+          tcState.CupboardNetworkID is 0UL)
+        return;
+
+      if (!_mapMarkersByCupboard.ContainsKey(tcState.CupboardNetworkID))
+      {
+        QueueBuildingMapMarkerSync(buildingID);
+        return;
+      }
+
+      QueueMapMarkerAuthorizationRefresh(tcState.CupboardNetworkID);
+    }
+
+    private void QueueBoatMapMarkerAuthorizationRefresh(CodeLock codeLock)
+    {
+      foreach (var (markerID, markerState) in _mapMarkersByCupboard)
+      {
+        if (markerState.IsBoat &&
+            IsCodeLockOnBoat(codeLock, markerState.ProtectedEntity))
+        {
+          QueueMapMarkerAuthorizationRefresh(markerID);
+          return;
+        }
+      }
+    }
+
+    private static bool IsCodeLockOnBoat(
+      CodeLock codeLock, BaseCombatEntity protectedEntity)
+    {
+      var (tugboat, modularBoat, _) = GetVehicle(protectedEntity);
+      if (tugboat && tugboat.children is not null)
+      {
+        foreach (var boatChild in tugboat.children)
+        {
+          if (boatChild.GetSlot(BaseEntity.Slot.Lock) == codeLock)
+            return true;
+        }
+      }
+      else if (modularBoat && modularBoat.Deployables.Cached is not null)
+      {
+        foreach (var boatChild in modularBoat.Deployables.Cached)
+        {
+          if (boatChild.GetSlot(BaseEntity.Slot.Lock) == codeLock)
+            return true;
+        }
+      }
+
+      return false;
+    }
+
+    private void QueueMapMarkerAuthorizationRefresh(ulong cupboardNetworkID)
+    {
+      if (!_serverInitialized || !Configuration.MapMarker.Enabled ||
+          cupboardNetworkID is 0UL ||
+          !_queuedMapMarkerAuthorizationRefreshIds.Add(cupboardNetworkID))
+        return;
+
+      _queuedMapMarkerAuthorizationRefreshes.Enqueue(cupboardNetworkID);
+      if (_mapMarkerAuthorizationRefreshQueued)
+        return;
+
+      _mapMarkerAuthorizationRefreshQueued = true;
+      NextFrame(_processQueuedMapMarkerAuthorizationRefreshesAction);
     }
 
     private void QueueBoatMapMarkerSync(BaseVehicle boat)
@@ -5075,11 +5486,7 @@ namespace
     private void QueueMapMarkerSyncProcessing()
     {
       _mapMarkerSyncQueued = true;
-#if CARBON
-      Community.Runtime.Core.NextFrame(ProcessQueuedMapMarkerSyncs);
-#else
-      NextFrame(ProcessQueuedMapMarkerSyncs);
-#endif
+      NextFrame(_processQueuedMapMarkerSyncsAction);
     }
 
     private void QueueMapMarkerRefresh() =>
@@ -5087,7 +5494,7 @@ namespace
 
     private void QueueMapMarkerRefresh(bool forceRadiusReplay)
     {
-      if (!Configuration.MapMarker.Enabled)
+      if (!_serverInitialized || !Configuration.MapMarker.Enabled)
         return;
 
       if (forceRadiusReplay)
@@ -5102,11 +5509,7 @@ namespace
     private void QueueMapMarkerRefreshProcessing()
     {
       _mapMarkerRefreshQueued = true;
-#if CARBON
-      Community.Runtime.Core.NextFrame(ProcessQueuedMapMarkerRefresh);
-#else
-      NextFrame(ProcessQueuedMapMarkerRefresh);
-#endif
+      NextFrame(_processQueuedMapMarkerRefreshAction);
     }
 
     private void ProcessQueuedMapMarkerRefresh()
@@ -5172,6 +5575,42 @@ namespace
       QueueMapMarkerRefreshProcessing();
     }
 
+    private void ProcessQueuedMapMarkerAuthorizationRefreshes()
+    {
+      if (!_serverInitialized || Configuration?.MapMarker?.Enabled is not true)
+      {
+        _queuedMapMarkerAuthorizationRefreshes.Clear();
+        _queuedMapMarkerAuthorizationRefreshIds.Clear();
+        _mapMarkerAuthorizationRefreshQueued = false;
+        return;
+      }
+
+      var processed = 0;
+      while (processed < MAP_MARKER_REFRESH_BATCH_SIZE &&
+             _queuedMapMarkerAuthorizationRefreshes.Count is not 0)
+      {
+        var cupboardNetworkID =
+          _queuedMapMarkerAuthorizationRefreshes.Dequeue();
+        _queuedMapMarkerAuthorizationRefreshIds.Remove(cupboardNetworkID);
+        processed++;
+
+        if (!_mapMarkersByCupboard.TryGetValue(
+              cupboardNetworkID, out var markerState))
+          continue;
+
+        markerState.AuthorizedPlayersDirty = true;
+        UpdateMapMarkerState(markerState, System.DateTime.UtcNow);
+      }
+
+      if (_queuedMapMarkerAuthorizationRefreshes.Count is not 0)
+      {
+        NextFrame(_processQueuedMapMarkerAuthorizationRefreshesAction);
+        return;
+      }
+
+      _mapMarkerAuthorizationRefreshQueued = false;
+    }
+
     private void ProcessQueuedMapMarkerSyncs()
     {
       if (!_serverInitialized || Configuration?.MapMarker?.Enabled is not true)
@@ -5221,8 +5660,11 @@ namespace
       _mapMarkerRefreshQueued = false;
       _mapMarkerRefreshRemaining = 0;
 
-      if (_forceRadiusReplay)
+      if (_forceRadiusReplay || _mapMarkerRefreshRestartRequested)
+      {
+        _mapMarkerRefreshRestartRequested = false;
         QueueMapMarkerRefresh();
+      }
     }
 
     private void StopMapMarkerRefresh()
@@ -5230,6 +5672,7 @@ namespace
       _mapMarkerRefreshActive = false;
       _mapMarkerRefreshQueued = false;
       _mapMarkerRefreshForceRadiusReplay = false;
+      _mapMarkerRefreshRestartRequested = false;
       _mapMarkerRefreshRemaining = 0;
     }
 
@@ -5237,11 +5680,11 @@ namespace
     {
       if (!Configuration.MapMarker.Enabled ||
           !tcState.Privilege ||
-          tcState.CupboardNetworkId is 0UL)
+          tcState.CupboardNetworkID is 0UL)
         return;
 
       if (_mapMarkersByCupboard.TryGetValue(
-            tcState.CupboardNetworkId, out var existing))
+            tcState.CupboardNetworkID, out var existing))
       {
         existing.TcState = tcState;
         existing.ProtectedEntity = tcState.Privilege;
@@ -5285,7 +5728,7 @@ namespace
 
     private void SpawnMapMarkerGroup(in TcState tcState) =>
       SpawnMapMarkerGroup(
-        tcState.Privilege, tcState.Privilege, tcState.CupboardNetworkId,
+        tcState.Privilege, tcState.Privilege, tcState.CupboardNetworkID,
         false, in tcState);
 
     private void SpawnMapMarkerGroup(
@@ -5327,6 +5770,7 @@ namespace
       markerGroup.TcState = tcState;
       markerGroup.ProtectedEntity = protectedEntity;
       markerGroup.ParentEntity = parentEntity;
+      markerGroup.LastPosition = position;
       markerGroup.IsBoat = isBoat;
       markerGroup.RadiusMarker = radiusMarker;
       markerGroup.LabelMarker = labelMarker;
@@ -5401,11 +5845,16 @@ namespace
       if (!markerState.IsBoat || !boat || !markerState.ParentEntity)
         return;
 
-      if (markerState.LabelMarker)
+      var position = markerState.ParentEntity.transform.position;
+      var positionChanged = position != markerState.LastPosition;
+      if (positionChanged)
       {
-        markerState.LabelMarker.transform.position =
-          markerState.ParentEntity.transform.position;
-        markerState.LabelMarker.SendNetworkUpdate();
+        markerState.LastPosition = position;
+        if (markerState.LabelMarker)
+        {
+          markerState.LabelMarker.transform.position = position;
+          markerState.LabelMarker.SendNetworkUpdate();
+        }
       }
 
       if (boat.HasFlag(BaseEntity.Flags.On))
@@ -5420,10 +5869,9 @@ namespace
             markerState.RadiusMarkerNetworkID = 0UL;
           }
         }
-        else if (markerState.RadiusMarker)
+        else if (markerState.RadiusMarker && positionChanged)
         {
-          markerState.RadiusMarker.transform.position =
-            markerState.ParentEntity.transform.position;
+          markerState.RadiusMarker.transform.position = position;
           markerState.RadiusMarker.SendNetworkUpdate();
           markerState.RadiusMarker.SendUpdate();
         }
@@ -5432,16 +5880,17 @@ namespace
 
       if (markerState.RadiusMarker)
       {
-        markerState.RadiusMarker.transform.position =
-          markerState.ParentEntity.transform.position;
-        markerState.RadiusMarker.SendNetworkUpdate();
-        markerState.RadiusMarker.SendUpdate();
+        if (positionChanged)
+        {
+          markerState.RadiusMarker.transform.position = position;
+          markerState.RadiusMarker.SendNetworkUpdate();
+          markerState.RadiusMarker.SendUpdate();
+        }
         return;
       }
 
       var radiusMarker = GameManager.server.CreateEntity(
-        MAP_MARKER_RADIUS_PREFAB,
-        markerState.ParentEntity.transform.position) as MapMarkerGenericRadius;
+        MAP_MARKER_RADIUS_PREFAB, position) as MapMarkerGenericRadius;
       if (!radiusMarker)
         return;
 
@@ -5508,9 +5957,11 @@ namespace
       if (!shouldRefreshLabel && !forceRadiusReplay)
         return;
 
-      var label = BuildMapMarkerLabel(
-        protectionState, hasTaxProtection, in decision, nowUtc,
-        markerState.LabelPenaltyEndTicks, authorizedPlayers);
+      var label = shouldRefreshLabel ?
+        BuildMapMarkerLabel(
+          protectionState, hasTaxProtection, in decision, nowUtc,
+          markerState.LabelPenaltyEndTicks, authorizedPlayers) :
+        markerState.LabelText;
       markerState.LabelText = label;
       markerState.LabelMarker.markerShopName = label;
       markerState.LabelMarker.SendNetworkUpdate();
@@ -5522,12 +5973,10 @@ namespace
       in DamageDecision decision,
       System.DateTime nowUtc, out PlayerIdSet authorizedPlayers)
     {
-      authorizedPlayers = GetMapMarkerAuthorizedPlayers(markerState);
+      authorizedPlayers = null;
       GetMapMarkerLabelState(
-        protectionState, in decision, nowUtc, authorizedPlayers,
-        out var remainingMinutes, out var penaltyEndTicks,
-        out var authorizedPlayerCount,
-        out var authorizedPlayerHash);
+        protectionState, in decision, nowUtc,
+        out var remainingMinutes, out var penaltyEndTicks);
       var hasOnlineProtection = HasOnlineProtection(in decision);
 
       if (markerState.LabelProtectionState == protectionState &&
@@ -5536,9 +5985,15 @@ namespace
           markerState.LabelScale == decision.Scale &&
           markerState.LabelRemainingMinutes == remainingMinutes &&
           markerState.LabelPenaltyEndTicks == penaltyEndTicks &&
-          markerState.LabelAuthorizedPlayerCount == authorizedPlayerCount &&
-          markerState.LabelAuthorizedPlayerHash == authorizedPlayerHash)
+          markerState.AuthorizedPlayersVersion ==
+          _mapMarkerAuthorizedPlayersVersion &&
+          !markerState.AuthorizedPlayersDirty)
         return false;
+
+      authorizedPlayers = GetMapMarkerAuthorizedPlayers(markerState);
+      GetMapMarkerAuthorizedPlayersState(
+        authorizedPlayers, out var authorizedPlayerCount,
+        out var authorizedPlayerHash);
 
       markerState.LabelProtectionState = protectionState;
       markerState.LabelHasTaxProtection = hasTaxProtection;
@@ -5548,6 +6003,8 @@ namespace
       markerState.LabelPenaltyEndTicks = penaltyEndTicks;
       markerState.LabelAuthorizedPlayerCount = authorizedPlayerCount;
       markerState.LabelAuthorizedPlayerHash = authorizedPlayerHash;
+      markerState.AuthorizedPlayersVersion = _mapMarkerAuthorizedPlayersVersion;
+      markerState.AuthorizedPlayersDirty = false;
       return true;
     }
 
@@ -5558,24 +6015,23 @@ namespace
       System.DateTime nowUtc, PlayerIdSet authorizedPlayers)
     {
       GetMapMarkerLabelState(
-        protectionState, in decision, nowUtc, authorizedPlayers,
+        protectionState, in decision, nowUtc,
         out markerState.LabelRemainingMinutes,
-        out markerState.LabelPenaltyEndTicks,
-        out markerState.LabelAuthorizedPlayerCount,
+        out markerState.LabelPenaltyEndTicks);
+      GetMapMarkerAuthorizedPlayersState(
+        authorizedPlayers, out markerState.LabelAuthorizedPlayerCount,
         out markerState.LabelAuthorizedPlayerHash);
       markerState.LabelProtectionState = protectionState;
       markerState.LabelHasTaxProtection = hasTaxProtection;
       markerState.LabelHasOnlineProtection = HasOnlineProtection(in decision);
       markerState.LabelScale = decision.Scale;
+      markerState.AuthorizedPlayersVersion = _mapMarkerAuthorizedPlayersVersion;
     }
 
     private void GetMapMarkerLabelState(
       HUDProtectionState protectionState, in DamageDecision decision,
-      System.DateTime nowUtc,
-      PlayerIdSet authorizedPlayers,
-      out long remainingMinutes, out long penaltyEndTicks,
-      out int authorizedPlayerCount,
-      out int authorizedPlayerHash)
+      System.DateTime nowUtc, out long remainingMinutes,
+      out long penaltyEndTicks)
     {
       remainingMinutes = protectionState is HUDProtectionState.Protected or
         HUDProtectionState.Partial ?
@@ -5591,9 +6047,14 @@ namespace
         penaltyEndTicks = lastOnline.PenaltyEndTicks;
       }
 
+    }
+
+    private void GetMapMarkerAuthorizedPlayersState(
+      PlayerIdSet authorizedPlayers, out int authorizedPlayerCount,
+      out int authorizedPlayerHash)
+    {
       authorizedPlayerCount = authorizedPlayers?.Count ?? 0;
       authorizedPlayerHash = MAP_MARKER_HASH_SEED;
-
       if (authorizedPlayers is null)
         return;
 
@@ -5730,10 +6191,7 @@ namespace
 
       _tmpIdSetScratch.Clear();
       if (privilege.authorizedPlayers is not null)
-      {
-        foreach (var userID in privilege.authorizedPlayers)
-          _tmpIdSetScratch.Add(userID);
-      }
+        _tmpIdSetScratch.AddRange(privilege.authorizedPlayers);
 
       if (Configuration.Team.IncludeWhitelistPlayers)
         _tmpIdSetScratch.AddRange(GetCodeLockWhitelistPlayers(privilege));
@@ -5880,15 +6338,21 @@ namespace
     private readonly Dictionary<ulong, TaxProtectionState> _taxProtection = new();
     private readonly Dictionary<ulong, TaxProtectionRefund> _pendingTaxProtectionRefunds = new();
     private readonly Dictionary<ulong, TaxProtectionRefund> _taxProtectionRefundPouches = new();
-    private readonly HashSet<TaxProtectionRefund> _queuedTaxProtectionRefunds = new();
+    private readonly Queue<TaxProtectionRefund> _queuedTaxProtectionRefunds = new();
     private readonly PlayerIdSet _taxProtectionPlayerIdsScratch = new();
     private readonly Queue<uint> _queuedTaxProtectionSyncs = new(64);
     private readonly HashSet<uint> _queuedTaxProtectionSyncIds = new(64);
     private bool _taxProtectionSyncQueued;
+    private System.Action _processQueuedTaxProtectionSyncsAction;
+    private bool _taxProtectionRefundsQueued;
+    private System.Action _processQueuedTaxProtectionRefundsAction;
     private PluginTimer _taxProtectionTimer;
     private ItemDefinition _taxProtectionCurrencyDefinition;
     private string _taxProtectionCurrencyName =
       TAX_PROTECTION_CURRENCY_FALLBACK;
+    private long _maxPurchasedProtectionTicks;
+    private static readonly object BoxedCannotAccept =
+      ItemContainer.CanAcceptResult.CannotAccept;
 
 #region Constants
 
@@ -5927,14 +6391,14 @@ namespace
     {
       public readonly HashSet<ulong> AuthorizedPlayerIds = new();
       public int CurrencyAmount;
-      public ulong DestroyerId;
+      public ulong DestroyerID;
       public UnityEngine.Vector3 Position;
 
       public void EnterPool()
       {
         AuthorizedPlayerIds.Clear();
         CurrencyAmount = 0;
-        DestroyerId = 0UL;
+        DestroyerID = 0UL;
         Position = UnityEngine.Vector3.zero;
       }
 
@@ -5944,6 +6408,10 @@ namespace
 #endregion Classes
 
 #region Cache Methods
+
+    private void CacheTaxProtectionLimits() =>
+      _maxPurchasedProtectionTicks = Configuration.TaxProtection.MaxPurchaseHours *
+        System.TimeSpan.TicksPerHour;
 
     private void CacheTaxProtectionCurrency()
     {
@@ -5972,11 +6440,12 @@ namespace
         Facepunch.Pool.Free(ref cachedEntry);
       }
       _taxProtectionRefundPouches.Clear();
+      Unsubscribe(nameof(CanLootEntity));
 
-      foreach (var pouchNetworkId in _tmpIdsScratch)
+      foreach (var pouchNetworkID in _tmpIdsScratch)
       {
         if (BaseNetworkable.serverEntities.Find(
-              new NetworkableId(pouchNetworkId)) is DroppedItemContainer pouch)
+              new NetworkableId(pouchNetworkID)) is DroppedItemContainer pouch)
           pouch.Kill();
       }
       _tmpIdsScratch.Clear();
@@ -5987,6 +6456,7 @@ namespace
         Facepunch.Pool.Free(ref cachedEntry);
       }
       _queuedTaxProtectionRefunds.Clear();
+      _taxProtectionRefundsQueued = false;
     }
 
 #endregion Cache Methods
@@ -5997,17 +6467,16 @@ namespace
     {
       var options = Configuration.TaxProtection;
       if (!entity || !options.Enabled || !options.RefundOnDestruction ||
-          hitInfo?.InitiatorPlayer is not BasePlayer destroyer ||
-          !IsTrustedForCupboard(destroyer, entity))
+          hitInfo?.InitiatorPlayer is not BasePlayer destroyer)
         return;
 
       if (options.CurrencyItemID is 0 || options.CostPerHour <= 0)
         return;
 
-      var cupboardNetworkId = GetNetworkId(entity);
-      if (cupboardNetworkId is 0UL ||
+      var cupboardNetworkID = GetNetworkId(entity);
+      if (cupboardNetworkID is 0UL ||
           !_taxProtection.TryGetValue(
-            cupboardNetworkId, out var state))
+            cupboardNetworkID, out var state))
         return;
 
       var remainingTicks = state.GetRemainingTicks(System.DateTime.UtcNow.Ticks);
@@ -6023,24 +6492,26 @@ namespace
         return;
 
       var authorizedPlayers = GetTotalAuthorizedPlayers(entity);
-      if (authorizedPlayers?.Overflowed is true)
+      if (authorizedPlayers?.Overflowed is true ||
+          !IsTrustedForAuthorizedPlayers(
+            destroyer.userID.Get(), authorizedPlayers))
         return;
 
       if (_pendingTaxProtectionRefunds.Remove(
-            cupboardNetworkId, out var staleRefund))
+            cupboardNetworkID, out var staleRefund))
         Facepunch.Pool.Free(ref staleRefund);
 
       var refund = Facepunch.Pool.Get<TaxProtectionRefund>();
       refund.CurrencyAmount = (int)currencyAmount;
-      refund.DestroyerId = destroyer.userID.Get();
+      refund.DestroyerID = destroyer.userID.Get();
       refund.Position = destroyer.transform.position;
       if (authorizedPlayers is not null)
       {
         for (var i = 0; i < authorizedPlayers.Count; i++)
           refund.AuthorizedPlayerIds.Add(authorizedPlayers[i]);
       }
-      refund.AuthorizedPlayerIds.Add(refund.DestroyerId);
-      _pendingTaxProtectionRefunds[cupboardNetworkId] = refund;
+      refund.AuthorizedPlayerIds.Add(refund.DestroyerID);
+      _pendingTaxProtectionRefunds[cupboardNetworkID] = refund;
     }
 
     private object CanLootEntity(
@@ -6051,21 +6522,22 @@ namespace
             GetNetworkId(container), out var refund))
         return null;
 
-      return refund.AuthorizedPlayerIds.Contains(player.userID.Get()) ? null : false;
+      return refund.AuthorizedPlayerIds.Contains(player.userID.Get()) ? null : BoxedFalse;
     }
 
     private object CanAcceptItem(ItemContainer container, Item item, int _targetPos)
     {
       var options = Configuration.TaxProtection;
-      if (!options.Enabled || options.MaxCurrencyReserves is 0 || container is null ||
-          item is null || item.parent == container ||
-          item.info.itemid != options.CurrencyItemID ||
+      if (item is null || item.info is null ||
+          item.info.itemid != options.CurrencyItemID || !options.Enabled ||
+          options.MaxCurrencyReserves is 0 || container is null ||
+          item.parent == container ||
           container.entityOwner is not BuildingPrivlidge)
         return null;
 
       return (long)container.GetAmount(options.CurrencyItemID, false, false) +
         item.amount > options.MaxCurrencyReserves ?
-        ItemContainer.CanAcceptResult.CannotAccept : null;
+        BoxedCannotAccept : null;
     }
 
 #endregion Hooks
@@ -6077,6 +6549,9 @@ namespace
       if (!Configuration.TaxProtection.Enabled)
         return;
 
+      _processQueuedTaxProtectionSyncsAction = ProcessQueuedTaxProtectionSyncs;
+
+      InitializeTaxOverlay();
       QueueTaxProtectionSync();
       _taxProtectionTimer = timer.Every(
         TAX_PROTECTION_SYNC_INTERVAL, QueueTaxProtectionSync);
@@ -6089,23 +6564,29 @@ namespace
       _queuedTaxProtectionSyncs.Clear();
       _queuedTaxProtectionSyncIds.Clear();
       _taxProtectionSyncQueued = false;
+      _processQueuedTaxProtectionSyncsAction = null;
+      _processQueuedTaxProtectionRefundsAction = null;
       _taxProtectionPlayerIdsScratch.Clear();
+      ClearTaxProtectionRefunds();
     }
 
     private void QueueTaxProtectionRefund(TaxProtectionRefund refund)
     {
-      _queuedTaxProtectionRefunds.Add(refund);
-#if CARBON
-      Community.Runtime.Core.NextFrame(() => SpawnQueuedTaxProtectionRefund(refund));
-#else
-      NextFrame(() => SpawnQueuedTaxProtectionRefund(refund));
-#endif
+      _queuedTaxProtectionRefunds.Enqueue(refund);
+      if (_taxProtectionRefundsQueued)
+        return;
+
+      _taxProtectionRefundsQueued = true;
+      _processQueuedTaxProtectionRefundsAction ??=
+        ProcessQueuedTaxProtectionRefunds;
+      NextFrame(_processQueuedTaxProtectionRefundsAction);
     }
 
-    private void SpawnQueuedTaxProtectionRefund(TaxProtectionRefund refund)
+    private void ProcessQueuedTaxProtectionRefunds()
     {
-      if (_queuedTaxProtectionRefunds.Remove(refund))
-        SpawnTaxProtectionRefund(refund);
+      _taxProtectionRefundsQueued = false;
+      while (_queuedTaxProtectionRefunds.Count > 0)
+        SpawnTaxProtectionRefund(_queuedTaxProtectionRefunds.Dequeue());
     }
 
     private void SpawnTaxProtectionRefund(TaxProtectionRefund refund)
@@ -6138,41 +6619,29 @@ namespace
       }
 
       container.enableSaving = false;
-      container.OwnerID = refund.DestroyerId;
+      container.OwnerID = refund.DestroyerID;
       container.inventory = new ItemContainer();
       container.inventory.ServerInitialize(null, 1);
       container.inventory.GiveItem(refundItem);
       container.Spawn();
-      var containerNetworkId = GetNetworkId(container);
-      if (containerNetworkId is 0UL)
+      var containerNetworkID = GetNetworkId(container);
+      if (containerNetworkID is 0UL)
       {
         container.Kill();
         Facepunch.Pool.Free(ref refund);
         return;
       }
 
-      _taxProtectionRefundPouches[containerNetworkId] = refund;
+      if (_taxProtectionRefundPouches.Count is 0)
+        Subscribe(nameof(CanLootEntity));
+      _taxProtectionRefundPouches[containerNetworkID] = refund;
       container.Invoke(
         () => container.Kill(), TAX_PROTECTION_REFUND_CONTAINER_LIFETIME);
     }
 
-    private void SyncPurchasedProtection(System.DateTime nowUtc)
-    {
-      if (!Configuration.TaxProtection.Enabled)
-        return;
-
-      foreach (var tcState in _tcCache.Values)
-      {
-        if (tcState.Privilege)
-          SyncPurchasedProtection(
-            tcState.Privilege, tcState.CupboardNetworkId, nowUtc);
-      }
-    }
-
     private void QueueTaxProtectionSync()
     {
-      if (!_serverInitialized || Configuration?.TaxProtection?.Enabled is not true ||
-          _taxProtectionSyncQueued)
+      if (!_serverInitialized || Configuration?.TaxProtection?.Enabled is not true)
         return;
 
       foreach (var buildingID in _tcCache.Keys)
@@ -6184,17 +6653,30 @@ namespace
       if (_queuedTaxProtectionSyncs.Count is 0)
         return;
 
+      if (_taxProtectionSyncQueued)
+        return;
+
+      _taxProtectionSyncQueued = true;
+      QueueTaxProtectionSyncProcessing();
+    }
+
+    private void QueueTaxProtectionSync(uint buildingID)
+    {
+      if (!_serverInitialized || Configuration?.TaxProtection?.Enabled is not true ||
+          buildingID is 0U || !_queuedTaxProtectionSyncIds.Add(buildingID))
+        return;
+
+      _queuedTaxProtectionSyncs.Enqueue(buildingID);
+      if (_taxProtectionSyncQueued)
+        return;
+
       _taxProtectionSyncQueued = true;
       QueueTaxProtectionSyncProcessing();
     }
 
     private void QueueTaxProtectionSyncProcessing()
     {
-#if CARBON
-      Community.Runtime.Core.NextFrame(ProcessQueuedTaxProtectionSyncs);
-#else
-      NextFrame(ProcessQueuedTaxProtectionSyncs);
-#endif
+      NextFrame(_processQueuedTaxProtectionSyncsAction);
     }
 
     private void ProcessQueuedTaxProtectionSyncs()
@@ -6216,8 +6698,11 @@ namespace
         _queuedTaxProtectionSyncIds.Remove(buildingID);
         if (_tcCache.TryGetValue(buildingID, out var tcState) &&
             tcState.Privilege)
+        {
           SyncPurchasedProtection(
-            tcState.Privilege, tcState.CupboardNetworkId, nowUtc);
+            tcState.Privilege, tcState.CupboardNetworkID, nowUtc);
+          MarkTaxOverlayDirty(tcState.CupboardNetworkID);
+        }
         processed++;
       }
 
@@ -6231,34 +6716,35 @@ namespace
     }
 
     private void SyncPurchasedProtection(
-      BuildingPrivlidge privilege, ulong cupboardNetworkId,
+      BuildingPrivlidge privilege, ulong cupboardNetworkID,
       System.DateTime nowUtc)
     {
       if (CanActivatePurchasedProtection(privilege, nowUtc))
       {
-        if (_taxProtection.TryGetValue(cupboardNetworkId, out var state) &&
+        if (_taxProtection.TryGetValue(cupboardNetworkID, out var state) &&
             state.GetRemainingTicks(nowUtc.Ticks) > 0L)
         {
           if (state.ActiveSinceTicks <= 0L)
-            ResumePurchasedProtection(privilege, cupboardNetworkId, nowUtc);
+            ResumePurchasedProtection(privilege, cupboardNetworkID, nowUtc);
           return;
         }
 
-        if (TryTopUpPurchasedProtection(privilege, cupboardNetworkId, nowUtc))
+        if (TryTopUpPurchasedProtection(privilege, cupboardNetworkID, nowUtc))
           return;
       }
 
-      if (PausePurchasedProtection(cupboardNetworkId, nowUtc))
+      if (PausePurchasedProtection(cupboardNetworkID, nowUtc))
       {
         QueueCupboardStatusHudRefresh(privilege);
         UpdateTcMarkerLabel(privilege);
       }
+      MarkTaxOverlayDirty(cupboardNetworkID);
     }
 
-    private bool PausePurchasedProtection(ulong cupboardNetworkId,
+    private bool PausePurchasedProtection(ulong cupboardNetworkID,
       System.DateTime nowUtc)
     {
-      if (!_taxProtection.TryGetValue(cupboardNetworkId, out var state) ||
+      if (!_taxProtection.TryGetValue(cupboardNetworkID, out var state) ||
           state.ActiveSinceTicks <= 0L)
         return false;
 
@@ -6287,9 +6773,9 @@ namespace
     }
 
     private bool ResumePurchasedProtection(BuildingPrivlidge privilege,
-      ulong cupboardNetworkId, System.DateTime nowUtc)
+      ulong cupboardNetworkID, System.DateTime nowUtc)
     {
-      if (!_taxProtection.TryGetValue(cupboardNetworkId, out var state) ||
+      if (!_taxProtection.TryGetValue(cupboardNetworkID, out var state) ||
           state.ActiveSinceTicks > 0L ||
           state.GetRemainingTicks(nowUtc.Ticks) <= 0L)
         return false;
@@ -6298,6 +6784,7 @@ namespace
       MarkDataDirty();
       QueueCupboardStatusHudRefresh(privilege);
       UpdateTcMarkerLabel(privilege);
+      MarkTaxOverlayDirty(cupboardNetworkID);
       return true;
     }
 
@@ -6312,9 +6799,9 @@ namespace
       if (!Configuration.TaxProtection.Enabled || !privilege)
         return false;
 
-      var cupboardNetworkId = GetNetworkId(privilege);
-      if (cupboardNetworkId is 0UL ||
-          !_taxProtection.TryGetValue(cupboardNetworkId, out var state) ||
+      var cupboardNetworkID = GetNetworkId(privilege);
+      if (cupboardNetworkID is 0UL ||
+          !_taxProtection.TryGetValue(cupboardNetworkID, out var state) ||
           state.ActiveSinceTicks <= 0L)
         return false;
 
@@ -6333,9 +6820,9 @@ namespace
       if (!Configuration.TaxProtection.Enabled || !privilege)
         return false;
 
-      var cupboardNetworkId = GetNetworkId(privilege);
+      var cupboardNetworkID = GetNetworkId(privilege);
       if (!Configuration.RaidProtection.ProtectGriefTcs &&
-          _griefCupboardIds.Contains(cupboardNetworkId))
+          _griefCupboardIds.Contains(cupboardNetworkID))
         return false;
 
       if (!Configuration.RaidProtection.ProtectDecayingBase &&
@@ -6345,11 +6832,7 @@ namespace
 
       var authorizedPlayers = _taxProtectionPlayerIdsScratch;
       authorizedPlayers.Clear();
-      if (privilege.authorizedPlayers is not null)
-      {
-        foreach (var authorizedPlayer in privilege.authorizedPlayers)
-          authorizedPlayers.Add(authorizedPlayer);
-      }
+      authorizedPlayers.AddRange(privilege.authorizedPlayers);
 
       if (Configuration.Team.IncludeWhitelistPlayers)
         authorizedPlayers.AddRange(GetCodeLockWhitelistPlayers(privilege));
@@ -6364,20 +6847,19 @@ namespace
 
       targetID = GetRecentActiveMemberAll(
         targetID, authorizedPlayers, nowUtc);
-      var targetScaleCache = GetOrCreateScaleCache(targetID, nowUtc);
-      if (!targetID.IsSteamID() || !targetScaleCache.HasTaxPermission ||
+      if (!_lastOnline.TryGetValue(targetID, out var targetLastOnline))
+        return false;
+
+      var targetScaleCache = GetOrCreateScaleCache(targetID);
+      if (!targetScaleCache.HasTaxPermission ||
           !targetScaleCache.HasProtectPermission)
         return false;
 
-      if (_lastOnline.TryGetValue(targetID, out var targetLastOnline) &&
-          IsApiPenaltyActive(targetLastOnline, nowUtc))
+      if (IsApiPenaltyActive(targetLastOnline, nowUtc))
         return false;
 
       if (!IsOnline(targetID))
-      {
-        return _lastOnline.TryGetValue(targetID, out targetLastOnline) &&
-          IsOffline(targetID, targetLastOnline, nowUtc);
-      }
+        return IsOffline(targetID, targetLastOnline, nowUtc);
 
       if (!Configuration.RaidProtection.OnlineRaidProtection &&
           !targetScaleCache.HasOnlineProtectPermission)
@@ -6389,24 +6871,22 @@ namespace
     }
 
     private bool TryTopUpPurchasedProtection(
-      BuildingPrivlidge privilege, ulong cupboardNetworkId,
+      BuildingPrivlidge privilege, ulong cupboardNetworkID,
       System.DateTime nowUtc)
     {
       var options = Configuration.TaxProtection;
-      if (!options.Enabled || !privilege || cupboardNetworkId is 0UL ||
+      if (!options.Enabled || !privilege || cupboardNetworkID is 0UL ||
           privilege.inventory is null || options.CurrencyItemID is 0 ||
           options.CostPerHour <= 0 ||
           _taxProtectionCurrencyDefinition is null)
         return false;
 
       var nowTicks = nowUtc.Ticks;
-      var maxPurchasedProtectionTicks = (long)options.MaxPurchaseHours *
-        System.TimeSpan.TicksPerHour;
-      if (_taxProtection.TryGetValue(cupboardNetworkId, out var state) &&
+      if (_taxProtection.TryGetValue(cupboardNetworkID, out var state) &&
           state.GetRemainingTicks(nowTicks) > 0L)
         return false;
 
-      if (maxPurchasedProtectionTicks < System.TimeSpan.TicksPerHour ||
+      if (_maxPurchasedProtectionTicks < System.TimeSpan.TicksPerHour ||
           privilege.inventory.GetAmount(
             options.CurrencyItemID, false, false) < options.CostPerHour)
         return false;
@@ -6415,10 +6895,11 @@ namespace
       state ??= new TaxProtectionState();
       state.BankedTicks = System.TimeSpan.TicksPerHour;
       state.ActiveSinceTicks = nowTicks;
-      _taxProtection[cupboardNetworkId] = state;
+      _taxProtection[cupboardNetworkID] = state;
       MarkDataDirty();
       QueueCupboardStatusHudRefresh(privilege);
       UpdateTcMarkerLabel(privilege);
+      MarkTaxOverlayDirty(cupboardNetworkID);
       return true;
     }
 
@@ -6432,13 +6913,10 @@ namespace
       if (!player || !Configuration.TaxProtection.Enabled)
         return;
 
-      var requiredPermission = Configuration.Permission.TaxProtection;
-      if (!string.IsNullOrEmpty(requiredPermission) &&
-          !player.HasPermission(requiredPermission))
-      {
-        ChatMessage(player, "You don't have permission to manage tax protection.");
+#if !CARBON
+      if (!CheckChatCmdPerm(player, Configuration.Permission.TaxProtection))
         return;
-      }
+#endif
 
       var argCount = args?.Length ?? 0;
       var requestedHours = 0;
@@ -6488,54 +6966,22 @@ namespace
       }
 
       var nowTicks = System.DateTime.UtcNow.Ticks;
-      var cupboardNetworkId = GetNetworkId(privilege);
-      if (cupboardNetworkId is 0UL)
+      var cupboardNetworkID = GetNetworkId(privilege);
+      if (cupboardNetworkID is 0UL)
         return;
 
-      var state = _taxProtection.TryGetValue(
-        cupboardNetworkId, out var purchasedState) ? purchasedState : null;
-      var bankedTicks = state?.GetRemainingTicks(nowTicks) ?? 0L;
-
-      var maxProtectionTicks = (long)options.MaxPurchaseHours *
-        System.TimeSpan.TicksPerHour;
-      if (bankedTicks >= maxProtectionTicks)
+      if (!TryBuyTaxProtectionHours(player, cupboardNetworkID,
+            requestedHours, out var purchasedHours))
       {
         SendPurchasedProtectionStatus(player, privilege);
         return;
       }
-
-      var availablePurchaseHours = (int)((maxProtectionTicks -
-        bankedTicks) / System.TimeSpan.TicksPerHour);
-      if (availablePurchaseHours is 0)
-      {
-        SendPurchasedProtectionStatus(player, privilege);
-        return;
-      }
-
-      if (requestedHours > availablePurchaseHours)
-        requestedHours = availablePurchaseHours;
-
-      var cost = (long)requestedHours * options.CostPerHour;
-      if (cost > int.MaxValue ||
-          player.inventory.GetAmount(options.CurrencyItemID, true, true) < cost)
-      {
-        ChatMessage(player, "You do not have enough currency in your inventory.");
-        return;
-      }
-
-      player.inventory.Take(null, options.CurrencyItemID, (int)cost);
-      state ??= new TaxProtectionState();
-      state.BankedTicks = bankedTicks +
-        (long)requestedHours * System.TimeSpan.TicksPerHour;
-      if (state.ActiveSinceTicks > 0L)
-        state.ActiveSinceTicks = nowTicks;
-      _taxProtection[cupboardNetworkId] = state;
-      MarkDataDirty();
-      SyncPurchasedProtection(privilege, cupboardNetworkId,
+      SyncPurchasedProtection(privilege, cupboardNetworkID,
         new System.DateTime(nowTicks));
+      MarkTaxOverlayDirty(cupboardNetworkID);
       QueueCupboardStatusHudRefresh(privilege);
       UpdateTcMarkerLabel(privilege);
-      SendPurchasedProtectionStatus(player, privilege, requestedHours);
+      SendPurchasedProtectionStatus(player, privilege, purchasedHours);
     }
 
     private void SendPurchasedProtectionStatus(
@@ -6547,9 +6993,9 @@ namespace
         return;
 
       var nowUtc = System.DateTime.UtcNow;
-      var cupboardNetworkId = GetNetworkId(privilege);
+      var cupboardNetworkID = GetNetworkId(privilege);
       var bankedTicks = _taxProtection.TryGetValue(
-        cupboardNetworkId, out var state) ?
+        cupboardNetworkID, out var state) ?
           state.GetRemainingTicks(nowUtc.Ticks) : 0L;
       var reserves = privilege.inventory.GetAmount(
         options.CurrencyItemID, false, false);
@@ -6562,54 +7008,54 @@ namespace
         maxTimeSpanTicks : bankedTicks + reserveTicks;
 
       _sb.Clear();
-      _sb.AppendLine($"<color={COLOR_BLUE}>Tax Protection Status</color>");
+      _sb.AppendLine("<color=" + COLOR_BLUE + ">Tax Protection Status</color>");
       if (purchasedHours > 0)
       {
-        _sb.Append($"<color={COLOR_AQUA}>Tax Payment</color> <color={COLOR_GREEN}>+")
+        _sb.Append("<color=" + COLOR_AQUA + ">Tax Payment</color> <color=" + COLOR_GREEN + ">+")
           .Append(purchasedHours)
           .AppendLine(" hour(s)</color>");
       }
 
-      _sb.Append($"<color={COLOR_AQUA}>Cost per Hour</color> <color={COLOR_ORANGE}>")
-        .Append(options.CostPerHour.ToString(CultureInfo.InvariantCulture))
+      _sb.Append("<color=" + COLOR_AQUA + ">Cost per Hour</color> <color=" + COLOR_ORANGE + ">")
+        .Append(options.CostPerHour)
         .Append(' ')
         .Append(_taxProtectionCurrencyName)
         .AppendLine("</color>");
 
-      _sb.Append($"<color={COLOR_YELLOW}>Current Tax Protection</color> ");
+      _sb.Append("<color=" + COLOR_YELLOW + ">Current Tax Protection</color> ");
       if (bankedTicks > 0L)
       {
-        _sb.Append($"<color={COLOR_GREEN}>");
+        _sb.Append("<color=" + COLOR_GREEN + ">");
         AppendRemainingTime(_sb, new System.TimeSpan(bankedTicks));
         _sb.AppendLine("</color>");
       }
       else
-        _sb.AppendLine($"<color={COLOR_RED}>Inactive</color>");
+        _sb.AppendLine("<color=" + COLOR_RED + ">Inactive</color>");
 
-      _sb.Append($"<color={COLOR_AQUA}>Tax Reserves</color> <color={COLOR_ORANGE}>")
-        .Append(reserves.ToString(CultureInfo.InvariantCulture))
+      _sb.Append("<color=" + COLOR_AQUA + ">Tax Reserves</color> <color=" + COLOR_ORANGE + ">")
+        .Append(reserves)
         .Append('/');
 
       if (options.MaxCurrencyReserves is 0)
-        _sb.Append("Unlimited");
+        _sb.Append(TAX_OVERLAY_UNLIMITED_TEXT);
       else
-        _sb.Append(options.MaxCurrencyReserves.ToString(CultureInfo.InvariantCulture));
+        _sb.Append(options.MaxCurrencyReserves);
 
       _sb.Append(' ')
         .Append(_taxProtectionCurrencyName)
         .AppendLine("</color>");
 
-      _sb.Append($"<color={COLOR_YELLOW}>Total Tax Protection</color> ");
+      _sb.Append("<color=" + COLOR_YELLOW + ">Total Tax Protection</color> ");
       if (totalTicks > 0L)
       {
-        _sb.Append($"<color={COLOR_GREEN}>");
+        _sb.Append("<color=" + COLOR_GREEN + ">");
         AppendRemainingTime(_sb, new System.TimeSpan(totalTicks));
         _sb.AppendLine("</color>");
       }
       else
-        _sb.Append($"<color={COLOR_RED}>Inactive</color>");
+        _sb.Append("<color=" + COLOR_RED + ">Inactive</color>");
 
-      _sb.Append($"<color={COLOR_ORANGE}>/")
+      _sb.Append("<color=" + COLOR_ORANGE + ">/")
         .Append(options.MaxPurchaseHours)
         .AppendLine("h</color>");
 
@@ -6617,6 +7063,1040 @@ namespace
     }
 
 #endregion Commands
+
+#region Tax Overlay
+
+#region Fields
+
+    private readonly Dictionary<ulong, TaxOverlayViewer> _taxOverlayViewersByPlayer = new();
+    private readonly Dictionary<ulong, HashSet<ulong>> _taxOverlayViewersByTc = new();
+    private readonly Dictionary<ulong, ulong> _pendingTaxOverlayTcByPlayer = new();
+    private readonly HashSet<ulong> _dirtyTaxOverlayTcs = new();
+    private readonly List<ulong> _taxOverlayViewerScratch = new();
+    private readonly StringBuilder _taxOverlayBuilder = new(2048);
+    private bool _isTaxOverlayEnabled;
+    private bool _taxOverlayOpenQueued;
+    private System.Action _openPendingTaxOverlaysAction;
+    private bool _taxOverlayRefreshQueued;
+    private System.Action _refreshDirtyTaxOverlaysAction;
+    private System.Action _refreshTaxOverlayMinuteBoundaryAction;
+    private bool _taxOverlayTrackingStopQueued;
+    private System.Action _stopTaxOverlayViewerTrackingAction;
+    private PluginTimer _taxOverlayMinuteRefreshTimer;
+#if CARBON
+    private LuiPosition _taxOverlayPosition;
+    private LuiOffset _taxOverlayOffset;
+#else
+    private string _taxOverlayPayloadPrefix;
+    private string _taxOverlayPayloadRootSuffix;
+#endif
+
+#region Constants
+
+    private const string TAX_OVERLAY_ROOT = "ORP.TaxOverlay.";
+    private const string TAX_OVERLAY_COMMAND = "orp.taxoverlay";
+    private const string TAX_OVERLAY_TITLE = "TAX MANAGEMENT";
+    private const string TAX_OVERLAY_CLOSE_TEXT = "X";
+    private const string TAX_OVERLAY_BUTTON_BUY_TEXT = "BUY 1 HOUR";
+    private const string TAX_OVERLAY_BUTTON_BUY_MAX_TEXT = "BUY MAX HOURS (";
+    private const string TAX_OVERLAY_STATUS_LABEL = "Status: ";
+    private const string TAX_OVERLAY_COSTS_LABEL = "Costs: ";
+    private const string TAX_OVERLAY_RESERVES_LABEL = "Reserves: ";
+    private const string TAX_OVERLAY_TOTAL_LABEL = "Total: ";
+    private const string TAX_OVERLAY_SEPARATOR_TEXT = " / ";
+    private const string TAX_OVERLAY_UNLIMITED_TEXT = "Unlimited";
+    private const string TAX_OVERLAY_BACKGROUND_COLOR = "0.14 0.14 0.14 0.88";
+    private const string TAX_OVERLAY_HEADER_BG_COLOR = "0.20 0.20 0.20 0.95";
+    private const string TAX_OVERLAY_TEXT_COLOR = "1 1 1 1";
+    private const string TAX_OVERLAY_TRANSPARENT_COLOR = "0 0 0 0";
+    private const string TAX_OVERLAY_ENABLED_BUTTON_COLOR = "0.28 0.40 0.22 0.95";
+    private const string TAX_OVERLAY_DISABLED_BUTTON_COLOR = "0.20 0.20 0.20 0.60";
+    private const string TAX_OVERLAY_DISABLED_TEXT_COLOR = "0.55 0.55 0.55 0.60";
+    private const string TAX_OVERLAY_LABEL_COLOR = "#8E9398";
+    private const string TAX_OVERLAY_VALUE_COLOR = "#C5C5C5";
+    private const string TAX_OVERLAY_RICH_TEXT_COLOR_PREFIX = "<color=";
+    private const string TAX_OVERLAY_RICH_TEXT_COLOR_SUFFIX = ">";
+    private const string TAX_OVERLAY_RICH_TEXT_CLOSE_TAG = "</color>";
+    private const string TAX_OVERLAY_ACTION_BUY = "buy";
+    private const string TAX_OVERLAY_ACTION_BUY_MAX = "buymax";
+    private const string TAX_OVERLAY_ACTION_CLOSE = "close";
+    private const string TAX_OVERLAY_COMMAND_PREFIX = TAX_OVERLAY_COMMAND + " ";
+    private const int TAX_OVERLAY_HEADER_FONT_SIZE = 13;
+    private const int TAX_OVERLAY_TEXT_FONT_SIZE = 12;
+    private const int TAX_OVERLAY_BUTTON_FONT_SIZE = 11;
+    private const float TAX_OVERLAY_BUY_BUTTON_MIN_X = 8f;
+    private const float TAX_OVERLAY_BUY_BUTTON_MIN_Y = 8f;
+    private const float TAX_OVERLAY_BUY_BUTTON_MAX_X = 127f;
+    private const float TAX_OVERLAY_BUY_BUTTON_MAX_Y = 31f;
+    private const float TAX_OVERLAY_BUY_MAX_BUTTON_MIN_X = 133f;
+    private const float TAX_OVERLAY_BUY_MAX_BUTTON_MIN_Y = 8f;
+    private const float TAX_OVERLAY_BUY_MAX_BUTTON_MAX_X = 252f;
+    private const float TAX_OVERLAY_BUY_MAX_BUTTON_MAX_Y = 31f;
+    private const float TAX_OVERLAY_TEXT_HALF_WIDTH = 90f;
+    private const float TAX_OVERLAY_MINUTE_BOUNDARY_EPSILON = 0.05f;
+    private const byte
+      TAX_OVERLAY_BUY = 1,
+      TAX_OVERLAY_BUY_MAX = 2;
+#if !CARBON
+    private const string TAX_OVERLAY_HEADER_NAME_SUFFIX = ".Header";
+    private const string TAX_OVERLAY_HEADER_TEXT_NAME_SUFFIX = ".Header.Text";
+    private const string TAX_OVERLAY_BODY_NAME_SUFFIX = ".Body";
+    private const string TAX_OVERLAY_CLOSE_NAME_SUFFIX = ".Close";
+    private const string TAX_OVERLAY_CLOSE_TEXT_NAME_SUFFIX = ".Close.Text";
+    private const string TAX_OVERLAY_BUY_NAME_SUFFIX = ".Buy";
+    private const string TAX_OVERLAY_BUY_TEXT_NAME_SUFFIX = ".Buy.Text";
+    private const string TAX_OVERLAY_BUY_MAX_NAME_SUFFIX = ".BuyMax";
+    private const string TAX_OVERLAY_BUY_MAX_TEXT_NAME_SUFFIX = ".BuyMax.Text";
+    private const string TAX_OVERLAY_PAYLOAD_ELEMENT_PREFIX = ",{\"name\":\"";
+    private const string TAX_OVERLAY_PAYLOAD_PARENT_PREFIX = "\",\"parent\":\"";
+    private const string TAX_OVERLAY_PAYLOAD_COMPONENTS_PREFIX = "\",\"components\":[";
+    private static readonly string TAX_OVERLAY_PAYLOAD_HEADER_COMPONENTS =
+      "{\"type\":\"UnityEngine.UI.Image\",\"color\":\"" + TAX_OVERLAY_HEADER_BG_COLOR +
+      "\"},{\"type\":\"RectTransform\",\"anchormin\":\"0 1\",\"anchormax\":\"1 1\",\"offsetmin\":\"0 -24\",\"offsetmax\":\"0 0\"}]}";
+    private static readonly string TAX_OVERLAY_PAYLOAD_HEADER_TEXT_COMPONENTS =
+      "{\"type\":\"UnityEngine.UI.Text\",\"text\":\"" + TAX_OVERLAY_TITLE + "\",\"fontSize\":" + TAX_OVERLAY_HEADER_FONT_SIZE + ",\"align\":\"MiddleCenter\",\"font\":\"" + FONT_ROBOTO_CONDENSED_BOLD + "\",\"color\":\"" + TAX_OVERLAY_TEXT_COLOR + "\"},{\"type\":\"RectTransform\",\"anchormin\":\"0 0\",\"anchormax\":\"1 1\",\"offsetmin\":\"0 0\",\"offsetmax\":\"0 0\"}]}";
+    private const string TAX_OVERLAY_PAYLOAD_BODY_TEXT_PREFIX =
+      "{\"type\":\"UnityEngine.UI.Text\",\"text\":\"";
+    private static readonly string TAX_OVERLAY_PAYLOAD_BODY_TEXT_SUFFIX =
+      "\",\"fontSize\":" + TAX_OVERLAY_TEXT_FONT_SIZE + ",\"align\":\"MiddleLeft\",\"font\":\"" + FONT_ROBOTO_CONDENSED_BOLD + "\",\"color\":\"" + TAX_OVERLAY_TEXT_COLOR + "\"},{\"type\":\"RectTransform\",\"anchormin\":\"0.5 0\",\"anchormax\":\"0.5 1\",\"offsetmin\":\"-90 35\",\"offsetmax\":\"90 -28\"}]}";
+    private const string TAX_OVERLAY_PAYLOAD_BUTTON_COLOR_PREFIX =
+      "{\"type\":\"UnityEngine.UI.Button\",\"color\":\"";
+    private const string TAX_OVERLAY_PAYLOAD_BUTTON_COMMAND_PREFIX =
+      "\",\"command\":\"";
+    private const string TAX_OVERLAY_PAYLOAD_CLOSE_BUTTON_SUFFIX =
+      "\"},{\"type\":\"RectTransform\",\"anchormin\":\"1 0\",\"anchormax\":\"1 1\",\"offsetmin\":\"-28 0\",\"offsetmax\":\"0 0\"}]}";
+    private const string TAX_OVERLAY_PAYLOAD_BUY_BUTTON_SUFFIX =
+      "\"},{\"type\":\"RectTransform\",\"anchormin\":\"0 0\",\"anchormax\":\"0 0\",\"offsetmin\":\"8 8\",\"offsetmax\":\"127 31\"}]}";
+    private const string TAX_OVERLAY_PAYLOAD_BUY_MAX_BUTTON_SUFFIX =
+      "\"},{\"type\":\"RectTransform\",\"anchormin\":\"0 0\",\"anchormax\":\"0 0\",\"offsetmin\":\"133 8\",\"offsetmax\":\"252 31\"}]}";
+    private const string TAX_OVERLAY_PAYLOAD_LABEL_TEXT_PREFIX =
+      "{\"type\":\"UnityEngine.UI.Text\",\"text\":\"";
+    private static readonly string TAX_OVERLAY_PAYLOAD_CLOSE_LABEL_SUFFIX =
+      "\",\"fontSize\":" + TAX_OVERLAY_HEADER_FONT_SIZE + ",\"align\":\"MiddleCenter\",\"font\":\"" + FONT_ROBOTO_CONDENSED_BOLD + "\",\"color\":\"" + TAX_OVERLAY_TEXT_COLOR + "\"},{\"type\":\"RectTransform\",\"anchormin\":\"0 0\",\"anchormax\":\"1 1\",\"offsetmin\":\"0 0\",\"offsetmax\":\"0 0\"}]}";
+    private static readonly string TAX_OVERLAY_PAYLOAD_BUTTON_LABEL_COLOR_PREFIX =
+      "\",\"fontSize\":" + TAX_OVERLAY_BUTTON_FONT_SIZE + ",\"align\":\"MiddleCenter\",\"font\":\"" + FONT_ROBOTO_CONDENSED_BOLD + "\",\"color\":\"";
+    private const string TAX_OVERLAY_PAYLOAD_BUTTON_LABEL_SUFFIX =
+      "\"},{\"type\":\"RectTransform\",\"anchormin\":\"0 0\",\"anchormax\":\"1 1\",\"offsetmin\":\"0 0\",\"offsetmax\":\"0 0\"}]}";
+#endif
+
+#endregion Constants
+
+#endregion Fields
+
+#region Classes
+
+    private enum TaxOverlayState : byte
+    {
+      Inactive,
+      Active,
+      Paused
+    }
+
+    private readonly struct TaxOverlaySnapshot
+    {
+      public readonly ulong TcID;
+      public readonly int Reserves;
+      public readonly int ReserveCap;
+      public readonly int Cost;
+      public readonly long RemainingMinutes;
+      public readonly long TotalMinutes;
+      public readonly int BuyMaxHours;
+      public readonly TaxOverlayState State;
+      public readonly byte Actions;
+
+      public TaxOverlaySnapshot(ulong tcId, int reserves, int reserveCap,
+        int cost, long remainingMinutes, long totalMinutes, int buyMaxHours,
+        TaxOverlayState state, byte actions)
+      {
+        TcID = tcId;
+        Reserves = reserves;
+        ReserveCap = reserveCap;
+        Cost = cost;
+        RemainingMinutes = remainingMinutes;
+        TotalMinutes = totalMinutes;
+        BuyMaxHours = buyMaxHours;
+        State = state;
+        Actions = actions;
+      }
+
+      public bool Matches(in TaxOverlaySnapshot other) =>
+        TcID == other.TcID && Reserves == other.Reserves &&
+        ReserveCap == other.ReserveCap && Cost == other.Cost &&
+        RemainingMinutes == other.RemainingMinutes && TotalMinutes == other.TotalMinutes &&
+        BuyMaxHours == other.BuyMaxHours &&
+        State == other.State &&
+        Actions == other.Actions;
+    }
+
+    private sealed class TaxOverlayViewer : Facepunch.Pool.IPooled
+    {
+      public ulong TcID;
+      public string PlayerID;
+      public string RootName;
+      public string BuyCommand;
+      public string BuyMaxCommand;
+      public string CloseCommand;
+      public TaxOverlaySnapshot LastSnapshot;
+
+      public void Initialize(ulong playerID, ulong tcId)
+      {
+        TcID = tcId;
+        PlayerID = playerID.ToString();
+        RootName = TAX_OVERLAY_ROOT + PlayerID;
+        var id = tcId.ToString(CultureInfo.InvariantCulture);
+        BuyCommand = TAX_OVERLAY_COMMAND_PREFIX + TAX_OVERLAY_ACTION_BUY + " " + id;
+        BuyMaxCommand = TAX_OVERLAY_COMMAND_PREFIX + TAX_OVERLAY_ACTION_BUY_MAX + " " + id;
+        CloseCommand = TAX_OVERLAY_COMMAND_PREFIX + TAX_OVERLAY_ACTION_CLOSE + " " + id;
+      }
+
+      public void EnterPool()
+      {
+        TcID = 0UL;
+        PlayerID = null;
+        RootName = null;
+        BuyCommand = null;
+        BuyMaxCommand = null;
+        CloseCommand = null;
+        LastSnapshot = default;
+      }
+
+      public void LeavePool() { }
+    }
+
+#endregion Classes
+
+#region Hooks
+
+    private void OnLootEntity(BasePlayer player, BuildingPrivlidge targetEntity)
+    {
+      if (!_serverInitialized || !player || !targetEntity ||
+          !_isTaxOverlayEnabled ||
+          !HasTaxProtectionPermission(player))
+        return;
+
+      var playerID = player.userID.Get();
+      var tcID = GetNetworkId(targetEntity);
+      if (tcID is 0UL ||
+          _taxOverlayViewersByPlayer.TryGetValue(playerID, out var viewer) &&
+          viewer.TcID == tcID)
+        return;
+
+      _pendingTaxOverlayTcByPlayer[playerID] = tcID;
+      if (_taxOverlayOpenQueued)
+        return;
+
+      _taxOverlayOpenQueued = true;
+
+      NextFrame(_openPendingTaxOverlaysAction);
+    }
+
+    private void OnLootEntityEnd(
+      BasePlayer player, BuildingPrivlidge targetEntity)
+    {
+      if (!player || !targetEntity)
+        return;
+
+      var playerID = player.userID.Get();
+      if (!_taxOverlayViewersByPlayer.TryGetValue(playerID, out var viewer) ||
+          viewer.TcID != GetNetworkId(targetEntity))
+        return;
+
+      CloseTaxOverlay(player, playerID);
+    }
+
+    private void OnItemAddedToContainer(ItemContainer container, Item item) =>
+      MarkTaxOverlayInventoryDirty(container, item);
+
+    private void OnItemRemovedFromContainer(ItemContainer container, Item item) =>
+      MarkTaxOverlayInventoryDirty(container, item);
+
+    private void OnItemStacked(
+      Item target, Item source, ItemContainer destination, int _amount)
+    {
+      MarkTaxOverlayInventoryDirty(destination, target);
+      if (source?.parent != destination)
+        MarkTaxOverlayInventoryDirty(source?.parent, source);
+    }
+
+    private void OnItemUse(Item item, int _amountToConsume) =>
+      MarkTaxOverlayInventoryDirty(item?.parent, item);
+
+#endregion Hooks
+
+#region Lifecycle
+
+    private void InitializeTaxOverlay()
+    {
+      if (!_isTaxOverlayEnabled)
+        return;
+
+      _openPendingTaxOverlaysAction = OpenPendingTaxOverlays;
+      _refreshDirtyTaxOverlaysAction = RefreshDirtyTaxOverlays;
+      _refreshTaxOverlayMinuteBoundaryAction = RefreshTaxOverlayMinuteBoundary;
+      _stopTaxOverlayViewerTrackingAction = StopTaxOverlayViewerTrackingIfIdle;
+
+      var overlay = Configuration.TaxProtection.TaxOverlay;
+#if CARBON
+      TryParseAnchor(overlay.AnchorMin, out var minX, out var minY);
+      TryParseAnchor(overlay.AnchorMax, out var maxX, out var maxY);
+      TryParseOffset(overlay.OffsetMin, out var minOffsetX, out var minOffsetY);
+      TryParseOffset(overlay.OffsetMax, out var maxOffsetX, out var maxOffsetY);
+      _taxOverlayPosition = new(minX, minY, maxX, maxY);
+      _taxOverlayOffset = new(minOffsetX, minOffsetY, maxOffsetX, maxOffsetY);
+#else
+      _taxOverlayPayloadPrefix = "[{\"name\":\"";
+      _taxOverlayPayloadRootSuffix =
+        "\",\"parent\":\"Overlay\",\"components\":[{\"type\":\"UnityEngine.UI.Image\",\"color\":\"" +
+        TAX_OVERLAY_BACKGROUND_COLOR + "\"},{\"type\":\"RectTransform\",\"anchormin\":\"" +
+        overlay.AnchorMin + "\",\"anchormax\":\"" + overlay.AnchorMax +
+        "\",\"offsetmin\":\"" + overlay.OffsetMin + "\",\"offsetmax\":\"" +
+        overlay.OffsetMax + "\"},{\"type\":\"NeedsCursor\"},{\"type\":\"UnityEngine.UI.CanvasGroup\",\"blocksRaycasts\":true,\"interactable\":true}]}";
+#endif
+    }
+
+    private void CacheTaxOverlayEnabled() =>
+      _isTaxOverlayEnabled = Configuration?.TaxProtection?.Enabled is true &&
+        Configuration.TaxProtection.TaxOverlay?.Enabled is true;
+
+
+    private void OpenTaxOverlay(BasePlayer player, BuildingPrivlidge privilege)
+    {
+      if (!player || !privilege || !_isTaxOverlayEnabled ||
+          player.inventory.loot.entitySource != privilege ||
+          !HasTaxProtectionPermission(player) || !IsTrustedForCupboard(player, privilege))
+        return;
+
+      var playerID = player.userID.Get();
+      var tcID = GetNetworkId(privilege);
+      if (tcID is 0UL)
+        return;
+
+      if (_taxOverlayViewersByPlayer.TryGetValue(playerID, out var existingViewer) &&
+          existingViewer.TcID == tcID)
+        return;
+
+      CloseTaxOverlay(player, playerID);
+      var viewer = Facepunch.Pool.Get<TaxOverlayViewer>();
+      viewer.Initialize(playerID, tcID);
+      _taxOverlayViewersByPlayer[playerID] = viewer;
+      if (!_taxOverlayViewersByTc.TryGetValue(tcID, out var viewers))
+      {
+        viewers = Facepunch.Pool.Get<HashSet<ulong>>();
+        _taxOverlayViewersByTc[tcID] = viewers;
+      }
+      viewers.Add(playerID);
+      if (_taxOverlayViewersByPlayer.Count is 1)
+        StartTaxOverlayViewerTracking();
+      RenderTaxOverlay(player, privilege, viewer, force: true);
+    }
+
+    private void OpenPendingTaxOverlays()
+    {
+      _taxOverlayOpenQueued = false;
+      _taxOverlayViewerScratch.Clear();
+      foreach (var playerID in _pendingTaxOverlayTcByPlayer.Keys)
+        _taxOverlayViewerScratch.Add(playerID);
+
+      foreach (var playerID in _taxOverlayViewerScratch)
+      {
+        if (_pendingTaxOverlayTcByPlayer.Remove(playerID, out var tcId))
+          OpenTaxOverlay(_players.GetPlayer(playerID), FindTaxCupboard(tcId));
+      }
+      _taxOverlayViewerScratch.Clear();
+    }
+
+    private bool HasTaxProtectionPermission(BasePlayer player) =>
+      player && GetOrCreateScaleCache(player.userID.Get()).HasTaxPermission;
+
+    private void CloseTaxOverlay(BasePlayer player, ulong playerID)
+    {
+      _pendingTaxOverlayTcByPlayer.Remove(playerID);
+      var removedViewer =
+        _taxOverlayViewersByPlayer.Remove(playerID, out var viewer);
+      if (removedViewer &&
+          _taxOverlayViewersByTc.TryGetValue(viewer.TcID, out var viewers))
+      {
+        viewers.Remove(playerID);
+        if (viewers.Count is 0)
+        {
+          _taxOverlayViewersByTc.Remove(viewer.TcID);
+          Facepunch.Pool.FreeUnmanaged(ref viewers);
+        }
+      }
+      if (removedViewer && _taxOverlayViewersByPlayer.Count is 0)
+        QueueTaxOverlayViewerTrackingStop();
+      if (viewer is not null)
+      {
+        if (player)
+          DestroyTaxOverlay(player, viewer.RootName);
+        Facepunch.Pool.Free(ref viewer);
+      }
+    }
+
+    private void StartTaxOverlayViewerTracking()
+    {
+      if (_taxOverlayTrackingStopQueued)
+      {
+        _taxOverlayTrackingStopQueued = false;
+        if (_taxOverlayMinuteRefreshTimer is null)
+          ScheduleTaxOverlayMinuteRefresh();
+        return;
+      }
+
+      Subscribe(nameof(OnLootEntityEnd));
+      Subscribe(nameof(OnItemAddedToContainer));
+      Subscribe(nameof(OnItemRemovedFromContainer));
+      Subscribe(nameof(OnItemStacked));
+      Subscribe(nameof(OnItemUse));
+      ScheduleTaxOverlayMinuteRefresh();
+    }
+
+    private void QueueTaxOverlayViewerTrackingStop()
+    {
+      if (_taxOverlayTrackingStopQueued)
+        return;
+
+      _taxOverlayTrackingStopQueued = true;
+      NextFrame(_stopTaxOverlayViewerTrackingAction);
+    }
+
+    private void StopTaxOverlayViewerTrackingIfIdle()
+    {
+      if (!_taxOverlayTrackingStopQueued)
+        return;
+
+      _taxOverlayTrackingStopQueued = false;
+      if (_taxOverlayViewersByPlayer.Count is 0)
+        StopTaxOverlayViewerTracking();
+    }
+
+    private void StopTaxOverlayViewerTracking()
+    {
+      _taxOverlayTrackingStopQueued = false;
+      Unsubscribe(nameof(OnLootEntityEnd));
+      Unsubscribe(nameof(OnItemAddedToContainer));
+      Unsubscribe(nameof(OnItemRemovedFromContainer));
+      Unsubscribe(nameof(OnItemStacked));
+      Unsubscribe(nameof(OnItemUse));
+      _taxOverlayMinuteRefreshTimer?.Destroy();
+      _taxOverlayMinuteRefreshTimer = null;
+    }
+
+    private void ScheduleTaxOverlayMinuteRefresh()
+    {
+      if (_taxOverlayViewersByPlayer.Count is 0)
+        return;
+
+      var nowTicks = System.DateTime.UtcNow.Ticks;
+      var ticksToNextMinute = System.TimeSpan.TicksPerMinute -
+        nowTicks % System.TimeSpan.TicksPerMinute;
+      _taxOverlayMinuteRefreshTimer = timer.Once(
+        (float)(ticksToNextMinute /
+          (double)System.TimeSpan.TicksPerSecond) +
+        TAX_OVERLAY_MINUTE_BOUNDARY_EPSILON,
+        _refreshTaxOverlayMinuteBoundaryAction);
+    }
+
+    private void RefreshTaxOverlayMinuteBoundary()
+    {
+      _taxOverlayMinuteRefreshTimer = null;
+      if (_taxOverlayViewersByPlayer.Count is 0)
+        return;
+
+      QueueTaxOverlayRefresh();
+      ScheduleTaxOverlayMinuteRefresh();
+    }
+
+    private void CloseTaxOverlayViewers(ulong tcID)
+    {
+      if (tcID is 0UL || !_taxOverlayViewersByTc.TryGetValue(tcID, out var viewers))
+        return;
+
+      _taxOverlayViewerScratch.Clear();
+      foreach (var playerID in viewers)
+        _taxOverlayViewerScratch.Add(playerID);
+      foreach (var playerID in _taxOverlayViewerScratch)
+        CloseTaxOverlay(_players.GetPlayer(playerID), playerID);
+      _taxOverlayViewerScratch.Clear();
+    }
+
+    private void CloseTaxOverlayViewersWithoutPermission()
+    {
+      _taxOverlayViewerScratch.Clear();
+      foreach (var playerID in _taxOverlayViewersByPlayer.Keys)
+        _taxOverlayViewerScratch.Add(playerID);
+      foreach (var playerID in _taxOverlayViewerScratch)
+      {
+        var player = _players.GetPlayer(playerID);
+        if (!player || !HasTaxProtectionPermission(player))
+          CloseTaxOverlay(player, playerID);
+      }
+      _taxOverlayViewerScratch.Clear();
+    }
+
+    private void UnloadTaxOverlay()
+    {
+      foreach (var (playerID, viewer) in _taxOverlayViewersByPlayer)
+      {
+        DestroyTaxOverlay(_players.GetPlayer(playerID), viewer.RootName);
+        var pooledViewer = viewer;
+        Facepunch.Pool.Free(ref pooledViewer);
+      }
+      _taxOverlayViewersByPlayer.Clear();
+      foreach (var viewers in _taxOverlayViewersByTc.Values)
+      {
+        var pooledViewers = viewers;
+        Facepunch.Pool.FreeUnmanaged(ref pooledViewers);
+      }
+      _taxOverlayViewersByTc.Clear();
+      _pendingTaxOverlayTcByPlayer.Clear();
+      _taxOverlayOpenQueued = false;
+      _openPendingTaxOverlaysAction = null;
+      StopTaxOverlayViewerTracking();
+      _dirtyTaxOverlayTcs.Clear();
+      _taxOverlayViewerScratch.Clear();
+      _taxOverlayBuilder.Clear();
+      _taxOverlayRefreshQueued = false;
+      _refreshDirtyTaxOverlaysAction = null;
+      _refreshTaxOverlayMinuteBoundaryAction = null;
+      _stopTaxOverlayViewerTrackingAction = null;
+      _isTaxOverlayEnabled = false;
+#if !CARBON
+      _taxOverlayPayloadPrefix = null;
+      _taxOverlayPayloadRootSuffix = null;
+#endif
+    }
+
+#endregion Lifecycle
+
+#region Refresh
+
+    private void MarkTaxOverlayInventoryDirty(
+      ItemContainer container, Item item)
+    {
+      if (container is null || item?.info?.itemid !=
+          Configuration.TaxProtection.CurrencyItemID)
+        return;
+
+      if (container.entityOwner is BuildingPrivlidge privilege)
+      {
+        MarkTaxOverlayDirty(GetNetworkId(privilege));
+        return;
+      }
+
+      var player = container.playerOwner;
+      if (player && _taxOverlayViewersByPlayer.TryGetValue(
+            player.userID.Get(), out var viewer))
+        MarkTaxOverlayDirty(viewer.TcID);
+    }
+
+    private void MarkTaxOverlayDirty(ulong tcID)
+    {
+      if (tcID is 0UL || !_taxOverlayViewersByTc.ContainsKey(tcID))
+        return;
+      _dirtyTaxOverlayTcs.Add(tcID);
+      if (_taxOverlayRefreshQueued)
+        return;
+      _taxOverlayRefreshQueued = true;
+      NextFrame(_refreshDirtyTaxOverlaysAction);
+    }
+
+    private void QueueTaxOverlayRefresh()
+    {
+      foreach (var tcID in _taxOverlayViewersByTc.Keys)
+        _dirtyTaxOverlayTcs.Add(tcID);
+      if (_dirtyTaxOverlayTcs.Count is 0 || _taxOverlayRefreshQueued)
+        return;
+      _taxOverlayRefreshQueued = true;
+      NextFrame(_refreshDirtyTaxOverlaysAction);
+    }
+
+    private void RefreshDirtyTaxOverlays()
+    {
+      _taxOverlayRefreshQueued = false;
+      foreach (var tcID in _dirtyTaxOverlayTcs)
+      {
+        if (!_taxOverlayViewersByTc.TryGetValue(tcID, out var viewers))
+          continue;
+
+        var privilege = FindTaxCupboard(tcID);
+        _taxOverlayViewerScratch.Clear();
+        foreach (var playerID in viewers)
+          _taxOverlayViewerScratch.Add(playerID);
+        foreach (var playerID in _taxOverlayViewerScratch)
+        {
+          var player = _players.GetPlayer(playerID);
+          if (!player || !privilege || player.inventory.loot.entitySource != privilege)
+            CloseTaxOverlay(player, playerID);
+          else
+            RenderTaxOverlay(player, privilege, _taxOverlayViewersByPlayer[playerID], force: false);
+        }
+      }
+      _taxOverlayViewerScratch.Clear();
+      _dirtyTaxOverlayTcs.Clear();
+    }
+
+    private static BuildingPrivlidge FindTaxCupboard(ulong tcID) =>
+      tcID is 0UL ? null : BaseNetworkable.serverEntities.Find(
+        new NetworkableId(tcID)) as BuildingPrivlidge;
+
+#endregion Refresh
+
+#region Snapshot
+
+    private TaxOverlaySnapshot CreateTaxOverlaySnapshot(
+      BasePlayer player, BuildingPrivlidge privilege, ulong tcId)
+    {
+      var options = Configuration.TaxProtection;
+      var nowTicks = System.DateTime.UtcNow.Ticks;
+      var remainingTicks = _taxProtection.TryGetValue(tcId, out var state) ?
+        state.GetRemainingTicks(nowTicks) : 0L;
+      var reserves = options.CurrencyItemID is 0 || options.CostPerHour <= 0 ? 0 :
+        privilege.inventory?.GetAmount(options.CurrencyItemID, false, false) ?? 0;
+      var reserveHours = options.CostPerHour > 0 ? reserves / options.CostPerHour : 0;
+      var reserveTicks = reserveHours > System.TimeSpan.MaxValue.Ticks /
+        System.TimeSpan.TicksPerHour ? System.TimeSpan.MaxValue.Ticks :
+        (long)reserveHours * System.TimeSpan.TicksPerHour;
+      var totalTicks = remainingTicks > System.TimeSpan.MaxValue.Ticks - reserveTicks ?
+        System.TimeSpan.MaxValue.Ticks : remainingTicks + reserveTicks;
+      var buyMaxHours = GetMaxTaxProtectionPurchaseHours(player, remainingTicks);
+      var actions = buyMaxHours > 0 ?
+        (byte)(TAX_OVERLAY_BUY | TAX_OVERLAY_BUY_MAX) :
+        (byte)0;
+      return new(tcId, reserves, options.MaxCurrencyReserves, options.CostPerHour,
+        GetTaxOverlayCeilingMinutes(remainingTicks),
+        GetTaxOverlayCeilingMinutes(totalTicks),
+        buyMaxHours,
+        remainingTicks is 0L ? TaxOverlayState.Inactive :
+          state?.ActiveSinceTicks > 0L ? TaxOverlayState.Active : TaxOverlayState.Paused,
+        actions);
+    }
+
+    private static long GetTaxOverlayCeilingMinutes(long ticks) =>
+      ticks <= 0L ? 0L : 1L + (ticks - 1L) /
+        System.TimeSpan.TicksPerMinute;
+
+    private int GetMaxTaxProtectionPurchaseHours(BasePlayer player, long bankedTicks)
+    {
+      var options = Configuration.TaxProtection;
+      if (!player || options.CurrencyItemID is 0 || options.CostPerHour <= 0 ||
+          _taxProtectionCurrencyDefinition is null)
+        return 0;
+
+      if (bankedTicks >= _maxPurchasedProtectionTicks)
+        return 0;
+      var availableHours = (int)((_maxPurchasedProtectionTicks - bankedTicks) /
+        System.TimeSpan.TicksPerHour);
+      if (availableHours <= 0)
+        return 0;
+
+      var affordableHours = player.inventory.GetAmount(
+        options.CurrencyItemID, true, true) / options.CostPerHour;
+      return System.Math.Min(availableHours, affordableHours);
+    }
+
+#endregion Snapshot
+
+#region Rendering
+
+    private void RenderTaxOverlay(BasePlayer player,
+      BuildingPrivlidge privilege, TaxOverlayViewer viewer, bool force)
+    {
+      var snapshot = CreateTaxOverlaySnapshot(player, privilege, viewer.TcID);
+      if (!force && viewer.LastSnapshot.Matches(in snapshot))
+        return;
+      viewer.LastSnapshot = snapshot;
+      DestroyTaxOverlay(player, viewer.RootName);
+#if CARBON
+      _taxOverlayBuilder.Clear();
+      AppendTaxOverlayText(_taxOverlayBuilder, in snapshot);
+      var lui = CreateCUI().v2;
+      var root = lui.CreatePanel("Overlay", _taxOverlayPosition, _taxOverlayOffset,
+        TAX_OVERLAY_BACKGROUND_COLOR, viewer.RootName)
+        .AddCursor()
+        .SetCanvasGroup(blocksRaycasts: true, interactable: true);
+      var header = lui.CreatePanel(root, new LuiPosition(0f, 1f, 1f, 1f),
+        new LuiOffset(0f, -24f, 0f, 0f), TAX_OVERLAY_HEADER_BG_COLOR);
+      lui.CreateText(header, LuiPosition.Full, default,
+        TAX_OVERLAY_HEADER_FONT_SIZE, TAX_OVERLAY_TEXT_COLOR, TAX_OVERLAY_TITLE,
+        UnityEngine.TextAnchor.MiddleCenter)
+        .SetTextFont(CUI.Handler.FontTypes.RobotoCondensedBold);
+      var closeButton = lui.CreateButton(header, new LuiPosition(1f, 0f, 1f, 1f),
+        new LuiOffset(-28f, 0f, 0f, 0f), viewer.CloseCommand,
+        TAX_OVERLAY_TRANSPARENT_COLOR, isProtected: true);
+      lui.CreateText(closeButton, LuiPosition.Full, default, TAX_OVERLAY_HEADER_FONT_SIZE, TAX_OVERLAY_TEXT_COLOR,
+        TAX_OVERLAY_CLOSE_TEXT, UnityEngine.TextAnchor.MiddleCenter)
+        .SetTextFont(CUI.Handler.FontTypes.RobotoCondensedBold);
+      lui.CreateText(root, new LuiPosition(0.5f, 0f, 0.5f, 1f),
+        new LuiOffset(-TAX_OVERLAY_TEXT_HALF_WIDTH, 35f,
+          TAX_OVERLAY_TEXT_HALF_WIDTH, -28f),
+        TAX_OVERLAY_TEXT_FONT_SIZE,
+        TAX_OVERLAY_TEXT_COLOR, _taxOverlayBuilder.ToString(), UnityEngine.TextAnchor.MiddleLeft)
+        .SetTextFont(CUI.Handler.FontTypes.RobotoCondensedBold);
+      RenderCarbonTaxOverlayButtons(lui, root, in snapshot, viewer);
+      lui.SendUi(player);
+#else
+      CuiHelper.AddUi(player, BuildTaxOverlayPayload(in snapshot, viewer));
+#endif
+    }
+
+    private void AppendTaxOverlayText(StringBuilder builder,
+      in TaxOverlaySnapshot snapshot)
+    {
+      AppendTaxOverlayLabel(builder, TAX_OVERLAY_STATUS_LABEL);
+      switch (snapshot.State)
+      {
+        case TaxOverlayState.Active:
+          builder.Append(TAX_OVERLAY_RICH_TEXT_COLOR_PREFIX).Append(COLOR_GREEN)
+            .Append(TAX_OVERLAY_RICH_TEXT_COLOR_SUFFIX).Append("Protected for ");
+          AppendDurationFromMinutes(builder, snapshot.RemainingMinutes);
+          builder.Append(TAX_OVERLAY_RICH_TEXT_CLOSE_TAG);
+          break;
+        case TaxOverlayState.Paused:
+          builder.Append(TAX_OVERLAY_RICH_TEXT_COLOR_PREFIX).Append(COLOR_YELLOW)
+            .Append(TAX_OVERLAY_RICH_TEXT_COLOR_SUFFIX).Append("Paused (");
+          AppendDurationFromMinutes(builder, snapshot.RemainingMinutes);
+          builder.Append(')').Append(TAX_OVERLAY_RICH_TEXT_CLOSE_TAG);
+          break;
+        default:
+          builder.Append(TAX_OVERLAY_RICH_TEXT_COLOR_PREFIX).Append(COLOR_RED)
+            .Append(TAX_OVERLAY_RICH_TEXT_COLOR_SUFFIX)
+            .Append("Inactive / Unprotected").Append(TAX_OVERLAY_RICH_TEXT_CLOSE_TAG);
+          break;
+      }
+
+      builder.Append('\n');
+      AppendTaxOverlayLabel(builder, TAX_OVERLAY_COSTS_LABEL);
+      builder.Append(TAX_OVERLAY_RICH_TEXT_COLOR_PREFIX).Append(COLOR_ORANGE)
+        .Append(TAX_OVERLAY_RICH_TEXT_COLOR_SUFFIX)
+        .Append(snapshot.Cost)
+        .Append(TAX_OVERLAY_RICH_TEXT_CLOSE_TAG).Append(" ")
+        .Append(TAX_OVERLAY_RICH_TEXT_COLOR_PREFIX).Append(TAX_OVERLAY_VALUE_COLOR)
+        .Append(TAX_OVERLAY_RICH_TEXT_COLOR_SUFFIX).Append(_taxProtectionCurrencyName)
+        .Append(" / hour").Append(TAX_OVERLAY_RICH_TEXT_CLOSE_TAG).Append('\n');
+      AppendTaxOverlayLabel(builder, TAX_OVERLAY_RESERVES_LABEL);
+      builder.Append(TAX_OVERLAY_RICH_TEXT_COLOR_PREFIX).Append(COLOR_ORANGE)
+        .Append(TAX_OVERLAY_RICH_TEXT_COLOR_SUFFIX)
+        .Append(snapshot.Reserves)
+        .Append(TAX_OVERLAY_RICH_TEXT_CLOSE_TAG);
+      AppendTaxOverlayLabel(builder, TAX_OVERLAY_SEPARATOR_TEXT);
+      builder.Append(TAX_OVERLAY_RICH_TEXT_COLOR_PREFIX).Append(COLOR_ORANGE)
+        .Append(TAX_OVERLAY_RICH_TEXT_COLOR_SUFFIX);
+      if (snapshot.ReserveCap is 0)
+        builder.Append(TAX_OVERLAY_UNLIMITED_TEXT);
+      else
+        builder.Append(snapshot.ReserveCap);
+      builder.Append(TAX_OVERLAY_RICH_TEXT_CLOSE_TAG).Append(" ")
+        .Append(TAX_OVERLAY_RICH_TEXT_COLOR_PREFIX).Append(TAX_OVERLAY_VALUE_COLOR)
+        .Append(TAX_OVERLAY_RICH_TEXT_COLOR_SUFFIX).Append(_taxProtectionCurrencyName)
+        .Append(TAX_OVERLAY_RICH_TEXT_CLOSE_TAG);
+      if (snapshot.Reserves > 0)
+      {
+        builder.Append('\n');
+        AppendTaxOverlayLabel(builder, TAX_OVERLAY_TOTAL_LABEL);
+        builder.Append(TAX_OVERLAY_RICH_TEXT_COLOR_PREFIX).Append(TAX_OVERLAY_VALUE_COLOR)
+          .Append(TAX_OVERLAY_RICH_TEXT_COLOR_SUFFIX);
+        var totalMinutes = System.Math.Min(snapshot.TotalMinutes,
+          System.TimeSpan.MaxValue.Ticks / System.TimeSpan.TicksPerMinute);
+        AppendDurationFromMinutes(builder, totalMinutes);
+        builder.Append(TAX_OVERLAY_RICH_TEXT_CLOSE_TAG);
+        AppendTaxOverlayLabel(builder, TAX_OVERLAY_SEPARATOR_TEXT);
+        builder.Append(TAX_OVERLAY_RICH_TEXT_COLOR_PREFIX).Append(TAX_OVERLAY_VALUE_COLOR)
+          .Append(TAX_OVERLAY_RICH_TEXT_COLOR_SUFFIX)
+          .Append(Configuration.TaxProtection.MaxPurchaseHours)
+          .Append('h').Append(TAX_OVERLAY_RICH_TEXT_CLOSE_TAG);
+      }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void AppendTaxOverlayLabel(StringBuilder builder, string text)
+    {
+      builder.Append(TAX_OVERLAY_RICH_TEXT_COLOR_PREFIX).Append(TAX_OVERLAY_LABEL_COLOR)
+        .Append(TAX_OVERLAY_RICH_TEXT_COLOR_SUFFIX).Append(text)
+        .Append(TAX_OVERLAY_RICH_TEXT_CLOSE_TAG);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void AppendDurationFromMinutes(StringBuilder builder, long totalMinutes)
+    {
+      builder.Append(totalMinutes / 1440L).Append("d:")
+        .Append(totalMinutes % 1440L / 60L).Append("h:")
+        .Append(totalMinutes % 60L).Append('m');
+    }
+
+#if !CARBON
+    private string BuildTaxOverlayPayload(in TaxOverlaySnapshot snapshot,
+      TaxOverlayViewer viewer)
+    {
+      var rootName = viewer.RootName;
+      _taxOverlayBuilder.Clear();
+      _taxOverlayBuilder.Append(_taxOverlayPayloadPrefix)
+        .Append(rootName)
+        .Append(_taxOverlayPayloadRootSuffix);
+      AppendOxideTaxOverlayElementStart(_taxOverlayBuilder, rootName,
+        TAX_OVERLAY_HEADER_NAME_SUFFIX, string.Empty);
+      _taxOverlayBuilder.Append(TAX_OVERLAY_PAYLOAD_HEADER_COMPONENTS);
+      AppendOxideTaxOverlayElementStart(_taxOverlayBuilder, rootName,
+        TAX_OVERLAY_HEADER_TEXT_NAME_SUFFIX, TAX_OVERLAY_HEADER_NAME_SUFFIX);
+      _taxOverlayBuilder.Append(TAX_OVERLAY_PAYLOAD_HEADER_TEXT_COMPONENTS);
+      AppendOxideTaxOverlayCloseButton(_taxOverlayBuilder, rootName, viewer);
+      AppendOxideTaxOverlayElementStart(_taxOverlayBuilder, rootName,
+        TAX_OVERLAY_BODY_NAME_SUFFIX, string.Empty);
+      _taxOverlayBuilder.Append(TAX_OVERLAY_PAYLOAD_BODY_TEXT_PREFIX);
+      AppendTaxOverlayText(_taxOverlayBuilder, in snapshot);
+      _taxOverlayBuilder.Append(TAX_OVERLAY_PAYLOAD_BODY_TEXT_SUFFIX);
+      AppendOxideTaxOverlayButtons(_taxOverlayBuilder, rootName, in snapshot, viewer);
+      _taxOverlayBuilder.Append(']');
+      return _taxOverlayBuilder.ToString();
+    }
+#endif
+
+    private void DestroyTaxOverlay(BasePlayer player, string rootName = null)
+    {
+      if (!player) return;
+      rootName ??= TAX_OVERLAY_ROOT + player.userID.Get();
+#if CARBON
+      CuiHandler.Destroy(rootName, player);
+#else
+      CuiHelper.DestroyUi(player, rootName);
+#endif
+    }
+
+#if CARBON
+
+#region Carbon Rendering
+
+    private void RenderCarbonTaxOverlayButtons(LUI lui, LUI.LuiContainer root,
+      in TaxOverlaySnapshot snapshot, TaxOverlayViewer viewer)
+    {
+      AddCarbonTaxOverlayButton(lui, root, (snapshot.Actions & TAX_OVERLAY_BUY) != 0,
+        TAX_OVERLAY_BUTTON_BUY_TEXT, viewer.BuyCommand,
+        TAX_OVERLAY_BUY_BUTTON_MIN_X, TAX_OVERLAY_BUY_BUTTON_MIN_Y,
+        TAX_OVERLAY_BUY_BUTTON_MAX_X, TAX_OVERLAY_BUY_BUTTON_MAX_Y);
+      _taxOverlayBuilder.Clear();
+      _taxOverlayBuilder.Append(TAX_OVERLAY_BUTTON_BUY_MAX_TEXT)
+        .Append(snapshot.BuyMaxHours).Append(')');
+      AddCarbonTaxOverlayButton(lui, root, (snapshot.Actions & TAX_OVERLAY_BUY_MAX) != 0,
+        _taxOverlayBuilder.ToString(),
+        viewer.BuyMaxCommand,
+        TAX_OVERLAY_BUY_MAX_BUTTON_MIN_X, TAX_OVERLAY_BUY_MAX_BUTTON_MIN_Y,
+        TAX_OVERLAY_BUY_MAX_BUTTON_MAX_X, TAX_OVERLAY_BUY_MAX_BUTTON_MAX_Y);
+    }
+
+    private static void AddCarbonTaxOverlayButton(LUI lui, LUI.LuiContainer root,
+      bool enabled, string text, string command,
+      float minX, float minY, float maxX, float maxY)
+    {
+      var button = lui.CreateButton(root, default, new LuiOffset(minX, minY, maxX, maxY),
+        enabled ? command : string.Empty,
+        enabled ? TAX_OVERLAY_ENABLED_BUTTON_COLOR : TAX_OVERLAY_DISABLED_BUTTON_COLOR,
+        isProtected: true);
+      lui.CreateText(button, LuiPosition.Full, default, TAX_OVERLAY_BUTTON_FONT_SIZE,
+        enabled ? TAX_OVERLAY_TEXT_COLOR : TAX_OVERLAY_DISABLED_TEXT_COLOR, text,
+        UnityEngine.TextAnchor.MiddleCenter)
+        .SetTextFont(CUI.Handler.FontTypes.RobotoCondensedBold);
+    }
+
+#endregion Carbon Rendering
+
+#else
+
+#region Oxide Rendering
+
+    private static void AppendOxideTaxOverlayElementStart(StringBuilder builder,
+      string rootName, string nameSuffix, string parentSuffix)
+    {
+      builder.Append(TAX_OVERLAY_PAYLOAD_ELEMENT_PREFIX)
+        .Append(rootName).Append(nameSuffix)
+        .Append(TAX_OVERLAY_PAYLOAD_PARENT_PREFIX)
+        .Append(rootName).Append(parentSuffix)
+        .Append(TAX_OVERLAY_PAYLOAD_COMPONENTS_PREFIX);
+    }
+
+    private static void AppendOxideTaxOverlayButtons(StringBuilder builder,
+      string rootName, in TaxOverlaySnapshot snapshot, TaxOverlayViewer viewer)
+    {
+      AppendOxideTaxOverlayButton(builder, rootName,
+        TAX_OVERLAY_BUY_NAME_SUFFIX, TAX_OVERLAY_BUY_TEXT_NAME_SUFFIX,
+        (snapshot.Actions & TAX_OVERLAY_BUY) != 0, viewer.BuyCommand,
+        TAX_OVERLAY_BUTTON_BUY_TEXT, TAX_OVERLAY_PAYLOAD_BUY_BUTTON_SUFFIX);
+      AppendOxideTaxOverlayBuyMaxButton(builder, rootName, in snapshot, viewer);
+    }
+
+    private static void AppendOxideTaxOverlayCloseButton(StringBuilder builder,
+      string rootName, TaxOverlayViewer viewer)
+    {
+      AppendOxideTaxOverlayElementStart(builder, rootName,
+        TAX_OVERLAY_CLOSE_NAME_SUFFIX, TAX_OVERLAY_HEADER_NAME_SUFFIX);
+      builder.Append(TAX_OVERLAY_PAYLOAD_BUTTON_COLOR_PREFIX)
+        .Append(TAX_OVERLAY_TRANSPARENT_COLOR)
+        .Append(TAX_OVERLAY_PAYLOAD_BUTTON_COMMAND_PREFIX)
+        .Append(viewer.CloseCommand)
+        .Append(TAX_OVERLAY_PAYLOAD_CLOSE_BUTTON_SUFFIX);
+      AppendOxideTaxOverlayElementStart(builder, rootName,
+        TAX_OVERLAY_CLOSE_TEXT_NAME_SUFFIX, TAX_OVERLAY_CLOSE_NAME_SUFFIX);
+      builder.Append(TAX_OVERLAY_PAYLOAD_LABEL_TEXT_PREFIX)
+        .Append(TAX_OVERLAY_CLOSE_TEXT)
+        .Append(TAX_OVERLAY_PAYLOAD_CLOSE_LABEL_SUFFIX);
+    }
+
+    private static void AppendOxideTaxOverlayButton(StringBuilder builder,
+      string rootName, string nameSuffix, string textNameSuffix,
+      bool enabled, string command, string text, string buttonSuffix)
+    {
+      AppendOxideTaxOverlayElementStart(builder, rootName, nameSuffix, string.Empty);
+      builder.Append(TAX_OVERLAY_PAYLOAD_BUTTON_COLOR_PREFIX)
+        .Append(enabled ? TAX_OVERLAY_ENABLED_BUTTON_COLOR : TAX_OVERLAY_DISABLED_BUTTON_COLOR)
+        .Append(TAX_OVERLAY_PAYLOAD_BUTTON_COMMAND_PREFIX);
+      if (enabled)
+        builder.Append(command);
+      builder.Append(buttonSuffix);
+      AppendOxideTaxOverlayElementStart(builder, rootName, textNameSuffix, nameSuffix);
+      builder.Append(TAX_OVERLAY_PAYLOAD_LABEL_TEXT_PREFIX)
+        .Append(text)
+        .Append(TAX_OVERLAY_PAYLOAD_BUTTON_LABEL_COLOR_PREFIX)
+        .Append(enabled ? TAX_OVERLAY_TEXT_COLOR : TAX_OVERLAY_DISABLED_TEXT_COLOR)
+        .Append(TAX_OVERLAY_PAYLOAD_BUTTON_LABEL_SUFFIX);
+    }
+
+    private static void AppendOxideTaxOverlayBuyMaxButton(StringBuilder builder,
+      string rootName, in TaxOverlaySnapshot snapshot, TaxOverlayViewer viewer)
+    {
+      var enabled = (snapshot.Actions & TAX_OVERLAY_BUY_MAX) != 0;
+      AppendOxideTaxOverlayElementStart(builder, rootName,
+        TAX_OVERLAY_BUY_MAX_NAME_SUFFIX, string.Empty);
+      builder.Append(TAX_OVERLAY_PAYLOAD_BUTTON_COLOR_PREFIX)
+        .Append(enabled ? TAX_OVERLAY_ENABLED_BUTTON_COLOR : TAX_OVERLAY_DISABLED_BUTTON_COLOR)
+        .Append(TAX_OVERLAY_PAYLOAD_BUTTON_COMMAND_PREFIX);
+      if (enabled)
+        builder.Append(viewer.BuyMaxCommand);
+      builder.Append(TAX_OVERLAY_PAYLOAD_BUY_MAX_BUTTON_SUFFIX);
+      AppendOxideTaxOverlayElementStart(builder, rootName,
+        TAX_OVERLAY_BUY_MAX_TEXT_NAME_SUFFIX, TAX_OVERLAY_BUY_MAX_NAME_SUFFIX);
+      builder.Append(TAX_OVERLAY_PAYLOAD_LABEL_TEXT_PREFIX)
+        .Append(TAX_OVERLAY_BUTTON_BUY_MAX_TEXT)
+        .Append(snapshot.BuyMaxHours)
+        .Append(')')
+        .Append(TAX_OVERLAY_PAYLOAD_BUTTON_LABEL_COLOR_PREFIX)
+        .Append(enabled ? TAX_OVERLAY_TEXT_COLOR : TAX_OVERLAY_DISABLED_TEXT_COLOR)
+        .Append(TAX_OVERLAY_PAYLOAD_BUTTON_LABEL_SUFFIX);
+    }
+
+#endregion Oxide Rendering
+
+#endif
+
+#endregion Rendering
+
+#region Commands
+
+#if CARBON
+    [ProtectedCommand(TAX_OVERLAY_COMMAND)]
+#endif
+    private void ccTaxOverlay(ConsoleSystem.Arg arg)
+    {
+      if (arg?.Connection?.player is not BasePlayer player ||
+          !_isTaxOverlayEnabled || arg.Args?.Length is not 2)
+        return;
+
+      var action = arg.GetString(0);
+      if (action is not (TAX_OVERLAY_ACTION_CLOSE or
+                         TAX_OVERLAY_ACTION_BUY or
+                         TAX_OVERLAY_ACTION_BUY_MAX))
+        return;
+
+      var playerID = player.userID.Get();
+      if (!ulong.TryParse(arg.GetString(1), out var tcId) ||
+          !_taxOverlayViewersByPlayer.TryGetValue(playerID, out var viewer) ||
+          viewer.TcID != tcId)
+        return;
+      if (action is TAX_OVERLAY_ACTION_CLOSE)
+      {
+        CloseTaxOverlay(player, playerID);
+        return;
+      }
+#if !CARBON
+      if (!CheckConCmdPerm(arg, Configuration.Permission.TaxProtection))
+        return;
+#endif
+      if (!HasTaxProtectionPermission(player))
+        return;
+
+      var privilege = FindTaxCupboard(tcId);
+      if (!privilege || player.inventory.loot.entitySource != privilege ||
+          !IsTrustedForCupboard(player, privilege))
+        return;
+
+      var snapshot = CreateTaxOverlaySnapshot(player, privilege, tcId);
+      var success = action switch
+      {
+        TAX_OVERLAY_ACTION_BUY when (snapshot.Actions & TAX_OVERLAY_BUY) != 0 =>
+          TryBuyOneTaxProtectionHour(player, privilege, tcId),
+        TAX_OVERLAY_ACTION_BUY_MAX when (snapshot.Actions & TAX_OVERLAY_BUY_MAX) != 0 =>
+          TryBuyMaxTaxProtectionHours(player, privilege, tcId),
+        _ => false
+      };
+      if (!success)
+        return;
+
+      SyncPurchasedProtection(privilege, tcId, System.DateTime.UtcNow);
+      MarkTaxOverlayDirty(tcId);
+    }
+
+    private bool TryBuyOneTaxProtectionHour(BasePlayer player,
+      BuildingPrivlidge privilege, ulong tcId)
+      => TryBuyTaxProtectionHours(player, tcId, 1, out _);
+
+    private bool TryBuyMaxTaxProtectionHours(BasePlayer player,
+      BuildingPrivlidge privilege, ulong tcId)
+    {
+      var nowTicks = System.DateTime.UtcNow.Ticks;
+      var bankedTicks = _taxProtection.TryGetValue(tcId, out var state) ?
+        state.GetRemainingTicks(nowTicks) : 0L;
+      var targetHours = GetMaxTaxProtectionPurchaseHours(player, bankedTicks);
+      return targetHours > 0 && TryBuyTaxProtectionHours(
+        player, tcId, targetHours, out _);
+    }
+
+    private bool TryBuyTaxProtectionHours(BasePlayer player,
+      ulong tcId, int requestedHours, out int purchasedHours)
+    {
+      purchasedHours = 0;
+      var options = Configuration.TaxProtection;
+      if (requestedHours <= 0 || options.CurrencyItemID is 0 ||
+          options.CostPerHour <= 0 || _taxProtectionCurrencyDefinition is null)
+        return false;
+
+      var nowTicks = System.DateTime.UtcNow.Ticks;
+      var remainingTicks = _taxProtection.TryGetValue(tcId, out var state) ?
+        state.GetRemainingTicks(nowTicks) : 0L;
+      if (remainingTicks >= _maxPurchasedProtectionTicks)
+        return false;
+
+      var availableHours = (int)((_maxPurchasedProtectionTicks - remainingTicks) /
+        System.TimeSpan.TicksPerHour);
+      if (availableHours <= 0)
+        return false;
+      purchasedHours = System.Math.Min(requestedHours, availableHours);
+      var cost = (long)purchasedHours * options.CostPerHour;
+      if (cost > int.MaxValue || player.inventory.GetAmount(
+            options.CurrencyItemID, true, true) < cost)
+        return false;
+
+      player.inventory.Take(null, options.CurrencyItemID, (int)cost);
+      state ??= new TaxProtectionState();
+      state.BankedTicks = remainingTicks +
+        (long)purchasedHours * System.TimeSpan.TicksPerHour;
+      if (state.ActiveSinceTicks > 0L)
+        state.ActiveSinceTicks = nowTicks;
+      _taxProtection[tcId] = state;
+      MarkDataDirty();
+      return true;
+    }
+
+#endregion Commands
+
+#endregion Tax Overlay
 
 #endregion Tax Protection
 
@@ -6689,25 +8169,39 @@ namespace
         return 0UL;
 
       var result = 0UL;
-      var teamFirstOffline = Configuration.Team.TeamFirstOffline;
-      var comparisonValue =
-        teamFirstOffline ? float.MinValue : float.MaxValue;
-
-      for (var i = 0; i < members.Count; i++)
+      if (Configuration.Team.TeamFirstOffline)
       {
-        var memberID = members[i];
-        if (!_lastOnline.TryGetValue(memberID, out var lastOnlineMember))
-          continue;
+        var maxMinutes = float.MinValue;
+        for (var i = 0; i < members.Count; i++)
+        {
+          var memberID = members[i];
+          if (!_lastOnline.TryGetValue(memberID, out var lastOnlineMember))
+            continue;
 
-        var memberMinutes = GetOfflineMinutes(lastOnlineMember, nowUtc);
+          var memberMinutes = GetOfflineMinutes(lastOnlineMember, nowUtc);
+          if (memberMinutes <= maxMinutes)
+            continue;
 
-        if (teamFirstOffline ?
-              memberMinutes <= comparisonValue :
-              memberMinutes >= comparisonValue)
-          continue;
+          maxMinutes = memberMinutes;
+          result = memberID;
+        }
+      }
+      else
+      {
+        var minMinutes = float.MaxValue;
+        for (var i = 0; i < members.Count; i++)
+        {
+          var memberID = members[i];
+          if (!_lastOnline.TryGetValue(memberID, out var lastOnlineMember))
+            continue;
 
-        comparisonValue = memberMinutes;
-        result = memberID;
+          var memberMinutes = GetOfflineMinutes(lastOnlineMember, nowUtc);
+          if (memberMinutes >= minMinutes)
+            continue;
+
+          minMinutes = memberMinutes;
+          result = memberID;
+        }
       }
 
       return result;
@@ -6791,7 +8285,7 @@ namespace
         return null;
 
       if (Configuration.Team.TeamAvoidAbuse && AnyPlayersOffline(team.members))
-        return true;
+        return BoxedTrue;
 
       if (!Configuration.Team.TeamEnablePenalty)
         return null;
@@ -7043,7 +8537,8 @@ namespace
         }
       }
 
-      if (!double.TryParse(args[^1], out var hours))
+      if (!double.TryParse(args[^1], out var hours) ||
+          double.IsNaN(hours) || double.IsInfinity(hours))
       {
         ChatMessage(player, MESSAGE_INVALID_SYNTAX);
         return;
@@ -7051,8 +8546,7 @@ namespace
 
       if (_lastOnline.TryGetValue(userID, out var target))
       {
-        target.LastOnlineDT =
-          target.LastOnlineDT.Subtract(System.TimeSpan.FromHours(hours));
+        target.LastOnlineDT = target.LastOnlineDT.AddHours(-hours);
         MarkDataDirty();
         ChatMessage(player, $"{target.UserName} | {System.TimeZoneInfo.ConvertTimeFromUtc(target.LastOnlineDT, _timeZone)}");
       }
@@ -7230,17 +8724,17 @@ namespace
       for (var i = 1; i < args?.Length; i++)
       {
         var argument = args[i];
-        if (!ulong.TryParse(argument, out var cupboardNetworkId) ||
-            cupboardNetworkId is 0UL)
+        if (!ulong.TryParse(argument, out var cupboardNetworkID) ||
+            cupboardNetworkID is 0UL)
         {
           ChatMessage(player, $"'{argument}' is not a valid Tool Cupboard network ID");
           continue;
         }
 
         if (BaseNetworkable.serverEntities.Find(
-              new NetworkableId(cupboardNetworkId)) is not BuildingPrivlidge toolCupboard)
+              new NetworkableId(cupboardNetworkID)) is not BuildingPrivlidge toolCupboard)
         {
-          ChatMessage(player, $"{cupboardNetworkId} is not a Tool Cupboard");
+          ChatMessage(player, $"{cupboardNetworkID} is not a Tool Cupboard");
           continue;
         }
 
@@ -7255,18 +8749,18 @@ namespace
       bool GetGriefCupboardState(
         BuildingPrivlidge toolCupboard, TcGriefState? requestedState = null)
       {
-        var cupboardNetworkId = GetNetworkId(toolCupboard);
-        if (cupboardNetworkId is 0UL)
+        var cupboardNetworkID = GetNetworkId(toolCupboard);
+        if (cupboardNetworkID is 0UL)
         {
           ChatMessage(player, "Tool Cupboard has no valid network ID");
           return false;
         }
 
         var dataCreated = false;
-        if (!_tcCreationData.TryGetValue(cupboardNetworkId, out var tcData))
+        if (!_tcCreationData.TryGetValue(cupboardNetworkID, out var tcData))
         {
           tcData = new();
-          _tcCreationData[cupboardNetworkId] = tcData;
+          _tcCreationData[cupboardNetworkID] = tcData;
           dataCreated = true;
         }
 
@@ -7279,12 +8773,12 @@ namespace
           MarkDataDirty();
 
         _sb.Clear();
-        _sb.AppendLine($"<color={COLOR_BLUE}>Grief Status</color> Tool Cupboard[{cupboardNetworkId}]");
+        _sb.AppendLine($"<color={COLOR_BLUE}>Grief Status</color> Tool Cupboard[{cupboardNetworkID}]");
 
         if (requestedState.HasValue)
           _sb.AppendLine($"<color={COLOR_YELLOW}>Forced Grief State</color> {GetGriefStateName(requestedState.Value)}");
         else if (tcData.GriefState is TcGriefState.None)
-          _sb.AppendLine($"<color={COLOR_YELLOW}>Grief State</color> {GetGriefStateName(_griefCupboardIds.Contains(cupboardNetworkId) ? TcGriefState.ForceTrue : TcGriefState.ForceFalse)}");
+          _sb.AppendLine($"<color={COLOR_YELLOW}>Grief State</color> {GetGriefStateName(_griefCupboardIds.Contains(cupboardNetworkID) ? TcGriefState.ForceTrue : TcGriefState.ForceFalse)}");
         else
           _sb.AppendLine($"<color={COLOR_YELLOW}>Forced Grief State</color> {GetGriefStateName(tcData.GriefState)}");
 
@@ -7887,9 +9381,19 @@ namespace
       // check for each required resource in the building TC's inventory
       // NOTE: remember that the building is decaying, so at least one resource
       //  is missing!
-      var satisfiedStone = !hasBlockStone;
-      var satisfiedMetal = !hasBlockMetal;
-      var satisfiedHqm   = !hasBlockHqm;
+      const byte
+        ResourceStone = 1,
+        ResourceMetal = 2,
+        ResourceHqm = 4;
+      byte neededResources = 0;
+      if (hasBlockStone)
+        neededResources |= ResourceStone;
+      if (hasBlockMetal)
+        neededResources |= ResourceMetal;
+      if (hasBlockHqm)
+        neededResources |= ResourceHqm;
+
+      byte satisfiedResources = 0;
 
       foreach (var item in itemList)
       {
@@ -7902,15 +9406,15 @@ namespace
             return true;
 
           case ItemIdStone: // stone
-            satisfiedStone = true;
+            satisfiedResources |= ResourceStone;
             break;
 
           case ItemIdMetal: // metal fragments
-            satisfiedMetal = true;
+            satisfiedResources |= ResourceMetal;
             break;
 
           case ItemIdHqm: // high quality metal
-            satisfiedHqm = true;
+            satisfiedResources |= ResourceHqm;
             break;
         }
       }
@@ -7918,7 +9422,7 @@ namespace
       // if something other than wood is missing, the building is not decaying
       //  solely due to twig, so we can immediately report that the building is
       //  decaying here
-      if (!satisfiedStone || !satisfiedMetal || !satisfiedHqm)
+      if (satisfiedResources != neededResources)
         return true;
 
       // at this point the building has twig, no upgraded wood blocks, and only
@@ -8074,7 +9578,7 @@ namespace
       ulong playerID, LastOnlineData lastOnline,
       System.DateTime nowUtc, out float[] damageScaleKeys)
     {
-      var scaleCache = GetOrCreateScaleCache(playerID, nowUtc);
+      var scaleCache = GetOrCreateScaleCache(playerID);
       if (!IsApiPenaltyActive(lastOnline, nowUtc) &&
           scaleCache.HasProtectPermission)
         return GetDamageScale(
@@ -8097,18 +9601,35 @@ namespace
         return 0L;
 
       var remainingHours = damageScaleKeys[^1] -
-        GetOfflineHoursUnchecked(lastOnline, nowUtc);
-      return remainingHours > 0f ?
-        System.TimeSpan.FromHours(remainingHours).Ticks : 0L;
+        GetOfflineHours(lastOnline, nowUtc);
+      return GetClampedTimeSpanFromHours(remainingHours).Ticks;
     }
 
     private static bool IsApiPenaltyActive(
       LastOnlineData lastOnline, System.DateTime nowUtc) =>
         lastOnline is not null && nowUtc.Ticks <= lastOnline.PenaltyEndTicks;
 
-    private static bool IsPenaltyDurationValid(float durationHours) =>
-      durationHours > 0f && !float.IsNaN(durationHours) &&
-      !float.IsInfinity(durationHours);
+    private static bool IsPenaltyDurationValid(float durationHours)
+    {
+      if (durationHours <= 0f || float.IsNaN(durationHours) ||
+          float.IsInfinity(durationHours))
+        return false;
+
+      return durationHours <=
+        (System.DateTime.MaxValue.Ticks - System.DateTime.UtcNow.Ticks) /
+        (double)System.TimeSpan.TicksPerHour;
+    }
+
+    private static System.TimeSpan GetClampedTimeSpanFromHours(float hours)
+    {
+      if (!(hours > 0f))
+        return System.TimeSpan.Zero;
+
+      var maxHours = System.TimeSpan.MaxValue.Ticks /
+        (double)System.TimeSpan.TicksPerHour;
+      return hours >= maxHours ? System.TimeSpan.MaxValue :
+        System.TimeSpan.FromHours(hours);
+    }
 
     private bool TryEnablePenalty(ulong playerID, float durationHours) =>
       _lastOnline.TryGetValue(playerID, out var lastOnline) &&
@@ -8120,7 +9641,8 @@ namespace
       if (!IsPenaltyDurationValid(durationHours) || lastOnline is null)
         return false;
 
-      lastOnline.EnablePenalty(durationHours);
+      var penaltyEndUtc = System.DateTime.UtcNow.AddHours(durationHours);
+      lastOnline.EnablePenalty(penaltyEndUtc);
       CacheDamageScale(playerID, -1f);
       QueueTaxProtectionSync();
       return true;
@@ -8137,6 +9659,7 @@ namespace
 
       lastOnline.DisablePenalty();
       CacheDamageScale(playerID, -1f);
+      RefreshProtectionViews(playerID);
       return true;
     }
 
@@ -8710,7 +10233,8 @@ namespace
           Interface.Oxide.DataFileSystem.ExistsDatafile(dataFileName) ?
             Interface.Oxide.DataFileSystem.ReadObject<WipeTemplatesData>(dataFileName) :
             new();
-        NormalizeWipeTemplates();
+        if (NormalizeWipeTemplates())
+          SaveWipeTemplates();
       }
       catch (System.Exception ex)
       {
@@ -8723,11 +10247,24 @@ namespace
       Interface.Oxide.DataFileSystem.WriteObject(
         $"{Name}/{TEMPLATE_DATA_FILE_NAME}", _wipeTemplatesData);
 
-    private void NormalizeWipeTemplates()
+    private bool NormalizeWipeTemplates()
     {
-      _wipeTemplatesData ??= new();
-      _wipeTemplatesData.Templates ??= new();
-      _wipeTemplatesData.GeneratedProfileIDs ??= new();
+      var changed = false;
+      if (_wipeTemplatesData is null)
+      {
+        _wipeTemplatesData = new();
+        changed = true;
+      }
+      if (_wipeTemplatesData.Templates is null)
+      {
+        _wipeTemplatesData.Templates = new();
+        changed = true;
+      }
+      if (_wipeTemplatesData.GeneratedProfileIDs is null)
+      {
+        _wipeTemplatesData.GeneratedProfileIDs = new();
+        changed = true;
+      }
 
       var ids = new HashSet<System.Guid>();
       for (var i = _wipeTemplatesData.Templates.Count - 1; i >= 0; i--)
@@ -8736,33 +10273,64 @@ namespace
         if (template is null)
         {
           _wipeTemplatesData.Templates.RemoveAt(i);
+          changed = true;
           continue;
         }
 
         if (template.ID == System.Guid.Empty || !ids.Add(template.ID))
+        {
           template.ID = System.Guid.NewGuid();
+          changed = true;
+        }
 
-        template.Name = template.Name?.Trim();
-        template.Phases ??= new();
+        var normalizedName = template.Name?.Trim();
+        if (template.Name != normalizedName)
+        {
+          template.Name = normalizedName;
+          changed = true;
+        }
+        if (template.Phases is null)
+        {
+          template.Phases = new();
+          changed = true;
+        }
         for (var phaseIndex = template.Phases.Count - 1;
              phaseIndex >= 0; phaseIndex--)
         {
           var phase = template.Phases[phaseIndex];
           if (!IsValidWipeTemplatePhase(phase))
-            template.Phases.RemoveAt(phaseIndex);
-          else
           {
-            phase.AbsoluteTimeScale ??= new();
-            phase.OfflineTimeScale ??= new();
+            template.Phases.RemoveAt(phaseIndex);
+            changed = true;
           }
         }
-        template.Phases.Sort(CompareWipeTemplatePhases);
+        for (var phaseIndex = 1; phaseIndex < template.Phases.Count;
+             phaseIndex++)
+        {
+          if (CompareWipeTemplatePhases(
+                template.Phases[phaseIndex - 1], template.Phases[phaseIndex]) > 0)
+          {
+            template.Phases.Sort(CompareWipeTemplatePhases);
+            changed = true;
+            break;
+          }
+        }
       }
 
-      if (GetWipeTemplate(_wipeTemplatesData.DefaultTemplateID) is null)
+      if (_wipeTemplatesData.DefaultTemplateID != System.Guid.Empty &&
+          GetWipeTemplate(_wipeTemplatesData.DefaultTemplateID) is null)
+      {
         _wipeTemplatesData.DefaultTemplateID = System.Guid.Empty;
-      if (GetWipeTemplate(_wipeTemplatesData.QueuedNextWipeTemplateID) is null)
+        changed = true;
+      }
+      if (_wipeTemplatesData.QueuedNextWipeTemplateID != System.Guid.Empty &&
+          GetWipeTemplate(_wipeTemplatesData.QueuedNextWipeTemplateID) is null)
+      {
         _wipeTemplatesData.QueuedNextWipeTemplateID = System.Guid.Empty;
+        changed = true;
+      }
+
+      return changed;
     }
 
     private static bool IsValidWipeTemplatePhase(WipeTemplatePhase phase) =>
@@ -9113,6 +10681,9 @@ namespace
         CacheDefaultTimescales();
         ChatMessage(player, "Scheduled timescales have been disabled.");
       }
+
+      CacheAllPlayerScale();
+      RefreshAllProtectionViews();
     }
 
     private void OpenScheduledTimescaleEditor(BasePlayer player)
@@ -9319,6 +10890,12 @@ namespace
       session is not null &&
       session.Player &&
       _adminIDCache.Contains(session.Player.userID.Get());
+
+    private bool CanEditWipeTemplate(
+      AdminModule.PlayerSession session, WipeTemplate template) =>
+      CanUseScheduledTimescaleEditor(session) &&
+      template is not null &&
+      ReferenceEquals(GetWipeTemplate(template.ID), template);
 
     private void OpenScheduledTimescaleAdminPanel(BasePlayer player)
     {
@@ -9974,7 +11551,8 @@ namespace
 
           Community.Runtime.Core.NextFrame(() =>
           {
-            if (session.Player && HasWipeTemplateEditorModules())
+            if (CanUseScheduledTimescaleEditor(session) &&
+                HasWipeTemplateEditorModules())
               OpenWipeTemplateAdminPanel(session.Player);
           });
         });
@@ -9991,13 +11569,16 @@ namespace
       if (!HasWipeTemplateEditorModules())
         return;
 
+      var session = _admin.GetPlayerSession(player);
+      if (!CanUseScheduledTimescaleEditor(session))
+        return;
+
       if (!_wipeTemplatePlayerTabs.TryGetValue(player.userID, out var tab))
       {
         tab = new WipeTemplateAdminTab(this);
         _wipeTemplatePlayerTabs[player.userID] = tab;
       }
 
-      var session = _admin.GetPlayerSession(player);
       DrawWipeTemplateAdminTab(tab, session);
       var previous = _admin.GetTab(player);
       _admin.SetTab(player, tab, false);
@@ -10064,6 +11645,9 @@ namespace
         System.Action<AdminModule.PlayerSession> select =
           isTemplateEditing ? null : current =>
           {
+            if (!CanEditWipeTemplate(current, template))
+              return;
+
             GetWipeTemplateUiState(current.Player).SelectedTemplateID = template.ID;
             DrawWipeTemplateAdminTab(tab, current);
           };
@@ -10078,6 +11662,9 @@ namespace
       System.Action<AdminModule.PlayerSession> addTemplate =
         isTemplateEditing ? null : current =>
       {
+        if (!CanUseScheduledTimescaleEditor(current))
+          return;
+
         var template = new WipeTemplate
         {
           Name = DEFAULT_WIPE_TEMPLATE_NAME,
@@ -10123,6 +11710,9 @@ namespace
       tab.AddInput(DETAILS_COLUMN, UI_NAME, _ => selected.Name,
         PROFILE_NAME_MAX_LENGTH, false, (current, args) =>
         {
+          if (!CanEditWipeTemplate(current, selected))
+            return;
+
           selected.Name = GetScheduledTimescaleInput(args)?.Trim();
           if (string.IsNullOrEmpty(selected.Name))
             selected.Name = FALLBACK_WIPE_TEMPLATE_NAME;
@@ -10148,6 +11738,9 @@ namespace
             System.TimeSpan.FromTicks(phase.EndOffsetTicks)),
           current =>
           {
+            if (!CanEditWipeTemplate(current, selected))
+              return;
+
             GetWipeTemplateUiState(current.Player).PhaseEditor =
               CreateWipeTemplatePhaseEditContext(selected, phase1);
             DrawWipeTemplateAdminTab(tab, current);
@@ -10162,6 +11755,9 @@ namespace
       tab.AddButtonArray(DETAILS_COLUMN,
         new AdminModule.Tab.OptionButton(UI_SET_DEFAULT_TEMPLATE, current =>
           {
+            if (!CanEditWipeTemplate(current, selected))
+              return;
+
             _wipeTemplatesData.DefaultTemplateID =
               _wipeTemplatesData.DefaultTemplateID == selectedID ?
                 System.Guid.Empty : selectedID;
@@ -10172,6 +11768,9 @@ namespace
             AdminModule.Tab.OptionButton.Types.None),
         new AdminModule.Tab.OptionButton(UI_QUEUE_NEXT_WIPE, current =>
           {
+            if (!CanEditWipeTemplate(current, selected))
+              return;
+
             _wipeTemplatesData.QueuedNextWipeTemplateID =
               _wipeTemplatesData.QueuedNextWipeTemplateID == selectedID ?
                 System.Guid.Empty : selectedID;
@@ -10184,6 +11783,9 @@ namespace
       // COLUMN 1: Adds a phase after the current latest phase end offset
       tab.AddButton(DETAILS_COLUMN, UI_ADD_PHASE, current =>
       {
+        if (!CanEditWipeTemplate(current, selected))
+          return;
+
         var lastEndTicks = 0L;
         foreach (var phase in selected.Phases)
         {
@@ -10191,13 +11793,18 @@ namespace
             lastEndTicks = phase.EndOffsetTicks;
         }
 
+        if (lastEndTicks > System.DateTime.MaxValue.Ticks -
+            DEFAULT_TEMPLATE_PHASE_DURATION_TICKS)
+          return;
+        var nextEndTicks = lastEndTicks +
+          DEFAULT_TEMPLATE_PHASE_DURATION_TICKS;
+
         GetWipeTemplateUiState(current.Player).PhaseEditor =
           CreateWipeTemplatePhaseEditContext(selected, new()
           {
             Name = DEFAULT_TEMPLATE_PHASE_NAME,
             StartOffsetTicks = lastEndTicks,
-            EndOffsetTicks = checked(lastEndTicks +
-              DEFAULT_TEMPLATE_PHASE_DURATION_TICKS),
+            EndOffsetTicks = nextEndTicks,
             AbsoluteTimeScale = new(Configuration.RaidProtection.AbsoluteTimeScale),
             OfflineTimeScale = new(Configuration.RaidProtection.DamageScale)
           });
@@ -10208,9 +11815,15 @@ namespace
       // and clears either persisted selection that pointed to it
       tab.AddButton(DETAILS_COLUMN, UI_DELETE_TEMPLATE, current =>
       {
+        if (!CanEditWipeTemplate(current, selected))
+          return;
+
         tab.CreateDialog(string.Format(UI_DELETE_TEMPLATE_FORMAT,
           selected.Name), confirm =>
         {
+          if (!CanEditWipeTemplate(confirm, selected))
+            return;
+
           var template = GetWipeTemplate(selectedID);
           if (template is null)
             return;
@@ -10591,6 +12204,9 @@ namespace
       tab.AddInput(DETAILS_COLUMN, UI_NAME, _ => context.Name,
         PROFILE_NAME_MAX_LENGTH, false, (current, args) =>
         {
+          if (!CanEditWipeTemplate(current, context.Template))
+            return;
+
           context.Name = GetScheduledTimescaleInput(args);
           context.IsDirty = true;
           context.Error = null;
@@ -10599,6 +12215,9 @@ namespace
       tab.AddInput(DETAILS_COLUMN, UI_START_OFFSET_HOURS, _ => context.StartHours,
         SCALE_VALUE_MAX_LENGTH, false, (current, args) =>
         {
+          if (!CanEditWipeTemplate(current, context.Template))
+            return;
+
           context.StartHours = GetScheduledTimescaleInput(args);
           context.IsDirty = true;
           context.Error = null;
@@ -10607,6 +12226,9 @@ namespace
       tab.AddInput(DETAILS_COLUMN, UI_END_OFFSET_HOURS, _ => context.EndHours,
         SCALE_VALUE_MAX_LENGTH, false, (current, args) =>
         {
+          if (!CanEditWipeTemplate(current, context.Template))
+            return;
+
           context.EndHours = GetScheduledTimescaleInput(args);
           context.IsDirty = true;
           context.Error = null;
@@ -10615,12 +12237,16 @@ namespace
 
       var cancelButton = new AdminModule.Tab.OptionButton(UI_CANCEL, current =>
         {
+          if (!CanEditWipeTemplate(current, context.Template))
+            return;
+
           GetWipeTemplateUiState(current.Player).PhaseEditor = null;
           DrawWipeTemplateAdminTab(tab, current);
         });
       var deleteButton = new AdminModule.Tab.OptionButton(UI_DELETE, current =>
           {
-            if (context.StoredPhase is null ||
+            if (!CanEditWipeTemplate(current, context.Template) ||
+                context.StoredPhase is null ||
                 !context.Template.Phases.Remove(context.StoredPhase))
               return;
 
@@ -10651,6 +12277,9 @@ namespace
       tab.AddButtonArray(DETAILS_COLUMN,
         new AdminModule.Tab.OptionButton(UI_ADD_SCALE, current =>
         {
+          if (!CanEditWipeTemplate(current, context.Template))
+            return;
+
           context.EntryEditor = CreateScheduledTimescaleEntryEditContext(
             context.ScaleDraft, context.EntryKind, null,
             current.GetOrCreatePage(DETAILS_COLUMN).CurrentPage);
@@ -10658,6 +12287,9 @@ namespace
         }, _ => AdminModule.Tab.OptionButton.Types.Selected),
         new AdminModule.Tab.OptionButton(UI_REPLACE_STANDARD_VALUES, current =>
         {
+          if (!CanEditWipeTemplate(current, context.Template))
+            return;
+
           context.ScaleDraft.AbsoluteTimeScale.Clear();
           context.ScaleDraft.OfflineTimeScale.Clear();
           foreach (var (key, value) in Configuration.RaidProtection.AbsoluteTimeScale)
@@ -10683,6 +12315,9 @@ namespace
       tab.AddButtonArray(DETAILS_COLUMN,
         new AdminModule.Tab.OptionButton(UI_ABSOLUTE_TIME, current =>
         {
+          if (!CanEditWipeTemplate(current, context.Template))
+            return;
+
           context.EntryKind = ScheduledTimescaleEntryKind.Absolute;
           DrawWipeTemplateAdminTab(tab, current);
         }, _ => kind is ScheduledTimescaleEntryKind.Absolute ?
@@ -10690,6 +12325,9 @@ namespace
           AdminModule.Tab.OptionButton.Types.None),
         new AdminModule.Tab.OptionButton(UI_OFFLINE_TIME, current =>
         {
+          if (!CanEditWipeTemplate(current, context.Template))
+            return;
+
           context.EntryKind = ScheduledTimescaleEntryKind.Offline;
           DrawWipeTemplateAdminTab(tab, current);
         }, _ => kind is ScheduledTimescaleEntryKind.Offline ?
@@ -10729,6 +12367,9 @@ namespace
       var kind = context.EntryKind;
       System.Action<AdminModule.PlayerSession> edit = current =>
       {
+        if (!CanEditWipeTemplate(current, context.Template))
+          return;
+
         context.EntryEditor = CreateScheduledTimescaleEntryEditContext(
           context.ScaleDraft, kind, key,
           current.GetOrCreatePage(DETAILS_COLUMN).CurrentPage);
@@ -10741,7 +12382,8 @@ namespace
           UnityEngine.TextAnchor.MiddleLeft, edit),
         new AdminModule.Tab.OptionButton(UI_COPY, current =>
         {
-          if (!TryCopyScheduledTimescaleEntry(
+          if (!CanEditWipeTemplate(current, context.Template) ||
+              !TryCopyScheduledTimescaleEntry(
                 context.ScaleDraft, kind, key))
             return;
 
@@ -10751,6 +12393,9 @@ namespace
         }, _ => AdminModule.Tab.OptionButton.Types.Selected),
         new AdminModule.Tab.OptionButton(UI_DELETE, current =>
         {
+          if (!CanEditWipeTemplate(current, context.Template))
+            return;
+
           RemoveScheduledTimescaleEntry(context.ScaleDraft, kind, key);
           context.ScaleDraft.RefreshKeys();
           context.IsDirty = true;
@@ -10771,6 +12416,9 @@ namespace
     private void SaveWipeTemplatePhase(AdminModule.Tab tab,
       AdminModule.PlayerSession session, WipeTemplatePhaseEditContext context)
     {
+      if (!CanEditWipeTemplate(session, context.Template))
+        return;
+
       if (!double.TryParse(context.StartHours, NumberStyles.Float,
             CultureInfo.InvariantCulture, out var startHours) ||
           !double.TryParse(context.EndHours, NumberStyles.Float,
@@ -11348,6 +12996,9 @@ namespace
           (absolute ? UI_HOUR : UI_OFFLINE_HOURS),
         _ => context.Key, SCALE_VALUE_MAX_LENGTH, false, (current, args) =>
         {
+          if (!CanEditWipeTemplate(current, phaseContext.Template))
+            return;
+
           context.Key = GetScheduledTimescaleInput(args);
           ClearScheduledTimescaleValidation(context);
           DrawWipeTemplateAdminTab(tab, current);
@@ -11357,6 +13008,9 @@ namespace
           UI_INVALID_FIELD_PREFIX + UI_SCALE : UI_SCALE,
         _ => context.Scale, SCALE_VALUE_MAX_LENGTH, false, (current, args) =>
         {
+          if (!CanEditWipeTemplate(current, phaseContext.Template))
+            return;
+
           context.Scale = GetScheduledTimescaleInput(args);
           ClearScheduledTimescaleValidation(context);
           DrawWipeTemplateAdminTab(tab, current);
@@ -11367,6 +13021,9 @@ namespace
       tab.AddButtonArray(DETAILS_COLUMN,
         new AdminModule.Tab.OptionButton(UI_CANCEL, current =>
         {
+          if (!CanEditWipeTemplate(current, phaseContext.Template))
+            return;
+
           phaseContext.EntryEditor = null;
           DrawWipeTemplateAdminTab(tab, current);
         }),
@@ -11379,6 +13036,9 @@ namespace
       AdminModule.PlayerSession session,
       WipeTemplatePhaseEditContext phaseContext)
     {
+      if (!CanEditWipeTemplate(session, phaseContext.Template))
+        return;
+
       var context = phaseContext.EntryEditor;
       ClearScheduledTimescaleValidation(context);
       if (!TryApplyScheduledTimescaleEntry(context, out var error,
