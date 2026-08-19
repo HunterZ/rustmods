@@ -1,4 +1,4 @@
-﻿using Facepunch;
+using Facepunch;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Converters;
 using Oxide.Core;
@@ -12,7 +12,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Super PVx Info", "HunterZ", "1.11.0")]
+[Info("Super PVx Info", "HunterZ", "1.12.0")]
 [Description("Displays PvE/PvP/etc. status on player's HUD")]
 public class SuperPVxInfo : RustPlugin
 {
@@ -39,9 +39,10 @@ public class SuperPVxInfo : RustPlugin
     // Nikedemos plugins
     CargoTrainEvent = 1 << 0,
     // Adem plugins
-    Caravan         = 1 << 1,
-    Convoy          = 1 << 2,
-    Sputnik         = 1 << 3
+    ArmoredTrain    = 1 << 1,
+    Caravan         = 1 << 2,
+    Convoy          = 1 << 3,
+    Sputnik         = 1 << 4
   }
 
   // PVP events that are managed via listening to start/stop hooks that provide
@@ -894,7 +895,7 @@ public class SuperPVxInfo : RustPlugin
 
   #region RaidableBases Hook Handlers
 
-  // NOTE: Only need to included up to the last parameter that we actually use;
+  // NOTE: Only need to include up to the last parameter that we actually use;
   //  Oxide/Carbon will call the closest-matching hook signature
 
   private void OnPlayerEnteredRaidableBase(
@@ -1016,6 +1017,20 @@ public class SuperPVxInfo : RustPlugin
 
   #region Adem Hook Handlers
 
+  private void OnPlayerEnterArmoredTrain(BasePlayer player) =>
+    NextTick(() => SetPvpBubble(
+      player, PvpBubbleTypes.ArmoredTrain, true));
+
+  private void OnPlayerExitArmoredTrain(BasePlayer player) =>
+    NextTick(() => SetPvpBubble(
+      player, PvpBubbleTypes.ArmoredTrain, false));
+
+  private void OnArmoredTrainStartMoving(Vector3 position) =>
+    NextTick(static () => EndPvpBubble(PvpBubbleTypes.ArmoredTrain));
+
+  private void OnArmoredTrainEventStop() =>
+    NextTick(static () => EndPvpBubble(PvpBubbleTypes.ArmoredTrain));
+
   private void OnPlayerEnterCaravan(BasePlayer player) =>
     NextTick(() => SetPvpBubble(player, PvpBubbleTypes.Caravan, true));
 
@@ -1023,7 +1038,7 @@ public class SuperPVxInfo : RustPlugin
     NextTick(() => SetPvpBubble(player, PvpBubbleTypes.Caravan, false));
 
   private void OnCaravanStop() =>
-    NextTick(() => EndPvpBubble(PvpBubbleTypes.Caravan));
+    NextTick(static () => EndPvpBubble(PvpBubbleTypes.Caravan));
 
   private void OnPlayerEnterConvoy(BasePlayer player) =>
     NextTick(() => SetPvpBubble(player, PvpBubbleTypes.Convoy, true));
@@ -1032,7 +1047,7 @@ public class SuperPVxInfo : RustPlugin
     NextTick(() => SetPvpBubble(player, PvpBubbleTypes.Convoy, false));
 
   private void OnConvoyStop() =>
-    NextTick(() => EndPvpBubble(PvpBubbleTypes.Convoy));
+    NextTick(static () => EndPvpBubble(PvpBubbleTypes.Convoy));
 
   private void OnPlayerEnterSputnik(BasePlayer player) =>
     NextTick(() => SetPvpBubble(player, PvpBubbleTypes.Sputnik, true));
