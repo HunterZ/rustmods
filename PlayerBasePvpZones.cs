@@ -1122,10 +1122,7 @@ public class PlayerBasePvpZones : RustPlugin
     List<string> bulkDeleteList)
   {
     var networkableIds = Pool.Get<List<NetworkableId>>();
-    foreach (var networkableId in dict.Keys)
-    {
-      networkableIds.Add(networkableId);
-    }
+    networkableIds.AddRange(dict.Keys);
     foreach(var networkableId in networkableIds)
     {
       deleter(networkableId, bulkDeleteList);
@@ -2339,7 +2336,7 @@ public class PlayerBasePvpZones : RustPlugin
       {
         var sphere = GameManager.server.CreateEntity(
           "assets/prefabs/visualization/sphere.prefab") as SphereEntity;
-        if (sphere is null || !sphere) continue;
+        if (!sphere) continue;
         sphere.enableSaving = false;
         sphere.Spawn();
         sphere.LerpRadiusTo(Radius * 2.0f, Radius / 2.0f);
