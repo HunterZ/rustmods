@@ -19,7 +19,7 @@ public class SuperPVxInfo : RustPlugin
   #region Plugin Data
 
   // list of plugins whose PVP delay statuses are tracked
-  public enum PvpDelayType
+  private enum PvpDelayType
   {
     AbandonedBases,
     DynamicPvp,
@@ -33,7 +33,7 @@ public class SuperPVxInfo : RustPlugin
 
   // PVP statuses that are managed via listening to player enter/exit hooks
   [Flags]
-  public enum PvpBubbleTypes
+  private enum PvpBubbleTypes
   {
     None            = 0,
     // Nikedemos plugins
@@ -1011,7 +1011,7 @@ public class SuperPVxInfo : RustPlugin
       player, PvpBubbleTypes.CargoTrainEvent, false));
 
   private void OnTrainEventEnded(TrainEngine trainEngine) =>
-    NextTick(() => EndPvpBubble(PvpBubbleTypes.CargoTrainEvent));
+    NextTick(static () => EndPvpBubble(PvpBubbleTypes.CargoTrainEvent));
 
   #endregion Cargo Train Event Hook Handlers
 
