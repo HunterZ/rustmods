@@ -14,15 +14,13 @@ public class ScarecrowWrangler : RustPlugin
     (int)TerrainTopology.Enum.Ocean |
     (int)TerrainTopology.Enum.Tier0;
 
-  private class ValidLocation
+  private sealed class ValidLocation
   {
-    public float            closestDistance = float.MaxValue;
-    public ScarecrowWatcher closestWatcher;
-    public readonly Vector3 position        = Vector3.zero;
+    public float            ClosestDistance = float.MaxValue;
+    public ScarecrowWatcher ClosestWatcher;
+    public readonly Vector3 Position;
 
-    public ValidLocation() { }
-
-    public ValidLocation(Vector3 pos) => position = pos;
+    public ValidLocation(Vector3 pos) => Position = pos;
   }
 
   // all scarecrow watchers being managed by this plugin
@@ -139,7 +137,7 @@ public class ScarecrowWrangler : RustPlugin
     foreach (var goodPos in _validLocations)
     {
       // move on if far enough away
-      if (Vector3.Distance(goodPos.position, pos) >= 100.0f) continue;
+      if (Vector3.Distance(goodPos.Position, pos) >= 100.0f) continue;
       // too close; add to miss count and abort
       ++_validMissCount;
       return;
@@ -186,9 +184,9 @@ public class ScarecrowWrangler : RustPlugin
     // this avoids the location getting stuck on a defunct scarecrow
     foreach (var validLoc in _validLocations)
     {
-      if (validLoc.closestWatcher != watcher) continue;
-      validLoc.closestDistance = float.MaxValue;
-      validLoc.closestWatcher = null;
+      if (validLoc.ClosestWatcher != watcher) continue;
+      validLoc.ClosestDistance = float.MaxValue;
+      validLoc.ClosestWatcher = null;
     }
     // Destroy() is not immediate, so take some steps now to avoid confusion
     watcher.CancelInvoke();
@@ -251,17 +249,26 @@ public class ScarecrowWrangler : RustPlugin
   private static void ResetBrain(ScarecrowNPC scarecrow, bool movementTick)
   {
     if (!IsAlive(scarecrow)) return;
-    scarecrow.StopAttacking();
     var brain = scarecrow.Brain;
     if (!brain) return;
-    if (!movementTick) brain.StopMovementTick();
-    var defaultStateContainer = brain.AIDesign?.GetDefaultStateContainer();
-    if (null != defaultStateContainer)
+
+    brain.Events?.Memory?.Clear();
+    brain.Navigator?.Stop();
+    brain.Senses?.Memory?.All?.Clear();
+    brain.Senses?.Memory?.LOS?.Clear();
+    brain.Senses?.Memory?.Players?.Clear();
+    brain.Senses?.Memory?.Targets?.Clear();
+    brain.Senses?.Memory?.Threats?.Clear();
+    brain.Senses?.Players?.Clear();
+    if (movementTick)
     {
-      brain.SwitchToState(
-        defaultStateContainer.State, defaultStateContainer.ID);
+      brain.StartMovementTick();
+      brain.DoThink();
     }
-    if (movementTick) brain.StartMovementTick();
+    else
+    {
+      brain.StopMovementTick();
+    }
   }
 
   // return whether given scarecrow is valid AND alive
@@ -293,25 +300,25 @@ public class ScarecrowWrangler : RustPlugin
       foreach (var validLoc in _validLocations)
       {
         // if no closest scarecrow recorded, record this one
-        if (!validLoc.closestWatcher)
+        if (!validLoc.ClosestWatcher)
         {
-          validLoc.closestWatcher = myWatcher;
+          validLoc.ClosestWatcher = myWatcher;
         }
         // if this scarecrow is the last-recorded closest one, update distance
         //  and continue
-        if (myWatcher == validLoc.closestWatcher)
+        if (myWatcher == validLoc.ClosestWatcher)
         {
-          validLoc.closestDistance =
-            Vector3.Distance(scarecrow.transform.position, validLoc.position);
+          validLoc.ClosestDistance =
+            Vector3.Distance(scarecrow.transform.position, validLoc.Position);
           continue;
         }
         // if this scarecrow is further than the current closest one, skip it
         var myDist =
-          Vector3.Distance(scarecrow.transform.position, validLoc.position);
-        if (myDist > validLoc.closestDistance) continue;
+          Vector3.Distance(scarecrow.transform.position, validLoc.Position);
+        if (myDist > validLoc.ClosestDistance) continue;
         // record this scarecrow as the new closest one
-        validLoc.closestWatcher = myWatcher;
-        validLoc.closestDistance = myDist;
+        validLoc.ClosestWatcher = myWatcher;
+        validLoc.ClosestDistance = myDist;
       }
       return true;
     }
@@ -322,9 +329,9 @@ public class ScarecrowWrangler : RustPlugin
     foreach (var validLoc in _validLocations)
     {
       // if this scarecrow is recorded as the closest one, ignore location
-      if (validLoc.closestWatcher == myWatcher2) continue;
+      if (validLoc.ClosestWatcher == myWatcher2) continue;
       // also ignore if closest scarecrow is too close
-      if (validLoc.closestDistance < 25.0f) continue;
+      if (validLoc.ClosestDistance < 25.0f) continue;
       // if no best location recorded, choose validLoc as initial candidate
       if (null == bestLoc)
       {
@@ -332,7 +339,7 @@ public class ScarecrowWrangler : RustPlugin
         continue;
       }
       // if validLoc is a better candidate, record it as bestLoc
-      if (validLoc.closestDistance > bestLoc.closestDistance)
+      if (validLoc.ClosestDistance > bestLoc.ClosestDistance)
       {
         bestLoc = validLoc;
       }
@@ -353,13 +360,13 @@ public class ScarecrowWrangler : RustPlugin
       return false;
     }
 
-    Puts($"Relocating scarecrow {Print(scarecrow)} to known-good location {Print(bestLoc.position)} with distance {bestLoc.closestDistance} to closest scarecrow");
-    Relocate(scarecrow, bestLoc.position, quiet);
+    Puts($"Relocating scarecrow {Print(scarecrow)} to known-good location {Print(bestLoc.Position)} with distance {bestLoc.ClosestDistance} to closest scarecrow");
+    Relocate(scarecrow, bestLoc.Position, quiet);
     // record scarecrow as zero distance from bestLoc
     // this prevents multiple scarecrows from getting teleported there if they
     //  spawn around the same time
-    bestLoc.closestDistance = 0.0f;
-    bestLoc.closestWatcher = myWatcher2;
+    bestLoc.ClosestDistance = 0.0f;
+    bestLoc.ClosestWatcher = myWatcher2;
     return true;
   }
 
