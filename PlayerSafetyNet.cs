@@ -7,7 +7,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Player Safety Net", "HunterZ", "0.0.5")]
+[Info("Player Safety Net", "HunterZ", "0.0.6")]
 public class PlayerSafetyNet : RustPlugin
 {
   #region Data
@@ -62,6 +62,8 @@ public class PlayerSafetyNet : RustPlugin
 
   #region Helpers
 
+  private const float MinSelfHitDistance = 0.001f;
+
   // return whether a raycast is of interest
   private (bool, Collider) ProcessHit(
     RaycastHit hit, bool up, Collider startCollider)
@@ -69,9 +71,15 @@ public class PlayerSafetyNet : RustPlugin
     var collider = hit.collider;
     if (!collider) return (false, null);
 
-    if (collider == startCollider)
+    // special case: ignore bounces back onto the starting collider
+    // this prevents scientists from sticking to the ceiling on large oilrig lol
+    //
+    // NOTE: the distance limit seems needed to allow stuff to bounce to the top
+    //  of a collider that has another one immediately on top of it, which is
+    //  usually preferable to leaving it untouched
+    if (collider == startCollider && hit.distance < MinSelfHitDistance)
     {
-      // PrintWarning($"Ignoring {(up ? "upward" : "downward")} hit on startCollider={startCollider}@{startCollider.transform.position}");
+      // PrintWarning($"Ignoring {(up ? "upward" : "downward")} hit on startCollider={startCollider}@{startCollider.transform.position} because hitDistance={hit.distance} is less than minDistance={MinSelfHitDistance}");
       return (false, startCollider);
     }
 
@@ -97,9 +105,8 @@ public class PlayerSafetyNet : RustPlugin
       return (false, collider);
     }
 
-    // try to ignore any entities that could be a corpse or its source -
-    //  otherwise oil rig scientists tend to do sick flips, fly up and stick to
-    //  ceilings, etc. for some reason lol
+    // try to ignore any entities that could be a corpse or its source
+    // this prevents v2 scientists from doing sick flips when they die lol
     var cEntity = collider.ToBaseEntity();
     if (!cEntity) return (true, collider);
 
