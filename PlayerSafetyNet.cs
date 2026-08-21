@@ -1,5 +1,4 @@
 using Newtonsoft.Json;
-using Rust.Ai.Gen2;
 using Rust;
 using System.Collections.Generic;
 using System;
@@ -8,7 +7,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Player Safety Net", "HunterZ", "0.0.4")]
+[Info("Player Safety Net", "HunterZ", "0.0.5")]
 public class PlayerSafetyNet : RustPlugin
 {
   #region Data
@@ -64,10 +63,17 @@ public class PlayerSafetyNet : RustPlugin
   #region Helpers
 
   // return whether a raycast is of interest
-  private bool ProcessHit(RaycastHit hit, bool up)
+  private (bool, Collider) ProcessHit(
+    RaycastHit hit, bool up, Collider startCollider)
   {
     var collider = hit.collider;
-    if (!collider) return false;
+    if (!collider) return (false, null);
+
+    if (collider == startCollider)
+    {
+      // PrintWarning($"Ignoring {(up ? "upward" : "downward")} hit on startCollider={startCollider}@{startCollider.transform.position}");
+      return (false, startCollider);
+    }
 
     switch (up)
     {
@@ -79,7 +85,7 @@ public class PlayerSafetyNet : RustPlugin
       //  there's no point doing it here as well
       case false when TerrainMeta.Collision.GetIgnore(hit):
       {
-        return false;
+        return (false, collider);
       }
     }
 
@@ -88,59 +94,71 @@ public class PlayerSafetyNet : RustPlugin
     if (colliderName.Length > 0 &&
         colliderName is "Add_To_Height" or "Collider" or "junkpile_base")
     {
-      return false;
+      return (false, collider);
     }
 
     // try to ignore any entities that could be a corpse or its source -
     //  otherwise oil rig scientists tend to do sick flips, fly up and stick to
     //  ceilings, etc. for some reason lol
     var cEntity = collider.ToBaseEntity();
-    return !cEntity ||
-           (!cEntity.HasTrait(BaseEntity.TraitFlag.Alive) &&
-            cEntity is not (BaseCombatEntity { IsNpc: true }
-              or BaseCorpse or RidableHorse));
+    if (!cEntity) return (true, collider);
+
+    var useEntity =
+      !cEntity ||                                         // use non-Entity
+      !cEntity.HasTrait(BaseEntity.TraitFlag.Alive) &&  // ignore living
+      cEntity is not BaseCombatEntity { IsNpc: true }     // ignore NPCs
+        and not BaseCorpse                                // ignore corpses
+        and not RidableHorse;                             // ignore horses
+    return (useEntity, collider);
   }
 
   // get Y coordinate of appropriate prefab, terrain, or world bound that would
   //  stop movement in the given direction from the given position
   //
   // returns null on invalid maxDistance or appropriate height not found
-  private float? GetTerminalY(Vector3 position, float maxDistance, bool up)
+  private (float?, Collider) GetTerminalY(
+    Vector3 position, float maxDistance, bool up, Collider startCollider)
   {
     var direction = up ? Vector3.up : Vector3.down;
     var cDist = MaxDist;
     float? cY = null;
+    var cCollider = startCollider;
 
     // optimization: abort if distance is non-positive
     if (maxDistance <= 0)
     {
-      return null;
+      return (null, null);
     }
 
     var hitCount = Physics.RaycastNonAlloc(
       position, direction, _raycastHits, maxDistance, SolidLayerMask);
     if (hitCount >= _raycastHits.Length)
     {
-      PrintWarning($"GetWorldDistanceAndY(): Raycast hit count at or above configured maximum ({hitCount}/{_raycastHits.Length})");
+      PrintWarning($"GetTerminalY(): Raycast hit count at or above configured maximum ({hitCount}/{_raycastHits.Length})");
     }
 
     for (var i = 0; i < hitCount; ++i)
     {
       var hit = _raycastHits[i];
-      if (hit.distance >= cDist || !ProcessHit(hit, up)) continue;
+      if (hit.distance >= cDist) continue;
+      var (use, collider) = ProcessHit(hit, up, startCollider);
+      if (!use) continue;
       // best match so far; record it as a candidate
       cDist = hit.distance;
       cY = position.y + cDist * direction.y;
+      cCollider = collider;
     }
 
-    return cY;
+    return (cY, cCollider);
   }
 
-  private float GetClosestSolidAbove(Vector3 position) =>
-    GetTerminalY(position, WorldTop - position.y, true) ?? WorldTop;
+  private (float?, Collider) GetClosestSolidAbove(
+    Vector3 position, Collider startCollider) =>
+    GetTerminalY(position, WorldTop - position.y, true, startCollider);
 
-  private float? GetClosestSolidBelow(Vector3 position) =>
-    GetTerminalY(position, -WorldBottom + position.y, false);
+  private (float?, Collider) GetClosestSolidBelow(
+    Vector3 position, Collider startCollider) =>
+    GetTerminalY(position, -WorldBottom + position.y, false, startCollider);
 
   // use raycasts to simulate bouncing something from the given position off of
   //  a suitable ceiling (including top of the world), then letting it fall back
@@ -160,10 +178,12 @@ public class PlayerSafetyNet : RustPlugin
     for (var i = 0; i < 2; ++i)
     {
       // find ceiling or top of world above position
-      var ceilingY = GetClosestSolidAbove(position);
+      var (upY, upCollider) = GetClosestSolidAbove(position, null);
+      var ceilingY = upY ?? WorldTop;
       var ceilingPos = new Vector3(position.x, ceilingY, position.z);
       // find closest useful floor/terrain below ceiling
-      if (GetClosestSolidBelow(ceilingPos) is { } floorY && floorY <= ceilingY)
+      var (floorY, downCollider) = GetClosestSolidBelow(ceilingPos, upCollider);
+      if (floorY <= ceilingY && downCollider)
       {
         // return floor if above original position, else null
         return floorY > originalY ? floorY : null;
@@ -539,7 +559,7 @@ public class PlayerSafetyNet : RustPlugin
     public bool BounceHelicopterDebris { get; set; } = true;
 
     [JsonProperty(PropertyName = "Bounce HorseCorpse entities on spawn")]
-    public bool BounceHorseCorpse { get; set; } = true; //= false;
+    public bool BounceHorseCorpse { get; set; } = false;
 
     [JsonProperty(PropertyName = "Bounce LootableCorpse entities on spawn")]
     public bool BounceLootableCorpse { get; set; } = true;
@@ -556,7 +576,7 @@ public class PlayerSafetyNet : RustPlugin
     [JsonProperty(PropertyName = "Suppress bounce for entity prefabs")]
     public SortedSet<string> BounceIgnorePrefabs { get; set; } = new()
     {
-      // "item_drop_buoyant",
+      "item_drop_buoyant"
       // "player_corpse"
     };
 
