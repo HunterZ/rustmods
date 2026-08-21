@@ -4,10 +4,11 @@ using System.Collections.Generic;
 using System;
 using System.Text;
 using UnityEngine;
+using Random = Oxide.Core.Random;
 
 namespace Oxide.Plugins;
 
-[Info("Player Safety Net", "HunterZ", "0.0.6")]
+[Info("Player Safety Net", "HunterZ", "1.0.1")]
 public class PlayerSafetyNet : RustPlugin
 {
   #region Data
@@ -110,14 +111,18 @@ public class PlayerSafetyNet : RustPlugin
     var cEntity = collider.ToBaseEntity();
     if (!cEntity) return (true, collider);
 
+    // don't bounce things off of corpses, or off of the bottoms of containers
     var useEntity =
-      !cEntity ||                                         // use non-Entity
-      !cEntity.HasTrait(BaseEntity.TraitFlag.Alive) &&  // ignore living
-      cEntity is not BaseCombatEntity { IsNpc: true }     // ignore NPCs
-        and not BaseCorpse                                // ignore corpses
-        and not RidableHorse;                             // ignore horses
+      !LivingOrCorpseEntity(cEntity) && !(up && cEntity is LootContainer);
     return (useEntity, collider);
   }
+
+  private static bool LivingOrCorpseEntity(BaseEntity entity) =>
+    entity
+      .HasTrait(BaseEntity.TraitFlag.Alive) ||
+    entity
+      is BaseCombatEntity { IsNpc: true }
+      or BaseCorpse or RidableHorse or ServerGib;
 
   // get Y coordinate of appropriate prefab, terrain, or world bound that would
   //  stop movement in the given direction from the given position
@@ -266,7 +271,11 @@ public class PlayerSafetyNet : RustPlugin
   private void BounceEntity<T>(T entity) where T : BaseCombatEntity
   {
     if (!entity) return;
-    var entitySignature = $"{entity.GetType()}:{entity.ShortPrefabName}";
+    _sb
+      .Clear().Append(entity.GetType()).Append(':')
+      .Append(entity.ShortPrefabName);
+    var entitySignature = _sb.ToString();
+    _sb.Clear();
     if (entity.HasParent() ||
         _config.BounceIgnorePrefabs.Contains(entity.PrefabName))
     {
@@ -286,7 +295,8 @@ public class PlayerSafetyNet : RustPlugin
       //  interpolation would perform extra heap allocations when converting
       //  numeric primitive values to string representations
       _sb
-        .Clear().Append("Moving ").Append(entitySignature).Append(" at ")
+        .Clear().Append("Moving ").Append(entitySignature).Append('[')
+        .Append(entity.net?.ID.Value ?? 0).Append(']').Append(" at ")
         .AppendPosition(position).Append(" to new Y=").Append(newY).Append(" (")
         .Append(newY - position.y).Append(')');
       Puts(_sb.ToString());
@@ -517,7 +527,7 @@ public class PlayerSafetyNet : RustPlugin
   private void OnEntitySpawned(HelicopterDebris helicopterDebris)
   {
     if (!_config.BounceHelicopterDebris) return;
-    NextTick(() => BounceEntity(helicopterDebris));
+    timer.Once(Random.Range(0.5f, 1.5f), () => BounceEntity(helicopterDebris));
   }
 
   private void OnEntitySpawned(HorseCorpse horseCorpse)
