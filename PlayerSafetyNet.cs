@@ -8,7 +8,7 @@ using Random = Oxide.Core.Random;
 
 namespace Oxide.Plugins;
 
-[Info("Player Safety Net", "HunterZ", "1.0.2")]
+[Info("Player Safety Net", "HunterZ", "1.0.3")]
 public class PlayerSafetyNet : RustPlugin
 {
   #region Data
@@ -33,6 +33,8 @@ public class PlayerSafetyNet : RustPlugin
   private readonly StringBuilder _sb = new();
   private const string OnPlayerDeathKey = "OnPlayerDeath";
   private const string CanDropActiveItemKey = "CanDropActiveItem";
+
+  private string _permission;
 
   private enum StatColumn
   {
@@ -319,6 +321,9 @@ public class PlayerSafetyNet : RustPlugin
     return null;
   }
 
+  private bool HasPermission(BasePlayer player) =>
+    permission.UserHasPermission(player.UserIDString, _permission);
+
   #endregion
 
   #region Oxide
@@ -380,6 +385,9 @@ public class PlayerSafetyNet : RustPlugin
     {
       Unsubscribe(nameof(OnEntitySpawned));
     }
+
+    _permission = $"{Name.ToLower()}.report";
+    permission.RegisterPermission(_permission, this);
   }
 
   private void OnServerInitialized()
@@ -412,11 +420,15 @@ public class PlayerSafetyNet : RustPlugin
   [ConsoleCommand("psn.report")]
   private void CmdReport(ConsoleSystem.Arg arg)
   {
+    if (arg is null) return;
+    var player = arg.Player();
+    if (player && !HasPermission(player)) return;
+
     _sb.Clear().Append(Name).Append(" statistics:");
     if (_statsIndexes.IsEmpty())
     {
       _sb.AppendLine(" [none yet]");
-      Puts(_sb.ToString());
+      arg.ReplyWith(_sb.ToString());
       _sb.Clear();
       return;
     }
@@ -448,7 +460,7 @@ public class PlayerSafetyNet : RustPlugin
     }
 
     _sb.AppendLine();
-    Puts(_sb.ToString());
+    arg.ReplyWith(_sb.ToString());
     _sb.Clear();
   }
 
