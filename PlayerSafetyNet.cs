@@ -8,7 +8,7 @@ using Random = Oxide.Core.Random;
 
 namespace Oxide.Plugins;
 
-[Info("Player Safety Net", "HunterZ", "1.0.1")]
+[Info("Player Safety Net", "HunterZ", "1.0.2")]
 public class PlayerSafetyNet : RustPlugin
 {
   #region Data
@@ -271,13 +271,12 @@ public class PlayerSafetyNet : RustPlugin
   private void BounceEntity<T>(T entity) where T : BaseCombatEntity
   {
     if (!entity) return;
+    var prefabName = entity.ShortPrefabName;
     _sb
-      .Clear().Append(entity.GetType()).Append(':')
-      .Append(entity.ShortPrefabName);
+      .Clear().Append(entity.GetType()).Append(':').Append(prefabName);
     var entitySignature = _sb.ToString();
     _sb.Clear();
-    if (entity.HasParent() ||
-        _config.BounceIgnorePrefabs.Contains(entity.PrefabName))
+    if (entity.HasParent() || _config.BounceIgnorePrefabs.Contains(prefabName))
     {
       RecordIgnored(entitySignature);
       return;
@@ -288,8 +287,7 @@ public class PlayerSafetyNet : RustPlugin
       RecordUnmoved(entitySignature);
       return;
     }
-    if (_config.BounceLog &&
-        !_config.LogIgnorePrefabs.Contains(entity.PrefabName))
+    if (_config.BounceLog && !_config.LogIgnorePrefabs.Contains(prefabName))
     {
       // use StringBuilder scratchpad to build bounce logs, because string
       //  interpolation would perform extra heap allocations when converting
