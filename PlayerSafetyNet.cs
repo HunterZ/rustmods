@@ -8,7 +8,7 @@ using Random = Oxide.Core.Random;
 
 namespace Oxide.Plugins;
 
-[Info("Player Safety Net", "HunterZ", "1.0.3")]
+[Info("Player Safety Net", "HunterZ", "1.1.0")]
 public class PlayerSafetyNet : RustPlugin
 {
   #region Data
@@ -69,12 +69,13 @@ public class PlayerSafetyNet : RustPlugin
 
   // return whether a raycast is of interest
   private (bool, Collider) ProcessHit(
-    RaycastHit hit, bool up, Collider startCollider)
+    RaycastHit hit, bool up, Collider startCollider,
+    BaseCombatEntity startEntity)
   {
     var collider = hit.collider;
     if (!collider) return (false, null);
 
-    // special case: ignore bounces back onto the starting collider
+    // ignore bounces back onto the starting collider
     // this prevents scientists from sticking to the ceiling on large oilrig lol
     //
     // NOTE: the distance limit seems needed to allow stuff to bounce to the top
@@ -83,7 +84,17 @@ public class PlayerSafetyNet : RustPlugin
     if (collider == startCollider && hit.distance < MinSelfHitDistance)
     {
       // PrintWarning($"Ignoring {(up ? "upward" : "downward")} hit on startCollider={startCollider}@{startCollider.transform.position} because hitDistance={hit.distance} is less than minDistance={MinSelfHitDistance}");
-      return (false, startCollider);
+      return (false, collider);
+    }
+
+    // ignore bounces back onto the starting entity or its corpse parent
+    // this prevents v2 scientists from doing sick flips when they die, loot
+    //  containers getting moved on top of themselves, etc.
+    BaseEntity cEntity = null;
+    if (startEntity)
+    {
+      cEntity = collider.ToBaseEntity();
+      if (SameOrCorpseOrigin(cEntity, startEntity)) return (false, collider);
     }
 
     switch (up)
@@ -108,30 +119,35 @@ public class PlayerSafetyNet : RustPlugin
       return (false, collider);
     }
 
-    // try to ignore any entities that could be a corpse or its source
-    // this prevents v2 scientists from doing sick flips when they die lol
-    var cEntity = collider.ToBaseEntity();
-    if (!cEntity) return (true, collider);
-
-    // don't bounce things off of corpses, or off of the bottoms of containers
-    var useEntity =
-      !LivingOrCorpseEntity(cEntity) && !(up && cEntity is LootContainer);
-    return (useEntity, collider);
+    // don't bounce things off the bottom of living entities or containers
+    if (!up) return (true, collider);
+    cEntity ??= collider.ToBaseEntity();
+    return cEntity ? (!IgnoredBottom(cEntity), collider) : (true, collider);
   }
 
-  private static bool LivingOrCorpseEntity(BaseEntity entity) =>
+  // return whether source entity is candidate entity or its corpse
+  private static bool SameOrCorpseOrigin(
+    BaseEntity cEntity, BaseCombatEntity sEntity) =>
+    cEntity && sEntity &&
+    (cEntity == sEntity ||
+     sEntity is BaseCorpse corpse && corpse.parentEnt == cEntity);
+
+  // return whether candidate entity is something whose bottom other entities
+  //  should be allowed to bounce up through
+  private static bool IgnoredBottom(BaseEntity entity) =>
     entity
       .HasTrait(BaseEntity.TraitFlag.Alive) ||
     entity
       is BaseCombatEntity { IsNpc: true }
-      or BaseCorpse or RidableHorse or ServerGib;
+      or BaseCorpse or LootContainer or ServerGib;
 
   // get Y coordinate of appropriate prefab, terrain, or world bound that would
   //  stop movement in the given direction from the given position
   //
   // returns null on invalid maxDistance or appropriate height not found
   private (float?, Collider) GetTerminalY(
-    Vector3 position, float maxDistance, bool up, Collider startCollider)
+    Vector3 position, float maxDistance, bool up, Collider startCollider,
+    BaseCombatEntity startEntity)
   {
     var direction = up ? Vector3.up : Vector3.down;
     var cDist = MaxDist;
@@ -155,7 +171,7 @@ public class PlayerSafetyNet : RustPlugin
     {
       var hit = _raycastHits[i];
       if (hit.distance >= cDist) continue;
-      var (use, collider) = ProcessHit(hit, up, startCollider);
+      var (use, collider) = ProcessHit(hit, up, startCollider, startEntity);
       if (!use) continue;
       // best match so far; record it as a candidate
       cDist = hit.distance;
@@ -167,12 +183,14 @@ public class PlayerSafetyNet : RustPlugin
   }
 
   private (float?, Collider) GetClosestSolidAbove(
-    Vector3 position, Collider startCollider) =>
-    GetTerminalY(position, WorldTop - position.y, true, startCollider);
+    Vector3 position, Collider startCollider, BaseCombatEntity startEntity) =>
+    GetTerminalY(
+      position, WorldTop - position.y, true, startCollider, startEntity);
 
   private (float?, Collider) GetClosestSolidBelow(
-    Vector3 position, Collider startCollider) =>
-    GetTerminalY(position, -WorldBottom + position.y, false, startCollider);
+    Vector3 position, Collider startCollider, BaseCombatEntity startEntity) =>
+    GetTerminalY(
+      position, -WorldBottom + position.y, false, startCollider, startEntity);
 
   // use raycasts to simulate bouncing something from the given position off of
   //  a suitable ceiling (including top of the world), then letting it fall back
@@ -180,8 +198,11 @@ public class PlayerSafetyNet : RustPlugin
   //
   // if a suitable floor was found, and it is above the given position, return
   //  its height; else return null
-  private float? ShouldMove(Vector3 position)
+  private float? ShouldMove(BaseCombatEntity entity)
   {
+    if (!entity) return null;
+    var position = entity.transform.position;
+
     // abort if in a holiday dungeon etc. for now
     // NOTE: need to allow < WorldBottom because kill check happens late
     if (position.y >= WorldTop) return null;
@@ -192,11 +213,13 @@ public class PlayerSafetyNet : RustPlugin
     for (var i = 0; i < 2; ++i)
     {
       // find ceiling or top of world above position
-      var (upY, upCollider) = GetClosestSolidAbove(position, null);
+      var (upY, upCollider) = GetClosestSolidAbove(
+        position, entity.GetComponent<Collider>(), entity);
       var ceilingY = upY ?? WorldTop;
       var ceilingPos = new Vector3(position.x, ceilingY, position.z);
       // find closest useful floor/terrain below ceiling
-      var (floorY, downCollider) = GetClosestSolidBelow(ceilingPos, upCollider);
+      var (floorY, downCollider) = GetClosestSolidBelow(
+        ceilingPos, upCollider, entity);
       if (floorY <= ceilingY && downCollider)
       {
         // return floor if above original position, else null
@@ -284,7 +307,7 @@ public class PlayerSafetyNet : RustPlugin
       return;
     }
     var position = entity.transform.position;
-    if (ShouldMove(position) is not { } newY)
+    if (ShouldMove(entity) is not { } newY)
     {
       RecordUnmoved(entitySignature);
       return;
@@ -377,11 +400,14 @@ public class PlayerSafetyNet : RustPlugin
     }
     if (!_config.BounceBaseCorpse &&
         !_config.BounceDroppedItemContainer &&
+        !_config.BounceHackableLockedCrate &&
         !_config.BounceHelicopterDebris &&
         !_config.BounceHorseCorpse &&
+        !_config.BounceLockedByEntCrate &&
         !_config.BounceLootableCorpse &&
         !_config.BounceNpcPlayerCorpse &&
-        !_config.BouncePlayerCorpse)
+        !_config.BouncePlayerCorpse &&
+        !_config.BounceTimedUnlootableCrate)
     {
       Unsubscribe(nameof(OnEntitySpawned));
     }
@@ -472,7 +498,7 @@ public class PlayerSafetyNet : RustPlugin
       return null;
     }
     var position = player.transform.position;
-    if (ShouldMove(position) is not { } newY)
+    if (ShouldMove(player) is not { } newY)
     {
       RecordUnmoved(OnPlayerDeathKey);
       return null;
@@ -504,7 +530,7 @@ public class PlayerSafetyNet : RustPlugin
       return null;
     }
     var position = player.transform.position;
-    if (ShouldMove(position) is null)
+    if (ShouldMove(player) is null)
     {
       RecordUnmoved(CanDropActiveItemKey);
       return null;
@@ -534,6 +560,12 @@ public class PlayerSafetyNet : RustPlugin
     NextTick(() => BounceEntity(droppedItemContainer));
   }
 
+  private void OnEntitySpawned(HackableLockedCrate hackableLockedCrate)
+  {
+    if (!_config.BounceHackableLockedCrate) return;
+    NextTick(() => BounceEntity(hackableLockedCrate));
+  }
+
   private void OnEntitySpawned(HelicopterDebris helicopterDebris)
   {
     if (!_config.BounceHelicopterDebris) return;
@@ -544,6 +576,12 @@ public class PlayerSafetyNet : RustPlugin
   {
     if (!_config.BounceHorseCorpse) return;
     NextTick(() => BounceEntity(horseCorpse));
+  }
+
+  private void OnEntitySpawned(LockedByEntCrate lockedByEntCrate)
+  {
+    if (!_config.BounceLockedByEntCrate) return;
+    timer.Once(Random.Range(0.5f, 1.5f), () => BounceEntity(lockedByEntCrate));
   }
 
   private void OnEntitySpawned(LootableCorpse lootableCorpse)
@@ -564,6 +602,13 @@ public class PlayerSafetyNet : RustPlugin
     NextTick(() => BounceEntity(playerCorpse));
   }
 
+  private void OnEntitySpawned(TimedUnlootableCrate timedUnlootableCrate)
+  {
+    if (!_config.BounceTimedUnlootableCrate) return;
+    timer.Once(
+      Random.Range(0.5f, 1.5f), () => BounceEntity(timedUnlootableCrate));
+  }
+
   #endregion
 
   #region Config
@@ -582,11 +627,17 @@ public class PlayerSafetyNet : RustPlugin
     [JsonProperty(PropertyName = "Bounce DroppedItemContainer entities on spawn")]
     public bool BounceDroppedItemContainer { get; set; } = true;
 
+    [JsonProperty(PropertyName = "Bounce HackableLockedCrate entities on spawn")]
+    public bool BounceHackableLockedCrate { get; set; } = false;
+
     [JsonProperty(PropertyName = "Bounce HelicopterDebris entities on spawn")]
     public bool BounceHelicopterDebris { get; set; } = true;
 
     [JsonProperty(PropertyName = "Bounce HorseCorpse entities on spawn")]
     public bool BounceHorseCorpse { get; set; } = false;
+
+    [JsonProperty(PropertyName = "Bounce LockedByEntCrate entities on spawn")]
+    public bool BounceLockedByEntCrate { get; set; } = true;
 
     [JsonProperty(PropertyName = "Bounce LootableCorpse entities on spawn")]
     public bool BounceLootableCorpse { get; set; } = true;
@@ -596,6 +647,9 @@ public class PlayerSafetyNet : RustPlugin
 
     [JsonProperty(PropertyName = "Bounce PlayerCorpse entities on spawn")]
     public bool BouncePlayerCorpse { get; set; } = true;
+
+    [JsonProperty(PropertyName = "Bounce TimedUnlootableCrate entities on spawn")]
+    public bool BounceTimedUnlootableCrate { get; set; } = false;
 
     [JsonProperty(PropertyName = "Log bounces")]
     public bool BounceLog { get; set; } = true;
