@@ -22,7 +22,8 @@ public class DynamicPVP : RustPlugin
 {
   #region Fields
 
-  [PluginReference] Plugin Backpacks, BotReSpawn, TruePVE, ZoneManager;
+  [PluginReference]
+  private readonly Plugin Backpacks, BotReSpawn, TruePVE, ZoneManager;
 
   private const string PermissionAdmin = "dynamicpvp.admin";
   private const string PrefabLargeOilRig =
@@ -79,16 +80,16 @@ public class DynamicPVP : RustPlugin
 
   private sealed class LeftZone : Pool.IPooled
   {
-    public string zoneId;
-    public BaseEvent baseEvent;
-    public Timer zoneTimer;
+    public string ZoneId;
+    public BaseEvent BaseEvent;
+    public Timer ZoneTimer;
 
     private void Reset()
     {
-      zoneId = null;
-      baseEvent = null;
-      zoneTimer?.Destroy();
-      zoneTimer = null;
+      ZoneId = null;
+      BaseEvent = null;
+      ZoneTimer?.Destroy();
+      ZoneTimer = null;
     }
 
     public void EnterPool() => Reset();
@@ -512,7 +513,7 @@ public class DynamicPVP : RustPlugin
     var added = false;
     if (_pvpDelays.TryGetValue(player.userID, out var leftZone))
     {
-      leftZone.zoneTimer?.Destroy();
+      leftZone.ZoneTimer?.Destroy();
     }
     else
     {
@@ -521,8 +522,8 @@ public class DynamicPVP : RustPlugin
       _pvpDelays.Add(player.userID, leftZone);
     }
 
-    leftZone.zoneId = zoneId;
-    leftZone.baseEvent = baseEvent;
+    leftZone.ZoneId = zoneId;
+    leftZone.BaseEvent = baseEvent;
     if (added)
     {
       CheckHooks(HookCheckReasons.DelayAdded, baseEvent);
@@ -537,7 +538,7 @@ public class DynamicPVP : RustPlugin
     var playerId = player.userID.Get();
     if (!_pvpDelays.Remove(playerId, out var leftZone)) return false;
     Interface.CallHook("OnPlayerRemovedFromPVPDelay",
-      playerId, leftZone.zoneId, player);
+      playerId, leftZone.ZoneId, player);
     CheckHooks(HookCheckReasons.DelayRemoved, null); // baseEvent not needed
     Pool.Free(ref leftZone);
     return true;
@@ -580,20 +581,20 @@ public class DynamicPVP : RustPlugin
     //  in PVP delay because a zone expired?
     foreach (var leftZone in _pvpDelays.Values)
     {
-      if (leftZone.baseEvent == null ||
-          leftZone.baseEvent.CommandList.Count <= 0)
+      if (leftZone.BaseEvent == null ||
+          leftZone.BaseEvent.CommandList.Count <= 0)
       {
         continue;
       }
 
-      if (leftZone.baseEvent.CommandWorksForPVPDelay ||
-          _activeDynamicZones.ContainsValue(leftZone.baseEvent))
+      if (leftZone.BaseEvent.CommandWorksForPVPDelay ||
+          _activeDynamicZones.ContainsValue(leftZone.BaseEvent))
       {
         Pool.FreeUnmanaged(ref checkedEvents);
         return true;
       }
 
-      checkedEvents.Add(leftZone.baseEvent);
+      checkedEvents.Add(leftZone.BaseEvent);
     }
 
     foreach (var baseEvent in _activeDynamicZones.Values)
@@ -2862,8 +2863,8 @@ public class DynamicPVP : RustPlugin
     }
 
     if (_pvpDelays.TryGetValue(player.userID, out var leftZone) &&
-        true == leftZone.baseEvent?.CommandWorksForPVPDelay &&
-        IsBlockedCommand(leftZone.baseEvent, command, isChat))
+        true == leftZone.BaseEvent?.CommandWorksForPVPDelay &&
+        IsBlockedCommand(leftZone.BaseEvent, command, isChat))
     {
       return false;
     }
@@ -2993,9 +2994,8 @@ public class DynamicPVP : RustPlugin
       return (deepSeaIsland.monumentNavMesh.transform, navMeshPosition, radius);
     }
 
-    var islandPosition = deepSeaIsland.transform.position;
-    islandPosition.y = 0;
-    return (deepSeaIsland.transform, islandPosition, 200.0f);
+    var transform = deepSeaIsland.transform;
+    return (transform, transform.position.XZ(), 200.0f);
   }
 
   private enum EventHeightStrategy
@@ -3003,7 +3003,7 @@ public class DynamicPVP : RustPlugin
     Entity,  // place event at entity's height
     Terrain, // place event on ground
     Zero     // place event at sea level
-  };
+  }
 
   private void HandleGeneralEvent(
     IGeneralEvent generalEvent,
@@ -3464,7 +3464,7 @@ public class DynamicPVP : RustPlugin
     if (_pvpDelays.TryGetValue(victim.userID, out var victimLeftZone))
     {
       if (pvpConfig.HasFlag(PvpDelayTypes.ZonePlayersCanDamageDelayedPlayers) &&
-          !string.IsNullOrEmpty(victimLeftZone.zoneId) &&
+          !string.IsNullOrEmpty(victimLeftZone.ZoneId) &&
           ZM_IsPlayerInZone(victimLeftZone, attacker))
       {
         //ZonePlayer attack DelayedPlayer
@@ -3473,7 +3473,7 @@ public class DynamicPVP : RustPlugin
       if (pvpConfig.HasFlag(
             PvpDelayTypes.DelayedPlayersCanDamageDelayedPlayers) &&
           _pvpDelays.TryGetValue(attacker.userID, out var attackerLeftZone) &&
-          victimLeftZone.zoneId == attackerLeftZone.zoneId)
+          victimLeftZone.ZoneId == attackerLeftZone.ZoneId)
       {
         //DelayedPlayer attack DelayedPlayer
         return true;
@@ -3482,7 +3482,7 @@ public class DynamicPVP : RustPlugin
     }
     if (_pvpDelays.TryGetValue(attacker.userID, out var attackerLeftZone2) &&
         pvpConfig.HasFlag(PvpDelayTypes.DelayedPlayersCanDamageZonePlayers) &&
-        !string.IsNullOrEmpty(attackerLeftZone2.zoneId) &&
+        !string.IsNullOrEmpty(attackerLeftZone2.ZoneId) &&
         ZM_IsPlayerInZone(attackerLeftZone2, victim))
     {
       //DelayedPlayer attack ZonePlayer
@@ -3612,7 +3612,7 @@ public class DynamicPVP : RustPlugin
       player, zoneId, baseEvent.PvpDelayTime);
 
     var leftZone = GetOrAddPVPDelay(player, zoneId, baseEvent);
-    leftZone.zoneTimer =
+    leftZone.ZoneTimer =
       timer.Once(baseEvent.PvpDelayTime, () => { TryRemovePVPDelay(player); });
     var playerID = player.userID.Get();
     Interface.CallHook("OnPlayerAddedToPVPDelay",
@@ -3658,7 +3658,7 @@ public class DynamicPVP : RustPlugin
 
   private bool ZM_IsPlayerInZone(LeftZone leftZone, BasePlayer player) =>
     Convert.ToBoolean(
-      ZoneManager.Call("IsPlayerInZone", leftZone.zoneId, player));
+      ZoneManager.Call("IsPlayerInZone", leftZone.ZoneId, player));
 
   private void ZM_GetPlayersInZone(string zoneId, List<BasePlayer> list) =>
     ZoneManager.Call("GetPlayersInZoneNoAlloc", zoneId, list);
@@ -3689,11 +3689,11 @@ public class DynamicPVP : RustPlugin
       if (deleteOnFailure) DeleteDynamicZone(zoneId);
       return;
     }
+    var parentTransform = parentEntity.transform;
+    var position = parentTransform.TransformPoint(parentZone.Center);
     var zoneTransform = zone.transform;
-    var position = parentEntity.transform.TransformPoint(parentZone.Center);
-    zoneTransform.SetParent(parentEntity.transform);
-    zoneTransform.rotation = parentEntity.transform.rotation;
-    zoneTransform.position = position;
+    zoneTransform.SetParent(parentTransform);
+    zoneTransform.SetPositionAndRotation(position, parentTransform.rotation);
     PrintDebug($"ParentEventToEntity(): Parented zoneId={zoneId} to parentEntity={parentEntity}.");
     // also parent any domes
     ParentDome(zoneId, position, parentEntity);
@@ -3899,7 +3899,7 @@ public class DynamicPVP : RustPlugin
 
   private string GetPlayerPVPDelayedZoneID(ulong playerId) =>
     _pvpDelays.TryGetValue(playerId, out var leftZone) ?
-      leftZone.zoneId : null;
+      leftZone.ZoneId : null;
 
   private string GetEventName(string zoneId) =>
     _activeDynamicZones.TryGetValue(zoneId, out var baseEvent) ?
@@ -4628,9 +4628,9 @@ public class DynamicPVP : RustPlugin
     [JsonProperty(PropertyName = "Block Restore Upon Death", Order = 13)]
     public bool BlockRestoreUponDeath { get; set; }
 
-    public abstract BaseDynamicZone GetDynamicZone();
+    internal abstract BaseDynamicZone GetDynamicZone();
 
-    public abstract string GetName();
+    internal abstract string GetName();
   }
 
   // dome features
@@ -4650,7 +4650,7 @@ public class DynamicPVP : RustPlugin
 
     // this is a temporary list to support migration from obsolete dome settings
     [JsonIgnore]
-    public static List<DomeEvent> DomeEventsToCheck { get; set; }
+    internal static List<DomeEvent> DomeEventsToCheck { get; set; }
 
     // self-register all instances for obsolete data migration check
     protected DomeEvent()
@@ -4660,7 +4660,7 @@ public class DynamicPVP : RustPlugin
       DomeEventsToCheck.Add(this);
     }
 
-    public static void Migrate()
+    internal static void Migrate()
     {
       if (null == DomeEventsToCheck)
       {
@@ -4711,7 +4711,7 @@ public class DynamicPVP : RustPlugin
     [JsonProperty(PropertyName = "Enable Purple Ring", Order = 29)]
     public bool PurpleRing { get; set; }
 
-    public bool DomeCreateAllowed(ISphereZone sphereZone) =>
+    internal bool DomeCreateAllowed(ISphereZone sphereZone) =>
       sphereZone?.Radius > 0f &&
       (Darkness > 0 || RedRing || GreenRing || BlueRing || PurpleRing);
   }
@@ -4742,13 +4742,13 @@ public class DynamicPVP : RustPlugin
     [JsonConverter(typeof(Vector3Converter))]
     public Vector3 TransformPosition { get; set; }
 
-    public override BaseDynamicZone GetDynamicZone() => DynamicZone;
+    internal override BaseDynamicZone GetDynamicZone() => DynamicZone;
 
     [JsonIgnore]
     public GeneralEventType GeneralEventType =>
       GeneralEventType.ExcavatorIgnition;
 
-    public override string GetName() =>
+    internal override string GetName() =>
       nameof(GeneralEventType.ExcavatorIgnition);
   }
 
@@ -4766,12 +4766,12 @@ public class DynamicPVP : RustPlugin
     [JsonConverter(typeof(Vector3Converter))]
     public Vector3 TransformPosition { get; set; }
 
-    public override BaseDynamicZone GetDynamicZone() => DynamicZone;
+    internal override BaseDynamicZone GetDynamicZone() => DynamicZone;
 
     [JsonIgnore]
-    public string EventName { get; set; }
+    internal string EventName { get; set; }
 
-    public override string GetName() => EventName;
+    internal override string GetName() => EventName;
   }
 
   // user-defined "auto" event
@@ -4791,12 +4791,12 @@ public class DynamicPVP : RustPlugin
     [JsonConverter(typeof(Vector3Converter))]
     public Vector3 Position { get; set; }
 
-    public override BaseDynamicZone GetDynamicZone() => DynamicZone;
+    internal override BaseDynamicZone GetDynamicZone() => DynamicZone;
 
     [JsonIgnore]
-    public string EventName { get; set; }
+    internal string EventName { get; set; }
 
-    public override string GetName() => EventName;
+    internal override string GetName() => EventName;
   }
 
   // base class for events that support a duration
@@ -4815,15 +4815,15 @@ public class DynamicPVP : RustPlugin
     [JsonProperty(PropertyName = "Dynamic PVP Zone Settings", Order = 65)]
     public SphereCubeDynamicZone DynamicZone { get; set; } = new();
 
-    public override BaseDynamicZone GetDynamicZone() => DynamicZone;
+    internal override BaseDynamicZone GetDynamicZone() => DynamicZone;
   }
 
   public class CustomTimedEvent : SphereCubeTimedEvent
   {
     [JsonIgnore]
-    public string EventName { get; set; }
+    internal string EventName { get; set; }
 
-    public override string GetName() => EventName;
+    internal override string GetName() => EventName;
   }
 
   public class BradleyEvent : SphereCubeTimedEvent, IGeneralEvent
@@ -4831,7 +4831,7 @@ public class DynamicPVP : RustPlugin
     [JsonIgnore]
     public GeneralEventType GeneralEventType => GeneralEventType.Bradley;
 
-    public override string GetName() => nameof(GeneralEventType.Bradley);
+    internal override string GetName() => nameof(GeneralEventType.Bradley);
   }
 
   public class HelicopterEvent : SphereCubeTimedEvent, IGeneralEvent
@@ -4839,7 +4839,7 @@ public class DynamicPVP : RustPlugin
     [JsonIgnore]
     public GeneralEventType GeneralEventType => GeneralEventType.Helicopter;
 
-    public override string GetName() => nameof(GeneralEventType.Helicopter);
+    internal override string GetName() => nameof(GeneralEventType.Helicopter);
   }
 
   public class SatelliteEvent : SphereCubeTimedEvent, IGeneralEvent
@@ -4847,7 +4847,7 @@ public class DynamicPVP : RustPlugin
     [JsonIgnore]
     public GeneralEventType GeneralEventType => GeneralEventType.Satellite;
 
-    public override string GetName() => nameof(GeneralEventType.Satellite);
+    internal override string GetName() => nameof(GeneralEventType.Satellite);
   }
 
   // Hackable Crate general event
@@ -4881,9 +4881,9 @@ public class DynamicPVP : RustPlugin
     [JsonIgnore]
     public GeneralEventType GeneralEventType => GeneralEventType.HackableCrate;
 
-    public override BaseDynamicZone GetDynamicZone() => DynamicZone;
+    internal override BaseDynamicZone GetDynamicZone() => DynamicZone;
 
-    public override string GetName() => nameof(GeneralEventType.HackableCrate);
+    internal override string GetName() => nameof(GeneralEventType.HackableCrate);
 
     public bool IsTimedDisabled()
     {
@@ -4907,7 +4907,7 @@ public class DynamicPVP : RustPlugin
     [JsonProperty(PropertyName = "Event Timer Starts When Looted", Order = 83)]
     public bool TimerStartWhenLooted { get; set; }
 
-    public override BaseDynamicZone GetDynamicZone() => DynamicZone;
+    internal override BaseDynamicZone GetDynamicZone() => DynamicZone;
 
     public bool IsTimedDisabled()
     {
@@ -4920,7 +4920,7 @@ public class DynamicPVP : RustPlugin
     [JsonIgnore]
     public GeneralEventType GeneralEventType => GeneralEventType.SupplySignal;
 
-    public override string GetName() => nameof(GeneralEventType.SupplySignal);
+    internal override string GetName() => nameof(GeneralEventType.SupplySignal);
   }
 
   public class TimedSupplyEvent : SupplyDropEvent, IGeneralEvent
@@ -4928,7 +4928,7 @@ public class DynamicPVP : RustPlugin
     [JsonIgnore]
     public GeneralEventType GeneralEventType => GeneralEventType.TimedSupply;
 
-    public override string GetName() => nameof(GeneralEventType.TimedSupply);
+    internal override string GetName() => nameof(GeneralEventType.TimedSupply);
   }
 
   // Cargo Ship general event
@@ -4957,12 +4957,12 @@ public class DynamicPVP : RustPlugin
       Center = new Vector3(0f, 21.6f, 6.6f)
     };
 
-    public override BaseDynamicZone GetDynamicZone() => DynamicZone;
+    internal override BaseDynamicZone GetDynamicZone() => DynamicZone;
 
     [JsonIgnore]
     public GeneralEventType GeneralEventType => GeneralEventType.CargoShip;
 
-    public override string GetName() => nameof(GeneralEventType.CargoShip);
+    internal override string GetName() => nameof(GeneralEventType.CargoShip);
   }
 
   // Deep Sea ghost ship general event
@@ -4979,12 +4979,12 @@ public class DynamicPVP : RustPlugin
     [JsonConverter(typeof(Vector3Converter))]
     public Vector3 TransformPosition { get; set; }
 
-    public override BaseDynamicZone GetDynamicZone() => DynamicZone;
+    internal override BaseDynamicZone GetDynamicZone() => DynamicZone;
 
     [JsonIgnore]
     public GeneralEventType GeneralEventType => GeneralEventType.GhostShip;
 
-    public override string GetName() => nameof(GeneralEventType.GhostShip);
+    internal override string GetName() => nameof(GeneralEventType.GhostShip);
   }
 
   // Deep Sea Island general event
@@ -4998,12 +4998,12 @@ public class DynamicPVP : RustPlugin
     [JsonConverter(typeof(Vector3Converter))]
     public Vector3 TransformPosition { get; set; }
 
-    public override BaseDynamicZone GetDynamicZone() => DynamicZone;
+    internal override BaseDynamicZone GetDynamicZone() => DynamicZone;
 
     [JsonIgnore]
     public GeneralEventType GeneralEventType => GeneralEventType.DeepSeaIsland;
 
-    public override string GetName() => nameof(GeneralEventType.DeepSeaIsland);
+    internal override string GetName() => nameof(GeneralEventType.DeepSeaIsland);
   }
 
   // Deep Sea island cannon general event
@@ -5020,12 +5020,12 @@ public class DynamicPVP : RustPlugin
     [JsonConverter(typeof(Vector3Converter))]
     public Vector3 TransformPosition { get; set; }
 
-    public override BaseDynamicZone GetDynamicZone() => DynamicZone;
+    internal override BaseDynamicZone GetDynamicZone() => DynamicZone;
 
     [JsonIgnore]
     public GeneralEventType GeneralEventType => GeneralEventType.IslandCannon;
 
-    public override string GetName() => nameof(GeneralEventType.IslandCannon);
+    internal override string GetName() => nameof(GeneralEventType.IslandCannon);
   }
 
   #region Interface
@@ -5082,7 +5082,7 @@ public class DynamicPVP : RustPlugin
 
     private string[] _zoneSettings;
 
-    public virtual string[] ZoneSettings(Transform transform = null) =>
+    internal virtual string[] ZoneSettings(Transform transform = null) =>
       _zoneSettings ??= GetZoneSettings();
 
     protected void GetBaseZoneSettings(List<string> zoneSettings)
@@ -5162,7 +5162,7 @@ public class DynamicPVP : RustPlugin
     [JsonProperty(PropertyName = "Fixed Rotation", Order = 303)]
     public bool FixedRotation { get; set; }
 
-    public override string[] ZoneSettings(Transform transform = null) =>
+    internal override string[] ZoneSettings(Transform transform = null) =>
       GetZoneSettings(transform);
 
     protected override string[] GetZoneSettings(Transform transform = null)
@@ -5205,7 +5205,7 @@ public class DynamicPVP : RustPlugin
     [JsonConverter(typeof(Vector3Converter))]
     public Vector3 Center { get; set; }
 
-    public override string[] ZoneSettings(Transform transform = null) =>
+    internal override string[] ZoneSettings(Transform transform = null) =>
       GetZoneSettings(transform);
 
     protected override string[] GetZoneSettings(Transform transform = null)
