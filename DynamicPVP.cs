@@ -5383,6 +5383,11 @@ public class DynamicPVP : RustPlugin
     {
       DomeBaseEvent.Migrate();
     }
+    else
+    {
+      // flush the data since we're not using it
+      DomeBaseEvent.DomeEventsToCheck?.Clear();
+    }
 
     if (_configData.Version <= new VersionNumber(5, 1, 0)
         && GetConfigValue(
