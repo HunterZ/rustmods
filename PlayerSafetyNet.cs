@@ -8,7 +8,7 @@ using Random = Oxide.Core.Random;
 
 namespace Oxide.Plugins;
 
-[Info("Player Safety Net", "HunterZ", "1.1.0")]
+[Info("Player Safety Net", "HunterZ", "1.1.1")]
 public class PlayerSafetyNet : RustPlugin
 {
   #region Data
@@ -406,8 +406,7 @@ public class PlayerSafetyNet : RustPlugin
         !_config.BounceLockedByEntCrate &&
         !_config.BounceLootableCorpse &&
         !_config.BounceNpcPlayerCorpse &&
-        !_config.BouncePlayerCorpse &&
-        !_config.BounceTimedUnlootableCrate)
+        !_config.BouncePlayerCorpse)
     {
       Unsubscribe(nameof(OnEntitySpawned));
     }
@@ -602,13 +601,6 @@ public class PlayerSafetyNet : RustPlugin
     NextTick(() => BounceEntity(playerCorpse));
   }
 
-  private void OnEntitySpawned(TimedUnlootableCrate timedUnlootableCrate)
-  {
-    if (!_config.BounceTimedUnlootableCrate) return;
-    timer.Once(
-      Random.Range(0.5f, 1.5f), () => BounceEntity(timedUnlootableCrate));
-  }
-
   #endregion
 
   #region Config
@@ -647,9 +639,6 @@ public class PlayerSafetyNet : RustPlugin
 
     [JsonProperty(PropertyName = "Bounce PlayerCorpse entities on spawn")]
     public bool BouncePlayerCorpse { get; set; } = true;
-
-    [JsonProperty(PropertyName = "Bounce TimedUnlootableCrate entities on spawn")]
-    public bool BounceTimedUnlootableCrate { get; set; } = false;
 
     [JsonProperty(PropertyName = "Log bounces")]
     public bool BounceLog { get; set; } = true;
