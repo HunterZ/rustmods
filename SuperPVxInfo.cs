@@ -12,7 +12,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Super PVx Info", "HunterZ", "1.12.0")]
+[Info("Super PVx Info", "HunterZ", "1.12.1")]
 [Description("Displays PvE/PvP/etc. status on player's HUD")]
 public class SuperPVxInfo : RustPlugin
 {
@@ -859,7 +859,7 @@ public class SuperPVxInfo : RustPlugin
   {
     if (!IsValidPlayer(player, true)) return;
     var watcher = GetPlayerWatcher(player);
-    if (null == watcher) return;
+    if (!watcher) return;
     if (state)
     {
       watcher.AddPvpDelay(type);
@@ -878,7 +878,7 @@ public class SuperPVxInfo : RustPlugin
   {
     if (!IsValidPlayer(player, true)) return;
     var watcher = GetPlayerWatcher(player);
-    if (null == watcher) return;
+    if (!watcher) return;
     if (state)
     {
       watcher.SetInPVxEventType(eventType);
@@ -893,6 +893,8 @@ public class SuperPVxInfo : RustPlugin
 
   #endregion PVP Plugin Utilities
 
+  #region Nivex Hook Handlers
+
   #region RaidableBases Hook Handlers
 
   // NOTE: Only need to include up to the last parameter that we actually use;
@@ -900,20 +902,17 @@ public class SuperPVxInfo : RustPlugin
 
   private void OnPlayerEnteredRaidableBase(
     BasePlayer player, Vector3 location, bool allowPVP, int mode, string id,
-    float _, float __, float loadTime, ulong ownerId, string baseName,
+    float _, float __, double loadTime, ulong ownerId, string baseName,
     DateTime spawnTime, DateTime despawnTime, float radius) =>
     NextTick(() => EnteredBase(
       player, allowPVP ? PVxType.PVP : PVxType.PVE, location, radius));
 
-  private void OnPlayerExitedRaidableBase(
-    BasePlayer player, Vector3 location, bool allowPVP, int mode, string id,
-    float _, float __, float loadTime, ulong ownerId, string baseName,
-    DateTime spawnTime, DateTime despawnTime, float radius) =>
+  private void OnPlayerExitedRaidableBase(BasePlayer player) =>
     NextTick(() => ExitedBase(player));
 
   private void OnRaidableBaseEnded(
     Vector3 location, int mode, bool allowPvP, string id, float _,
-    float __, float loadTime, ulong ownerId, BasePlayer owner,
+    float __, double loadTime, ulong ownerId, BasePlayer owner,
     List<BasePlayer> raiders, List<BasePlayer> intruders,
     List<BaseEntity> entities, string baseName, DateTime spawnDateTime,
     DateTime despawnDateTime, float protectionRadius) =>
@@ -932,18 +931,6 @@ public class SuperPVxInfo : RustPlugin
         ExitedBase(player, false);
       }
     });
-
-  // NOTE: Here we need to include enough parameters to disambiguate from
-  //  Abandoned Bases
-
-  private void OnPlayerPvpDelayStart(BasePlayer player, int _) =>
-    NextTick(() => SetPvpDelay(player, PvpDelayType.RaidableBases, true));
-
-  private void OnPlayerPvpDelayReset(BasePlayer player, int _) =>
-    NextTick(() => SetPvpDelay(player, PvpDelayType.RaidableBases, true));
-
-  private void OnPlayerPvpDelayExpired(BasePlayer player, int _) =>
-    NextTick(() => SetPvpDelay(player, PvpDelayType.RaidableBases, false));
 
   #endregion RaidableBases Hook Handlers
 
@@ -973,16 +960,30 @@ public class SuperPVxInfo : RustPlugin
       }
     });
 
-  private void OnPlayerPvpDelayStart(BasePlayer player, ulong _) =>
-    NextTick(() => SetPvpDelay(player, PvpDelayType.AbandonedBases, true));
-
-  private void OnPlayerPvpDelayReset(BasePlayer player, ulong _) =>
-    NextTick(() => SetPvpDelay(player, PvpDelayType.AbandonedBases, true));
-
-  private void OnPlayerPvpDelayExpiredII(BasePlayer player, ulong _) =>
-    NextTick(() => SetPvpDelay(player, PvpDelayType.AbandonedBases, false));
-
   #endregion AbandonedBases Hook Handlers
+
+  // NOTE: The same hook handlers can now be used for both Abandoned Bases and
+  //  Raidable Bases
+
+  private void OnPlayerPvpDelayStart(
+    BasePlayer player, ulong userId, string pluginName) => NextTick(() =>
+  {
+    if (!Enum.TryParse(pluginName, out PvpDelayType type)) return;
+    SetPvpDelay(player, type, true);
+  });
+
+  private void OnPlayerPvpDelayReset(
+    BasePlayer player, ulong userId, string pluginName) =>
+    OnPlayerPvpDelayStart(player, userId, pluginName);
+
+  private void OnPlayerPvpDelayExpired(
+    BasePlayer player, ulong userId, string pluginName) => NextTick(() =>
+  {
+    if (!Enum.TryParse(pluginName, out PvpDelayType type)) return;
+    SetPvpDelay(player, type, false);
+  });
+
+  #endregion Nivex Hook Handlers
 
   #region DangerousTreasures Hook Handlers
 
@@ -1221,7 +1222,7 @@ public class SuperPVxInfo : RustPlugin
     if (_configData.UISettings.TryGetValue(type, out var cuiSettings) &&
         cuiSettings.Enabled)
     {
-      var cuiJson = cuiSettings.Json;
+      var cuiJson = cuiSettings.GetJson();
       if (!string.IsNullOrEmpty(cuiJson))
       {
         CuiHelper.AddUi(player, cuiJson);
@@ -1341,54 +1342,45 @@ public class SuperPVxInfo : RustPlugin
     [JsonProperty(PropertyName = "Fade Out")]
     public float FadeOut { get; set; } = 0.25f;
 
-    private string _json = "";
-
     [JsonIgnore]
-    public string Json
+    private string _json;
+
+    public string GetJson()
     {
-      get
+      // populate cache only on first call
+      _json ??= new CuiElementContainer
       {
-        // generate JSON for a PVxType on first use, and cache it in _json
-        // ...unless this PVxType is disabled, in which case return the default
-        //  empty string
-        if (string.IsNullOrEmpty(_json))
         {
-          _json = new CuiElementContainer
-          {
-            {
-              new CuiPanel
-              {
-                Image = { Color = BackgroundColor, FadeIn = FadeIn },
-                RectTransform = {
-                  AnchorMin = MinAnchor, AnchorMax = MaxAnchor,
-                  OffsetMin = MinOffset, OffsetMax = MaxOffset
-                },
-                CursorEnabled = false,
-                FadeOut = FadeOut
-              },
-              Layer, UIName, UIName
+          new CuiPanel {
+            Image = { Color = BackgroundColor, FadeIn = FadeIn },
+            RectTransform = {
+              AnchorMin = MinAnchor, AnchorMax = MaxAnchor,
+              OffsetMin = MinOffset, OffsetMax = MaxOffset
             },
-            {
-              new CuiLabel
-              {
-                Text = {
-                  Text = Text,
-                  FontSize = TextSize,
-                  Align = TextAnchor.MiddleCenter,
-                  Color = TextColor,
-                  FadeIn = FadeIn
-                },
-                RectTransform = {
-                  AnchorMin = "0.05 0.05", AnchorMax = "0.95 0.95"
-                },
-                FadeOut = FadeOut
-              },
-              UIName, CuiHelper.GetGuid()
-            }
-          }.ToJson();
+            CursorEnabled = false,
+            FadeOut = FadeOut
+          },
+          Layer, UIName, UIName
+        },
+        {
+          new CuiLabel {
+            Text = {
+              Text = Text,
+              FontSize = TextSize,
+              Align = TextAnchor.MiddleCenter,
+              Color = TextColor,
+              FadeIn = FadeIn
+            },
+            RectTransform = {
+              AnchorMin = "0.05 0.05", AnchorMax = "0.95 0.95"
+            },
+            FadeOut = FadeOut
+          },
+          UIName, CuiHelper.GetGuid()
         }
-        return _json;
-      }
+      }.ToJson();
+      // return cached value
+      return _json;
     }
   }
 
