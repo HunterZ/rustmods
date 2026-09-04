@@ -12,7 +12,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Super PVx Info", "HunterZ", "1.12.1")]
+[Info("Super PVx Info", "HunterZ", "1.12.2")]
 [Description("Displays PvE/PvP/etc. status on player's HUD")]
 public class SuperPVxInfo : RustPlugin
 {
@@ -702,26 +702,29 @@ public class SuperPVxInfo : RustPlugin
   private PVxType? IsPlayerInBase(BasePlayer player)
   {
     // get list of all active Raidable Bases
-    if (RaidableBases?.Call("GetAllEvents") is List<(Vector3 pos, int mode,
-          bool allowPVP, string a, float b, float c, float loadTime,
-          ulong ownerId, BasePlayer owner, List<BasePlayer> raiders,
-          List<BasePlayer> intruders, List<BaseEntity> entities,
-          string baseName, DateTime spawnDateTime, DateTime despawnDateTime,
-          float radius, int lootRemaining)> rbEvents
+    if (RaidableBases?.Call("GetAllEvents") is List<(
+      Vector3, string, int, bool allowPvp, string, float, float, float, ulong,
+      BasePlayer, List<BasePlayer>, List<BasePlayer> intruders,
+      HashSet<BaseEntity>, string, DateTime, DateTime, float, int)> rbEvents
         // && rbEvents.Exists(x => x.intruders.Contains(player))
        )
     {
       // look for a base that the player is in
       foreach (
-        var (_, _, allowPVP, _, _, _, _, _, _, _, intruders, _, _, _, _, _, _)
+        var
+          (_, _, _, allowPvp, _, _, _, _, _, _, _, intruders, _, _, _, _, _, _)
         in rbEvents)
       {
         if (intruders.Contains(player))
         {
           // base found; return its type
-          return allowPVP ? PVxType.PVP : PVxType.PVE;
+          return allowPvp ? PVxType.PVP : PVxType.PVE;
         }
       }
+    }
+    else
+    {
+      PrintError($"IsPlayerInBase failure - Raidable Bases GetAllEvents API mismatch");
     }
 
     // player not in any bases
@@ -900,9 +903,18 @@ public class SuperPVxInfo : RustPlugin
   // NOTE: Only need to include up to the last parameter that we actually use;
   //  Oxide/Carbon will call the closest-matching hook signature
 
+  // temporary shim for people too lazy to upgrade :p
   private void OnPlayerEnteredRaidableBase(
     BasePlayer player, Vector3 location, bool allowPVP, int mode, string id,
     float _, float __, double loadTime, ulong ownerId, string baseName,
+    DateTime spawnTime, DateTime despawnTime, float radius) =>
+    OnPlayerEnteredRaidableBase(
+      player, location, allowPVP, mode, id, _, __, (float)loadTime, ownerId,
+      baseName, spawnTime, despawnTime, radius);
+
+  private void OnPlayerEnteredRaidableBase(
+    BasePlayer player, Vector3 location, bool allowPVP, int mode, string id,
+    float _, float __, float loadTime, ulong ownerId, string baseName,
     DateTime spawnTime, DateTime despawnTime, float radius) =>
     NextTick(() => EnteredBase(
       player, allowPVP ? PVxType.PVP : PVxType.PVE, location, radius));
@@ -910,9 +922,21 @@ public class SuperPVxInfo : RustPlugin
   private void OnPlayerExitedRaidableBase(BasePlayer player) =>
     NextTick(() => ExitedBase(player));
 
+  // temporary shim for people too lazy to upgrade :p
   private void OnRaidableBaseEnded(
     Vector3 location, int mode, bool allowPvP, string id, float _,
     float __, double loadTime, ulong ownerId, BasePlayer owner,
+    List<BasePlayer> raiders, List<BasePlayer> intruders,
+    List<BaseEntity> entities, string baseName, DateTime spawnDateTime,
+    DateTime despawnDateTime, float protectionRadius) =>
+    OnRaidableBaseEnded(
+      location, mode, allowPvP, id, _, __, (float)loadTime, ownerId, owner,
+      raiders, intruders, entities, baseName, spawnDateTime, despawnDateTime,
+      protectionRadius);
+
+  private void OnRaidableBaseEnded(
+    Vector3 location, int mode, bool allowPvP, string id, float _,
+    float __, float loadTime, ulong ownerId, BasePlayer owner,
     List<BasePlayer> raiders, List<BasePlayer> intruders,
     List<BaseEntity> entities, string baseName, DateTime spawnDateTime,
     DateTime despawnDateTime, float protectionRadius) =>
