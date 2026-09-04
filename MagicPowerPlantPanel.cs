@@ -10,7 +10,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Magic Power Plant Panel", "HunterZ", "1.0.0")]
+[Info("Magic Power Plant Panel", "HunterZ", "1.0.1")]
 [Description("Provides a Magic Panel that displays Power Plant grid power status")]
 public class MagicPowerPlantPanel : RustPlugin
 {
@@ -60,57 +60,6 @@ public class MagicPowerPlantPanel : RustPlugin
 
   #endregion
 
-  #region Helper Methods
-
-  private void HZ_OnPhaseChange() => NextTick(CheckUpdate);
-
-  private bool CheckPhase()
-  {
-    var oldPhase = _phase;
-    var newPhase =
-      Powergrid.enabled ? PowergridManager.GetCurrentStage(true) : 0;
-    _phase = newPhase;
-    return _phase >= 0 && newPhase != oldPhase;
-  }
-
-  private void CheckUpdate()
-  {
-    if (!CheckPhase()) return;
-    MagicPanel?.Call("UpdatePanel", Name, (int)UpdateType.Image);
-  }
-
-  #endregion
-
-  #region Harmony Patches
-
-  [AutoPatch, HarmonyPatch(
-     typeof(PowergridManager), nameof(PowergridManager.ServerTick))]
-  internal static class PowerGridManagerServerTickPatch
-  {
-    [HarmonyTranspiler, UsedImplicitly]
-    internal static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
-    {
-      var list = new List<CodeInstruction>(instructions);
-      var index = list.FindIndex(static i =>
-        i.opcode == OpCodes.Stfld &&
-        ((FieldInfo)i.operand)?.Name.Contains("hasTickedOnce") is true);
-      index -= 2;
-      if (index < 0)
-      {
-        Debug.LogError("MagicPowerPlantPanel: Failed to patch PowergridManager.ServerTick()");
-        return list;
-      }
-      list.Insert(
-        index, new CodeInstruction(OpCodes.Ldstr, nameof(HZ_OnPhaseChange)));
-      list.Insert(
-        index + 1, new CodeInstruction(OpCodes.Callvirt, AccessTools.Method(
-          typeof(Core.Interface), nameof(CallHook), new[] { typeof(string) })));
-      return list;
-    }
-  }
-
-  #endregion
-
   #region Oxide API
 
   protected override void LoadDefaultConfig()
@@ -142,7 +91,7 @@ public class MagicPowerPlantPanel : RustPlugin
 
   private void Init()
   {
-    Unsubscribe(nameof(HZ_OnPhaseChange));
+    Unsubscribe(nameof(OnPowergridStageChanged));
 
     if (null == _configFile)
     {
@@ -218,13 +167,21 @@ public class MagicPowerPlantPanel : RustPlugin
     _phase = -1;
   }
 
+  private void OnPowergridStageChanged(
+    PowergridManager powergridManager, int newPhase) => NextTick(() =>
+  {
+    if (newPhase == _phase) return;
+    _phase = newPhase;
+    MagicPanel?.Call("UpdatePanel", Name, (int)UpdateType.Image);
+  });
+
   #endregion
 
   #region MagicPanel API
 
   private void MagicPanelRegisterPanels()
   {
-    Unsubscribe(nameof(HZ_OnPhaseChange));
+    Unsubscribe(nameof(OnPowergridStageChanged));
 
     if (MagicPanel?.IsLoaded is not true)
     {
@@ -233,14 +190,14 @@ public class MagicPowerPlantPanel : RustPlugin
     }
 
     // set _phase to current server state
-    CheckPhase();
+    _phase = Powergrid.enabled ? PowergridManager.GetCurrentStage(true) : 0;
 
     // NOTE: this will trigger an initial call to GetPanel()
     MagicPanel.Call("RegisterGlobalPanel",
       this, Name, JsonConvert.SerializeObject(_pluginConfig.PanelSettings),
       nameof(GetPanel));
 
-    Subscribe(nameof(HZ_OnPhaseChange));
+    Subscribe(nameof(OnPowergridStageChanged));
   }
 
   private Hash<string, object> GetPanel() =>
