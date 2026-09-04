@@ -12,7 +12,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Super PVx Info", "HunterZ", "1.12.2")]
+[Info("Super PVx Info", "HunterZ", "1.13.0")]
 [Description("Displays PvE/PvP/etc. status on player's HUD")]
 public class SuperPVxInfo : RustPlugin
 {
@@ -192,17 +192,91 @@ public class SuperPVxInfo : RustPlugin
   private void Init()
   {
     LoadData();
-    PlayerWatcher.AllowForceUpdate =
-      null == _configData || _configData.ForceUpdates;
+    PlayerWatcher.AllowForceUpdate = _configData?.ForceUpdates is not false;
     PlayerWatcher.Instance = this;
     var deepSeaBounds = DeepSeaManager.DeepSeaBounds;
     PlayerWatcher.DeepSeaMin = deepSeaBounds.center - deepSeaBounds.extents;
     PlayerWatcher.DeepSeaMax = deepSeaBounds.center + deepSeaBounds.extents;
     PlayerWatcher.UpdateIntervalSeconds =
       _configData?.UpdateIntervalSeconds ?? 1.0f;
-    if (null != _configData && !string.IsNullOrEmpty(_configData.ToggleCommand))
+    if (!string.IsNullOrEmpty(_configData?.ToggleCommand))
     {
-      AddCovalenceCommand(_configData.ToggleCommand, nameof(ToggleUI));
+      AddCovalenceCommand(_configData?.ToggleCommand, nameof(ToggleUI));
+    }
+    // only listen to hooks from event plugins that are configured as PVP
+    if (_configData?.PvpPlugins?.AirEvent is not true)
+    {
+      Unsubscribe(nameof(OnAirEventStart));
+      Unsubscribe(nameof(OnAirEventEnd));
+    }
+    if (_configData?.PvpPlugins?.ArcticBaseEvent is not true)
+    {
+      Unsubscribe(nameof(OnArcticBaseEventStart));
+      Unsubscribe(nameof(OnArcticBaseEventEnd));
+    }
+    if (_configData?.PvpPlugins?.ArmoredTrain is not true)
+    {
+      Unsubscribe(nameof(OnPlayerEnterArmoredTrain));
+      Unsubscribe(nameof(OnPlayerExitArmoredTrain));
+      Unsubscribe(nameof(OnArmoredTrainStartMoving));
+      Unsubscribe(nameof(OnArmoredTrainEventStop));
+    }
+    if (_configData?.PvpPlugins?.Caravan is not true)
+    {
+      Unsubscribe(nameof(OnPlayerEnterCaravan));
+      Unsubscribe(nameof(OnPlayerExitCaravan));
+      Unsubscribe(nameof(OnCaravanStop));
+    }
+    if (_configData?.PvpPlugins?.Convoy is not true)
+    {
+      Unsubscribe(nameof(OnPlayerEnterConvoy));
+      Unsubscribe(nameof(OnPlayerExitConvoy));
+      Unsubscribe(nameof(OnConvoyStop));
+    }
+    if (_configData?.PvpPlugins?.FerryTerminalEvent is not true)
+    {
+      Unsubscribe(nameof(OnFerryTerminalEventStart));
+      Unsubscribe(nameof(OnFerryTerminalEventEnd));
+    }
+    if (_configData?.PvpPlugins?.GasStationEvent is not true)
+    {
+      Unsubscribe(nameof(OnGasStationEventStart));
+      Unsubscribe(nameof(OnGasStationEventEnd));
+    }
+    if (_configData?.PvpPlugins?.HarborEvent is not true)
+    {
+      Unsubscribe(nameof(OnHarborEventStart));
+      Unsubscribe(nameof(OnHarborEventEnd));
+    }
+    if (_configData?.PvpPlugins?.JunkyardEvent is not true)
+    {
+      Unsubscribe(nameof(OnJunkyardEventStart));
+      Unsubscribe(nameof(OnJunkyardEventEnd));
+    }
+    if (_configData?.PvpPlugins?.PowerPlantEvent is not true)
+    {
+      Unsubscribe(nameof(OnPowerPlantEventStart));
+      Unsubscribe(nameof(OnPowerPlantEventEnd));
+    }
+    if (_configData?.PvpPlugins?.SatelliteDishEvent is not true)
+    {
+      Unsubscribe(nameof(OnSatDishEventStart));
+      Unsubscribe(nameof(OnSatDishEventEnd));
+    }
+    if (_configData?.PvpPlugins?.Sputnik is not true)
+    {
+      Unsubscribe(nameof(OnPlayerEnterSputnik));
+      Unsubscribe(nameof(OnPlayerExitSputnik));
+    }
+    if (_configData?.PvpPlugins?.SupermarketEvent is not true)
+    {
+      Unsubscribe(nameof(OnSupermarketEventStart));
+      Unsubscribe(nameof(OnSupermarketEventEnd));
+    }
+    if (_configData?.PvpPlugins?.WaterEvent is not true)
+    {
+      Unsubscribe(nameof(OnWaterEventStart));
+      Unsubscribe(nameof(OnWaterEventEnd));
     }
   }
 
@@ -351,7 +425,7 @@ public class SuperPVxInfo : RustPlugin
     // destroy GUIs for all active players
     foreach (var player in BasePlayer.activePlayerList)
     {
-      OnPlayerDisconnected(player, UIName);
+      OnPlayerDisconnected(player);
     }
     PlayerWatcher.Instance = null;
     // if save timer active, force immediate write
@@ -381,7 +455,7 @@ public class SuperPVxInfo : RustPlugin
     watcher.StartWatching();
   }
 
-  private void OnPlayerDisconnected(BasePlayer player, string reason)
+  private void OnPlayerDisconnected(BasePlayer player)
   {
     if (IsValidPlayer(player, false))
     {
@@ -702,29 +776,27 @@ public class SuperPVxInfo : RustPlugin
   private PVxType? IsPlayerInBase(BasePlayer player)
   {
     // get list of all active Raidable Bases
-    if (RaidableBases?.Call("GetAllEvents") is List<(
-      Vector3, string, int, bool allowPvp, string, float, float, float, ulong,
-      BasePlayer, List<BasePlayer>, List<BasePlayer> intruders,
-      HashSet<BaseEntity>, string, DateTime, DateTime, float, int)> rbEvents
-        // && rbEvents.Exists(x => x.intruders.Contains(player))
-       )
+    if (RaidableBases?.Call("GetAllEvents") is not List<(
+          Vector3, string, int, bool allowPvp, string, float, float, float,
+          ulong, BasePlayer, List<BasePlayer>, List<BasePlayer> intruders,
+          HashSet<BaseEntity>, string, DateTime, DateTime, float, int)>
+        rbEvents)
     {
-      // look for a base that the player is in
-      foreach (
-        var
-          (_, _, _, allowPvp, _, _, _, _, _, _, _, intruders, _, _, _, _, _, _)
-        in rbEvents)
-      {
-        if (intruders.Contains(player))
-        {
-          // base found; return its type
-          return allowPvp ? PVxType.PVP : PVxType.PVE;
-        }
-      }
+      PrintError("IsPlayerInBase failure - Raidable Bases GetAllEvents API mismatch");
+      return null;
     }
-    else
+
+    // look for a base that the player is in
+    foreach (
+      var
+        (_, _, _, allowPvp, _, _, _, _, _, _, _, intruders, _, _, _, _, _, _)
+      in rbEvents)
     {
-      PrintError($"IsPlayerInBase failure - Raidable Bases GetAllEvents API mismatch");
+      if (intruders.Contains(player))
+      {
+        // base found; return its type
+        return allowPvp ? PVxType.PVP : PVxType.PVE;
+      }
     }
 
     // player not in any bases
@@ -1007,8 +1079,6 @@ public class SuperPVxInfo : RustPlugin
     SetPvpDelay(player, type, false);
   });
 
-  #endregion Nivex Hook Handlers
-
   #region DangerousTreasures Hook Handlers
 
   private static void OnPlayerEnteredDangerousEvent(
@@ -1020,6 +1090,8 @@ public class SuperPVxInfo : RustPlugin
     SetPvxEvent(player, allowPVP ? PVxType.PVP : PVxType.PVE, false);
 
   #endregion DangerousTreasures Hook Handlers
+
+  #endregion Nivex Hook Handlers
 
   #region PVP Bubble Hook Handlers
 
@@ -1225,7 +1297,7 @@ public class SuperPVxInfo : RustPlugin
     if (!IsValidPlayer(player, true)) return;
     if (GetPlayerWatcher(player))
     {
-      OnPlayerDisconnected(player, UIName);
+      OnPlayerDisconnected(player);
     }
     else
     {
@@ -1312,58 +1384,58 @@ public class SuperPVxInfo : RustPlugin
 
   private sealed class NotificationSettings
   {
-    [JsonProperty(PropertyName = "Chat notify enabled")]
+    [JsonProperty("Chat notify enabled")]
     public bool ChatEnabled { get; set; }
 
-    [JsonProperty(PropertyName = "Chat notify prefix (empty string to disable)")]
+    [JsonProperty("Chat notify prefix (empty string to disable)")]
     public string ChatPrefix { get; set; } = "[SuperPVxInfo]: ";
 
-    [JsonProperty(PropertyName = "PopupNotifications notify enabled")]
+    [JsonProperty("PopupNotifications notify enabled")]
     public bool PopupNotificationsEnabled { get; set; } = true;
 
-    [JsonProperty(PropertyName = "PopupNotifications notify prefix (empty string to disable)")]
+    [JsonProperty("PopupNotifications notify prefix (empty string to disable)")]
     public string PopupNotificationsPrefix { get; set; } = "";
 
-    [JsonProperty(PropertyName = "Individual Notification Toggles")]
+    [JsonProperty("Individual Notification Toggles")]
     public Dictionary<string, bool> Enabled { get; set; } = new();
   }
 
   private sealed class UiSettings
   {
-    [JsonProperty(PropertyName = "Enabled")]
+    [JsonProperty("Enabled")]
     public bool Enabled { get; set; } = true;
 
-    [JsonProperty(PropertyName = "Min Anchor")]
+    [JsonProperty("Min Anchor")]
     public string MinAnchor { get; set; } = "0.5 0";
 
-    [JsonProperty(PropertyName = "Max Anchor")]
+    [JsonProperty("Max Anchor")]
     public string MaxAnchor { get; set; } = "0.5 0";
 
-    [JsonProperty(PropertyName = "Min Offset")]
+    [JsonProperty("Min Offset")]
     public string MinOffset { get; set; } = "190 30";
 
-    [JsonProperty(PropertyName = "Max Offset")]
+    [JsonProperty("Max Offset")]
     public string MaxOffset { get; set; } = "250 60";
 
-    [JsonProperty(PropertyName = "Layer")]
+    [JsonProperty("Layer")]
     public string Layer { get; set; } = "Hud";
 
-    [JsonProperty(PropertyName = "Text")]
+    [JsonProperty("Text")]
     public string Text { get; set; } = "PVP";
 
-    [JsonProperty(PropertyName = "Text Size")]
+    [JsonProperty("Text Size")]
     public int TextSize { get; set; } = 12;
 
-    [JsonProperty(PropertyName = "Text Color")]
+    [JsonProperty("Text Color")]
     public string TextColor { get; set; } = "1 1 1 1";
 
-    [JsonProperty(PropertyName = "Background Color")]
+    [JsonProperty("Background Color")]
     public string BackgroundColor { get; set; } = "0.8 0.5 0.1 0.8";
 
-    [JsonProperty(PropertyName = "Fade In")]
+    [JsonProperty("Fade In")]
     public float FadeIn { get; set; } = 0.25f;
 
-    [JsonProperty(PropertyName = "Fade Out")]
+    [JsonProperty("Fade Out")]
     public float FadeOut { get; set; } = 0.25f;
 
     [JsonIgnore]
@@ -1414,33 +1486,34 @@ public class SuperPVxInfo : RustPlugin
   //  dictionary to be passed to Simple Status hooks.
   private sealed class SimpleStatusSettings
   {
-    [JsonProperty(PropertyName = "Enabled")]
+    [JsonProperty("Enabled")]
     public bool Enabled { get; set; }
 
-    [JsonProperty(PropertyName = "Background Color")]
+    [JsonProperty("Background Color")]
     public string Color { get; set; } = "0.5 0.5 0.5 1.0";
 
-    [JsonProperty(PropertyName = "Title Text")]
+    [JsonProperty("Title Text")]
     public string TitleText { get; set; } = "PVx STATUS";
 
-    [JsonProperty(PropertyName = "Title Color")]
+    [JsonProperty("Title Color")]
     public string TitleColor { get; set; } = "1.0 1.0 1.0 1.0";
 
-    [JsonProperty(PropertyName = "Status Text")]
+    [JsonProperty("Status Text")]
     public string StatusText { get; set; } = "UNKNOWN";
 
-    [JsonProperty(PropertyName = "Status Color")]
+    [JsonProperty("Status Color")]
     public string StatusColor { get; set; } = "1.0 1.0 1.0 1.0";
 
-    [JsonProperty(PropertyName = "Icon Path")]
+    [JsonProperty("Icon Path")]
     public string IconPath { get; set; } = "assets/icons/resource.png";
 
-    [JsonProperty(PropertyName = "Icon Color")]
+    [JsonProperty("Icon Color")]
     public string IconColor { get; set; } = "1.0 1.0 1.0 1.0";
 
     // dictionary containing SimpleStatus values
     [JsonIgnore]
     private Dictionary<string, object> _dict;
+
     // accessor for SimpleStatus values dictionary
     // Populates and returns the dictionary on first call, and returns the
     //  cached dictionary on subsequent calls
@@ -1459,52 +1532,100 @@ public class SuperPVxInfo : RustPlugin
     }
   }
 
+  private sealed class EventPluginSettings
+  {
+    [JsonProperty("Air Event")]
+    public bool AirEvent { get; set; } = true;
+
+    [JsonProperty("Arctic Base Event")]
+    public bool ArcticBaseEvent { get; set; } = true;
+
+    [JsonProperty("Armored Train")]
+    public bool ArmoredTrain { get; set; } = true;
+
+    [JsonProperty("Caravan")]
+    public bool Caravan { get; set; } = true;
+
+    [JsonProperty("Convoy")]
+    public bool Convoy { get; set; } = true;
+
+    [JsonProperty("Ferry Terminal Event")]
+    public bool FerryTerminalEvent { get; set; } = true;
+
+    [JsonProperty("Gas Station Event")]
+    public bool GasStationEvent { get; set; } = true;
+
+    [JsonProperty("Harbor Event")]
+    public bool HarborEvent { get; set; } = true;
+
+    [JsonProperty("Junkyard Event")]
+    public bool JunkyardEvent { get; set; } = true;
+
+    [JsonProperty("Power Plant Event")]
+    public bool PowerPlantEvent { get; set; } = true;
+
+    [JsonProperty("Satellite Dish Event")]
+    public bool SatelliteDishEvent { get; set; } = true;
+
+    [JsonProperty("Sputnik")]
+    public bool Sputnik { get; set; } = true;
+
+    [JsonProperty("Supermarket Event")]
+    public bool SupermarketEvent { get; set; } = true;
+
+    [JsonProperty("Water Event")]
+    public bool WaterEvent { get; set; } = true;
+  }
+
   private sealed class ConfigData
   {
     [JsonConverter(typeof(StringEnumConverter))]
-    [JsonProperty(PropertyName = "Server Default PVx (PVP or PVE)")]
-    public PVxType DefaultType = PVxType.PVE;
+    [JsonProperty("Server Default PVx (PVP or PVE)")]
+    public PVxType DefaultType { get; set; } = PVxType.PVE;
 
-    [JsonProperty(PropertyName = "Assume PVP Below Height")]
-    public float PvpBelowHeight = -500.0f;
+    [JsonProperty("Assume PVP Below Height")]
+    public float PvpBelowHeight { get; set; } = -500.0f;
 
-    [JsonProperty(PropertyName = "Assume PVP Above Height")]
-    public float PvpAboveHeight = 1000.0f;
+    [JsonProperty("Assume PVP Above Height")]
+    public float PvpAboveHeight { get; set; } = 1000.0f;
 
-    [JsonProperty(PropertyName = "Assume PVP In Apartments")]
-    public bool PvpApartments = false;
+    [JsonProperty("Assume PVP In Apartments")]
+    public bool PvpApartments { get; set; } = false;
 
-    [JsonProperty(PropertyName = "Assume PVP In Deep Sea")]
-    public bool PvpDeepSea = false;
+    [JsonProperty("Assume PVP In Deep Sea")]
+    public bool PvpDeepSea { get; set; } = false;
 
-    [JsonProperty(PropertyName = "Prefer TruePVE Config Over Assumptions")]
-    public bool SyncAssumptions = true;
+    [JsonProperty("Prefer TruePVE Config Over Assumptions")]
+    public bool SyncAssumptions { get; set; } = true;
 
-    [JsonProperty(PropertyName = "Toggle UI Command (empty string to disable)")]
-    public string ToggleCommand = "pvxui";
+    [JsonProperty("Toggle UI Command (empty string to disable)")]
+    public string ToggleCommand { get; set; } = "pvxui";
 
-    [JsonProperty(PropertyName = "Seconds Between Updates")]
-    public float UpdateIntervalSeconds = 1.0f;
+    [JsonProperty("Seconds Between Updates")]
+    public float UpdateIntervalSeconds { get; set; } = 1.0f;
 
-    [JsonProperty(PropertyName = "Force Updates On State Change")]
-    public bool ForceUpdates = true;
+    [JsonProperty("Force Updates On State Change")]
+    public bool ForceUpdates { get; set; } = true;
 
-    [JsonProperty(PropertyName = "Minimum Seconds Data File Saves")]
-    public float SaveIntervalSeconds = 5.0f;
+    [JsonProperty("Minimum Seconds Data File Saves")]
+    public float SaveIntervalSeconds { get; set; } = 5.0f;
 
-    [JsonProperty(PropertyName = "PVE Exclusion Mapping Names (case insensitive substrings / none to disable)")]
+    [JsonProperty("PVE Exclusion Mapping Names (case insensitive substrings / none to disable)")]
     public HashSet<string> PveExclusionNames { get; set; } = new();
 
-    [JsonProperty(PropertyName = "PVE Zone Names (case insensitive substrings / none to disable)")]
+    [JsonProperty("PVE Zone Names (case insensitive substrings / none to disable)")]
     public HashSet<string> PveZoneManagerNames { get; set; } = new();
 
-    [JsonProperty(PropertyName = "PVP Zone Names (case insensitive substrings / none to disable)")]
+    [JsonProperty("PVP Zone Names (case insensitive substrings / none to disable)")]
     public HashSet<string> PvpZoneManagerNames { get; set; } = new();
 
-    [JsonProperty(PropertyName = "Notification Settings")]
+    [JsonProperty("Assume Plugin Event Is PVP")]
+    public EventPluginSettings PvpPlugins { get; set; } = new();
+
+    [JsonProperty("Notification Settings")]
     public NotificationSettings NotifySettings { get; set; } = new();
 
-    [JsonProperty(PropertyName = "Default UI Settings")]
+    [JsonProperty("Default UI Settings")]
     public Dictionary<PVxType, UiSettings> UISettings { get; set; } = new()
     {
       [PVxType.PVE] = new UiSettings
@@ -1541,7 +1662,7 @@ public class SuperPVxInfo : RustPlugin
       }
     };
 
-    [JsonProperty(PropertyName = "Simple Status UI Settings")]
+    [JsonProperty("Simple Status UI Settings")]
     public Dictionary<PVxType, SimpleStatusSettings>
       SimpleStatusPVxSettings { get; set; } = new()
     {
