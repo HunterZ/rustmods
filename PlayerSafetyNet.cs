@@ -1,25 +1,26 @@
+using Facepunch;
 using Newtonsoft.Json;
 using Rust;
 using System.Collections.Generic;
-using System;
 using System.Text;
+using System;
 using UnityEngine;
 using Random = Oxide.Core.Random;
 
 namespace Oxide.Plugins;
 
-[Info("Player Safety Net", "HunterZ", "1.1.1")]
+[Info("Player Safety Net", "HunterZ", "1.2.0")]
 public class PlayerSafetyNet : RustPlugin
 {
   #region Data
 
   private const float WorldTop = 1000.0f;
   private const float WorldBottom = -500.0f;
-
   private const int RaycastHitsMax = 64;
   private readonly RaycastHit[] _raycastHits = new RaycastHit[RaycastHitsMax];
   private const float MaxDist = 2000f;
-
+  private const float MinSelfHitDistance = 0.001f;
+  private const float MinUpHitDistance = 0.1f;
   private const int SolidLayerMask = Layers.Solid;
 
   private Collider _terrainCollider;
@@ -31,10 +32,15 @@ public class PlayerSafetyNet : RustPlugin
   private readonly int[] _newUnmoved = { 0, 1, 0 };
   private readonly int[] _newBounced = { 0, 0, 1 };
   private readonly StringBuilder _sb = new();
-  private const string OnPlayerDeathKey = "OnPlayerDeath";
   private const string CanDropActiveItemKey = "CanDropActiveItem";
+  private const string TerrainViolationKey = "OnPlayerViolation:InsideTerrain";
 
-  private string _permission;
+  private string _ignorePermission;
+  private string _reportPermission;
+
+  // between being string-based, and having to rifle through groups, Oxide's
+  //  permissions API is pretty expensive; a cache is used to ameliorate this
+  private readonly Dictionary<ulong, bool> _userIgnoreStates = new();
 
   private enum StatColumn
   {
@@ -59,18 +65,19 @@ public class PlayerSafetyNet : RustPlugin
     nameof(StatColumn.Bounced).Length
   };
 
+  private struct NonNull{}
+
+  private readonly NonNull _nonNull = default;
+
   private PluginConfig _config;
 
   #endregion
 
   #region Helpers
 
-  private const float MinSelfHitDistance = 0.001f;
-
   // return whether a raycast is of interest
   private (bool, Collider) ProcessHit(
-    RaycastHit hit, bool up, Collider startCollider,
-    BaseCombatEntity startEntity)
+    RaycastHit hit, bool up, Collider startCollider, BaseEntity startEntity)
   {
     var collider = hit.collider;
     if (!collider) return (false, null);
@@ -114,20 +121,22 @@ public class PlayerSafetyNet : RustPlugin
     // check for blacklisted names
     var colliderName = collider.name;
     if (colliderName.Length > 0 &&
-        colliderName is "Add_To_Height" or "Collider" or "junkpile_base")
+        colliderName is "Add_To_Height" or "Collider")
     {
       return (false, collider);
     }
 
-    // don't bounce things off the bottom of living entities or containers
+    // after this are upward-only cases
     if (!up) return (true, collider);
+
+    // don't bounce things off the bottom of living entities or containers
     cEntity ??= collider.ToBaseEntity();
     return cEntity ? (!IgnoredBottom(cEntity), collider) : (true, collider);
   }
 
   // return whether source entity is candidate entity or its corpse
   private static bool SameOrCorpseOrigin(
-    BaseEntity cEntity, BaseCombatEntity sEntity) =>
+    BaseEntity cEntity, BaseEntity sEntity) =>
     cEntity && sEntity &&
     (cEntity == sEntity ||
      sEntity is BaseCorpse corpse && corpse.parentEnt == cEntity);
@@ -139,7 +148,7 @@ public class PlayerSafetyNet : RustPlugin
       .HasTrait(BaseEntity.TraitFlag.Alive) ||
     entity
       is BaseCombatEntity { IsNpc: true }
-      or BaseCorpse or LootContainer or ServerGib;
+      or BaseCorpse or BaseVehicle or LootContainer or ServerGib;
 
   // get Y coordinate of appropriate prefab, terrain, or world bound that would
   //  stop movement in the given direction from the given position
@@ -147,12 +156,17 @@ public class PlayerSafetyNet : RustPlugin
   // returns null on invalid maxDistance or appropriate height not found
   private (float?, Collider) GetTerminalY(
     Vector3 position, float maxDistance, bool up, Collider startCollider,
-    BaseCombatEntity startEntity)
+    BaseEntity startEntity)
   {
     var direction = up ? Vector3.up : Vector3.down;
     var cDist = MaxDist;
     float? cY = null;
     var cCollider = startCollider;
+    // determine distance from position to terrain on upward raycast only
+    var terrainY = up ? TerrainMeta.HeightMap.GetHeight(position) : 0f;
+    var terrainDist = terrainY - position.y;
+    var minUpHitDist =
+      Mathf.Max(MinUpHitDistance, startEntity.bounds.extents.y);
 
     // optimization: abort if distance is non-positive
     if (maxDistance <= 0)
@@ -171,6 +185,11 @@ public class PlayerSafetyNet : RustPlugin
     {
       var hit = _raycastHits[i];
       if (hit.distance >= cDist) continue;
+      // on upward scans, skip anything that's too close to the terrain
+      if (up && Mathf.Abs(hit.distance - terrainDist) < minUpHitDist)
+      {
+        continue;
+      }
       var (use, collider) = ProcessHit(hit, up, startCollider, startEntity);
       if (!use) continue;
       // best match so far; record it as a candidate
@@ -183,12 +202,12 @@ public class PlayerSafetyNet : RustPlugin
   }
 
   private (float?, Collider) GetClosestSolidAbove(
-    Vector3 position, Collider startCollider, BaseCombatEntity startEntity) =>
+    Vector3 position, Collider startCollider, BaseEntity startEntity) =>
     GetTerminalY(
       position, WorldTop - position.y, true, startCollider, startEntity);
 
   private (float?, Collider) GetClosestSolidBelow(
-    Vector3 position, Collider startCollider, BaseCombatEntity startEntity) =>
+    Vector3 position, Collider startCollider, BaseEntity startEntity) =>
     GetTerminalY(
       position, -WorldBottom + position.y, false, startCollider, startEntity);
 
@@ -198,9 +217,10 @@ public class PlayerSafetyNet : RustPlugin
   //
   // if a suitable floor was found, and it is above the given position, return
   //  its height; else return null
-  private float? ShouldMove(BaseCombatEntity entity)
+  private float? ShouldMove(BaseEntity entity)
   {
     if (!entity) return null;
+
     var position = entity.transform.position;
 
     // abort if in a holiday dungeon etc. for now
@@ -212,6 +232,15 @@ public class PlayerSafetyNet : RustPlugin
     // allow only 2 iterations (see last-ditch effort comment below)
     for (var i = 0; i < 2; ++i)
     {
+      if (i > 0)
+      {
+        // try again starting from detected ceiling
+        // this is a last-ditch effort in case player fell out of a hole in the
+        //  world with a ceiling above, e.g. train tunnels entrance on a primitive
+        //  map in non-primitive mode
+        PrintWarning($"No floor found, but ceiling is below world top; trying again starting at ceiling position={position}");
+      }
+
       // find ceiling or top of world above position
       var (upY, upCollider) = GetClosestSolidAbove(
         position, entity.GetComponent<Collider>(), entity);
@@ -234,23 +263,30 @@ public class PlayerSafetyNet : RustPlugin
         return null;
       }
 
-      // try again starting from detected ceiling
-      // this is a last-ditch effort in case player fell out of a hole in the
-      //  world with a ceiling above, e.g. train tunnels entrance on a primitive
-      //  map in non-primitive mode
-      PrintWarning($"No floor found, but ceiling is below world top; trying again starting at ceiling position={ceilingPos}");
       position = ceilingPos;
     }
 
+    PrintWarning("No suitable landing found; giving up");
     return null;
   }
 
   // move a non-player entity to a new Y position
-  private static void MoveEntityY(BaseCombatEntity entity, float newY)
+  private void MoveEntityY(BaseEntity entity, float newY)
   {
-    var oldPos = entity.ServerWorldPosition;
-    // note: this should trigger a network update automatically if appropriate
-    entity.ServerWorldPosition = new Vector3(oldPos.x, newY, oldPos.z);
+    // prevent clients from trying to interpolate movement, which can cause
+    //  things to get stuck under colliders that we're trying to elevate through
+    if (!entity.limitNetworking)
+    {
+      entity.limitNetworking = true;
+      NextFrame(() =>
+      {
+        if (!entity) return;
+        entity.limitNetworking = false;
+        entity.SendNetworkUpdate_Position();
+      });
+    }
+    var newPos = entity.ServerWorldPosition.XZ(newY);
+    entity.ServerWorldPosition = newPos;
   }
 
   // record an occurrence of the given stat type for the given key string
@@ -293,15 +329,27 @@ public class PlayerSafetyNet : RustPlugin
 
   private void RecordBounced(string key) => RecordData(key, StatType.Bounced);
 
-  private void BounceEntity<T>(T entity) where T : BaseCombatEntity
+  private bool ShouldIgnorePlayer(BasePlayer player) =>
+    !player || HasIgnorePermission(player.userID.Get(), player.UserIDString);
+
+  private bool ShouldIgnorePlayer(ulong id) =>
+    HasIgnorePermission(id);
+
+  private void BounceEntity<T>(T entity) where T : BaseEntity
   {
     if (!entity) return;
     var prefabName = entity.ShortPrefabName;
+    if (prefabName is "generic_world") prefabName = entity.name;
     _sb
       .Clear().Append(entity.GetType()).Append(':').Append(prefabName);
     var entitySignature = _sb.ToString();
     _sb.Clear();
-    if (entity.HasParent() || _config.BounceIgnorePrefabs.Contains(prefabName))
+    if (entity.HasParent() ||
+        _config.BounceIgnorePrefabs.Contains(prefabName) ||
+        (entity is DroppedItem droppedItem &&
+         ShouldIgnorePlayer(droppedItem.DroppedBy)) ||
+        (entity is PlayerCorpse { parentEnt: BasePlayer player } &&
+         ShouldIgnorePlayer(player)))
     {
       RecordIgnored(entitySignature);
       return;
@@ -318,10 +366,10 @@ public class PlayerSafetyNet : RustPlugin
       //  interpolation would perform extra heap allocations when converting
       //  numeric primitive values to string representations
       _sb
-        .Clear().Append("Moving ").Append(entitySignature).Append('[')
-        .Append(entity.net?.ID.Value ?? 0).Append(']').Append(" at ")
-        .AppendPosition(position).Append(" to new Y=").Append(newY).Append(" (")
-        .Append(newY - position.y).Append(')');
+        .Clear().Append("BounceEntity(): Moving ").Append(entitySignature)
+        .Append('[').Append(entity.net?.ID.Value ?? 0).Append(']')
+        .Append(" at ").AppendPosition(position).Append(" to new Y=")
+        .Append(newY).Append(" (").Append(newY - position.y).Append(')');
       Puts(_sb.ToString());
       _sb.Clear();
     }
@@ -344,8 +392,25 @@ public class PlayerSafetyNet : RustPlugin
     return null;
   }
 
-  private bool HasPermission(BasePlayer player) =>
-    permission.UserHasPermission(player.UserIDString, _permission);
+  private bool HasIgnorePermission(ulong id, string idString = null)
+  {
+    // never ignore NPC players
+    if (!id.IsSteamId()) return false;
+    // if player has a cached known state, return that
+    if (_userIgnoreStates.TryGetValue(id, out var state))
+    {
+      return state;
+    }
+    // populate cache and return result
+    if (string.IsNullOrEmpty(idString)) idString = id.ToString();
+    state =
+      permission.UserHasPermission(idString, _ignorePermission);
+    _userIgnoreStates[id] = state;
+    return state;
+  }
+
+  private bool HasReportPermission(BasePlayer player) =>
+    permission.UserHasPermission(player.UserIDString, _reportPermission);
 
   #endregion
 
@@ -390,13 +455,13 @@ public class PlayerSafetyNet : RustPlugin
       return;
     }
 
-    if (!_config.BouncePlayer)
-    {
-      Unsubscribe(nameof(OnPlayerDeath));
-    }
     if (!_config.PreventDrop)
     {
       Unsubscribe(nameof(CanDropActiveItem));
+    }
+    if (!_config.BounceTerrainViolation)
+    {
+      Unsubscribe(nameof(OnPlayerViolation));
     }
     if (!_config.BounceBaseCorpse &&
         !_config.BounceDroppedItemContainer &&
@@ -411,8 +476,10 @@ public class PlayerSafetyNet : RustPlugin
       Unsubscribe(nameof(OnEntitySpawned));
     }
 
-    _permission = $"{Name.ToLower()}.report";
-    permission.RegisterPermission(_permission, this);
+    _ignorePermission = $"{Name.ToLower()}.ignore";
+    permission.RegisterPermission(_ignorePermission, this);
+    _reportPermission = $"{Name.ToLower()}.report";
+    permission.RegisterPermission(_reportPermission, this);
   }
 
   private void OnServerInitialized()
@@ -442,12 +509,37 @@ public class PlayerSafetyNet : RustPlugin
     _deepSeaBottomCollider = null;
   }
 
+  private void OnGroupPermissionGranted(string group, string perm)
+  {
+    if (perm != _ignorePermission) return;
+    // invalidate cache so that it can be rebuilt piecemeal
+    Puts($"Dropping {_userIgnoreStates.Count} cached permission state(s)");
+    _userIgnoreStates.Clear();
+  }
+
+  private void OnGroupPermissionRevoked(string group, string perm) =>
+    OnGroupPermissionGranted(group, perm);
+
+  private void OnUserPermissionGranted(string playerID, string perm)
+  {
+    if (perm != _ignorePermission) return;
+    if (!ulong.TryParse(playerID, out var id)) return;
+    _userIgnoreStates[id] = true;
+  }
+
+  private void OnUserPermissionRevoked(string playerID, string perm)
+  {
+    if (perm != _ignorePermission) return;
+    if (!ulong.TryParse(playerID, out var id)) return;
+    _userIgnoreStates[id] = false;
+  }
+
   [ConsoleCommand("psn.report")]
   private void CmdReport(ConsoleSystem.Arg arg)
   {
     if (arg is null) return;
     var player = arg.Player();
-    if (player && !HasPermission(player)) return;
+    if (player && !HasReportPermission(player)) return;
 
     _sb.Clear().Append(Name).Append(" statistics:");
     if (_statsIndexes.IsEmpty())
@@ -489,41 +581,39 @@ public class PlayerSafetyNet : RustPlugin
     _sb.Clear();
   }
 
-  private object OnPlayerDeath(BasePlayer player, HitInfo info)
+  private object OnPlayerViolation(BasePlayer player, AntiHackType type)
   {
-    if (player?.userID.IsSteamId() is not true)
+    // don't even acknowledge non-terrain violations
+    if (AntiHackType.InsideTerrain != type) return null;
+    if (ShouldIgnorePlayer(player))
     {
-      RecordIgnored(OnPlayerDeathKey);
+      RecordIgnored(TerrainViolationKey);
       return null;
     }
     var position = player.transform.position;
     if (ShouldMove(player) is not { } newY)
     {
-      RecordUnmoved(OnPlayerDeathKey);
+      RecordUnmoved(TerrainViolationKey);
       return null;
     }
     if (_config.BounceLog)
     {
       _sb
-        .Clear().Append("Moving BasePlayer=").Append(player.displayName)
-        .Append('(').Append(player.ToString()).Append(")@")
-        .AppendPosition(position).Append(" to new Y=").Append(newY).Append(" (")
-        .Append(newY - position.y).Append(')');
+        .Clear().Append("OnPlayerViolation(): Moving BasePlayer=")
+        .Append(player.displayName).Append('(').Append(player.ToString())
+        .Append(")@").AppendPosition(position).Append(" to new Y=").Append(newY)
+        .Append(" (").Append(newY - position.y).Append(')');
       Puts(_sb.ToString());
       _sb.Clear();
     }
     player.Teleport(new Vector3(position.x, newY, position.z));
-    RecordBounced(OnPlayerDeathKey);
-    return null;
+    RecordBounced(TerrainViolationKey);
+    return _config.CancelTerrainViolation ? _nonNull : null;
   }
-
-  // silently ignore NPCPlayer deaths to prevent triggering
-  //  OnPlayerDeath(BasePlayer)
-  private object OnPlayerDeath(NPCPlayer npcPlayer, HitInfo info) => null;
 
   private bool? CanDropActiveItem(BasePlayer player)
   {
-    if (player?.userID.IsSteamId() is not true)
+    if (ShouldIgnorePlayer(player))
     {
       RecordIgnored(CanDropActiveItemKey);
       return null;
@@ -537,7 +627,8 @@ public class PlayerSafetyNet : RustPlugin
     if (_config.BounceLog)
     {
       _sb
-        .Clear().Append("Preventing item drop for BasePlayer=")
+        .Clear()
+        .Append("CanDropActiveItem(): Preventing item drop for BasePlayer=")
         .Append(player.displayName).Append('(').Append(player.ToString())
         .Append(")@").AppendPosition(position);
       Puts(_sb.ToString());
@@ -549,20 +640,30 @@ public class PlayerSafetyNet : RustPlugin
 
   private void OnEntitySpawned(BaseCorpse baseCorpse)
   {
-    if (_config.BounceBaseCorpse) return;
-    NextTick(() => BounceEntity(baseCorpse));
+    if (!_config.BounceBaseCorpse) return;
+    // corpses must be checked on current frame, because parent entity will be
+    //  lost after
+    BounceEntity(baseCorpse);
+  }
+
+  private void OnEntitySpawned(DroppedItem droppedItem)
+  {
+    if (!_config.BounceDroppedItem) return;
+    // dropped items must be checked on the next frame, because DroppedBy isn't
+    //  set yet
+    NextFrame(() => BounceEntity(droppedItem));
   }
 
   private void OnEntitySpawned(DroppedItemContainer droppedItemContainer)
   {
     if (!_config.BounceDroppedItemContainer) return;
-    NextTick(() => BounceEntity(droppedItemContainer));
+    NextFrame(() => BounceEntity(droppedItemContainer));
   }
 
   private void OnEntitySpawned(HackableLockedCrate hackableLockedCrate)
   {
     if (!_config.BounceHackableLockedCrate) return;
-    NextTick(() => BounceEntity(hackableLockedCrate));
+    NextFrame(() => BounceEntity(hackableLockedCrate));
   }
 
   private void OnEntitySpawned(HelicopterDebris helicopterDebris)
@@ -574,7 +675,9 @@ public class PlayerSafetyNet : RustPlugin
   private void OnEntitySpawned(HorseCorpse horseCorpse)
   {
     if (!_config.BounceHorseCorpse) return;
-    NextTick(() => BounceEntity(horseCorpse));
+    // corpses must be checked on current frame, because parent entity will be
+    //  lost after
+    BounceEntity(horseCorpse);
   }
 
   private void OnEntitySpawned(LockedByEntCrate lockedByEntCrate)
@@ -586,19 +689,25 @@ public class PlayerSafetyNet : RustPlugin
   private void OnEntitySpawned(LootableCorpse lootableCorpse)
   {
     if (!_config.BounceLootableCorpse) return;
-    NextTick(() => BounceEntity(lootableCorpse));
+    // corpses must be checked on current frame, because parent entity will be
+    //  lost after
+    BounceEntity(lootableCorpse);
   }
 
   private void OnEntitySpawned(NPCPlayerCorpse npcPlayerCorpse)
   {
     if (!_config.BounceNpcPlayerCorpse) return;
-    NextTick(() => BounceEntity(npcPlayerCorpse));
+    // corpses must be checked on current frame, because parent entity will be
+    //  lost after
+    BounceEntity(npcPlayerCorpse);
   }
 
   private void OnEntitySpawned(PlayerCorpse playerCorpse)
   {
     if (!_config.BouncePlayerCorpse) return;
-    NextTick(() => BounceEntity(playerCorpse));
+    // corpses must be checked on current frame, because parent entity will be
+    //  lost after
+    BounceEntity(playerCorpse);
   }
 
   #endregion
@@ -607,14 +716,20 @@ public class PlayerSafetyNet : RustPlugin
 
   private sealed class PluginConfig
   {
-    [JsonProperty(PropertyName = "Bounce players on death")]
-    public bool BouncePlayer { get; set; } = true;
-
-    [JsonProperty(PropertyName = "Bounce held item/backpack drops on player death")]
+    [JsonProperty(PropertyName = "Prevent held item/backpack drops on player bounce")]
     public bool PreventDrop { get; set; } = true;
+
+    [JsonProperty(PropertyName = "Bounce players on terrain violations")]
+    public bool BounceTerrainViolation { get; set; } = true;
+
+    [JsonProperty(PropertyName = "Cancel terrain violations on bounce")]
+    public bool CancelTerrainViolation { get; set; } = true;
 
     [JsonProperty(PropertyName = "Bounce BaseCorpse entities on spawn")]
     public bool BounceBaseCorpse { get; set; } = true;
+
+    [JsonProperty(PropertyName = "Bounce DroppedItem entities on spawn")]
+    public bool BounceDroppedItem { get; set; } = false;
 
     [JsonProperty(PropertyName = "Bounce DroppedItemContainer entities on spawn")]
     public bool BounceDroppedItemContainer { get; set; } = true;
