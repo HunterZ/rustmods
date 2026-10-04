@@ -1,15 +1,16 @@
 using Facepunch;
 using Newtonsoft.Json;
+using Random = Oxide.Core.Random;
+using Rust.Ai.Gen2;
 using Rust;
 using System.Collections.Generic;
 using System.Text;
 using System;
 using UnityEngine;
-using Random = Oxide.Core.Random;
 
 namespace Oxide.Plugins;
 
-[Info("Player Safety Net", "HunterZ", "1.2.0")]
+[Info("Player Safety Net", "HunterZ", "1.3.0")]
 public class PlayerSafetyNet : RustPlugin
 {
   #region Data
@@ -468,6 +469,7 @@ public class PlayerSafetyNet : RustPlugin
         !_config.BounceHackableLockedCrate &&
         !_config.BounceHelicopterDebris &&
         !_config.BounceHorseCorpse &&
+        !_config.BounceLivestockCorpse &&
         !_config.BounceLockedByEntCrate &&
         !_config.BounceLootableCorpse &&
         !_config.BounceNpcPlayerCorpse &&
@@ -680,6 +682,14 @@ public class PlayerSafetyNet : RustPlugin
     BounceEntity(horseCorpse);
   }
 
+  private void OnEntitySpawned(LivestockCorpse livestockCorpse)
+  {
+    if (!_config.BounceLivestockCorpse) return;
+    // corpses must be checked on current frame, because parent entity will be
+    //  lost after
+    BounceEntity(livestockCorpse);
+  }
+
   private void OnEntitySpawned(LockedByEntCrate lockedByEntCrate)
   {
     if (!_config.BounceLockedByEntCrate) return;
@@ -742,6 +752,9 @@ public class PlayerSafetyNet : RustPlugin
 
     [JsonProperty(PropertyName = "Bounce HorseCorpse entities on spawn")]
     public bool BounceHorseCorpse { get; set; } = false;
+
+    [JsonProperty(PropertyName = "Bounce LivestockCorpse entities on spawn")]
+    public bool BounceLivestockCorpse { get; set; } = true;
 
     [JsonProperty(PropertyName = "Bounce LockedByEntCrate entities on spawn")]
     public bool BounceLockedByEntCrate { get; set; } = true;
