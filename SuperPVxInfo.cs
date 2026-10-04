@@ -12,7 +12,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Super PVx Info", "HunterZ", "1.13.0")]
+[Info("Super PVx Info", "HunterZ", "1.14.0")]
 [Description("Displays PvE/PvP/etc. status on player's HUD")]
 public class SuperPVxInfo : RustPlugin
 {
@@ -36,31 +36,122 @@ public class SuperPVxInfo : RustPlugin
   private enum PvpBubbleTypes
   {
     None            = 0,
-    // Nikedemos plugins
-    CargoTrainEvent = 1 << 0,
-    // Adem plugins
-    ArmoredTrain    = 1 << 1,
-    Caravan         = 1 << 2,
-    Convoy          = 1 << 3,
-    Sputnik         = 1 << 4
+    ArmoredTrain    = 1 << 0, // Adem
+    Caravan         = 1 << 1, // Adem
+    CargoTrainEvent = 1 << 2, // Nikedemos - PVP only
+    Convoy          = 1 << 3, // Adem
+    DefendableHomes = 1 << 4, // KpucTaJl
+    Shipwreck       = 1 << 5, // Adem
+    Space           = 1 << 6, // Adem
+    Sputnik         = 1 << 7, // Adem
+    Triangulation   = 1 << 8  // KpucTaJl
   }
+
+  private readonly Dictionary<PvpBubbleTypes, List<string>>
+    _pvpBubbleEventHooks = new()
+  {
+    { PvpBubbleTypes.ArmoredTrain, new List<string>
+      { nameof(OnPlayerEnterArmoredTrain), nameof(OnPlayerExitArmoredTrain),
+        nameof(OnArmoredTrainStartMoving), nameof(OnArmoredTrainEventStop)
+      }
+    },
+    { PvpBubbleTypes.Caravan, new List<string>
+      { nameof(OnPlayerEnterCaravan), nameof(OnPlayerExitCaravan),
+        nameof(OnCaravanStop)
+      }
+    },
+    { PvpBubbleTypes.Convoy, new List<string>
+      { nameof(OnPlayerEnterConvoy), nameof(OnPlayerExitConvoy),
+        nameof(OnConvoyStop)
+      }
+    },
+    { PvpBubbleTypes.DefendableHomes, new List<string>
+      { nameof(OnPlayerEnterDefendableHomes),
+        nameof(OnPlayerExitDefendableHomes)
+      }
+    },
+    { PvpBubbleTypes.Shipwreck, new List<string>
+      { nameof(OnPlayerEnterShipwreck), nameof(OnPlayerExitShipwreck),
+        nameof(OnShipwreckStop)
+      }
+    },
+    { PvpBubbleTypes.Space, new List<string>
+      { nameof(OnPlayerEnterSpace), nameof(OnPlayerExitSpace),
+        nameof(OnSpaceEventStop)
+      }
+    },
+    { PvpBubbleTypes.Sputnik, new List<string>
+      { nameof(OnPlayerEnterSputnik), nameof(OnPlayerExitSputnik)
+      }
+    },
+    { PvpBubbleTypes.Triangulation, new List<string>
+      { nameof(OnPlayerEnterTriangulation), nameof(OnPlayerExitTriangulation),
+        nameof(OnTriangulationEnd)
+      }
+    }
+  };
 
   // PVP events that are managed via listening to start/stop hooks that provide
   //  a PVP area definition
   private enum PvpLocationEventType
   {
     // KpucTaJl plugins
-    AirEvent,
-    ArcticBaseEvent,
-    FerryTerminalEvent,
-    GasStationEvent,
-    HarborEvent,
-    JunkyardEvent,
-    PowerPlantEvent,
-    SatelliteDishEvent,
-    SupermarketEvent,
-    WaterEvent
+    Air,
+    ArcticBase,
+    FerryTerminal,
+    GasStation,
+    Harbor,
+    Junkyard,
+    PowerPlant,
+    SatelliteDish,
+    Supermarket,
+    Water
   }
+
+  private readonly Dictionary<PvpLocationEventType, List<string>>
+    _pvpLocationEventHooks = new()
+  { { PvpLocationEventType.Air, new List<string>
+      { nameof(OnAirEventStart), nameof(OnAirEventEnd)
+      }
+    },
+    { PvpLocationEventType.ArcticBase, new List<string>
+      { nameof(OnArcticBaseEventStart), nameof(OnArcticBaseEventEnd)
+      }
+    },
+    { PvpLocationEventType.FerryTerminal, new List<string>
+      { nameof(OnFerryTerminalEventStart), nameof(OnFerryTerminalEventEnd)
+      }
+    },
+    { PvpLocationEventType.GasStation, new List<string>
+      { nameof(OnGasStationEventStart), nameof(OnGasStationEventEnd)
+      }
+    },
+    { PvpLocationEventType.Harbor, new List<string>
+      { nameof(OnHarborEventStart), nameof(OnHarborEventEnd)
+      }
+    },
+    { PvpLocationEventType.Junkyard, new List<string>
+      { nameof(OnJunkyardEventStart), nameof(OnJunkyardEventEnd)
+      }
+    },
+    { PvpLocationEventType.PowerPlant, new List<string>
+      { nameof(OnPowerPlantEventStart), nameof(OnPowerPlantEventEnd)
+      }
+    },
+    { PvpLocationEventType.SatelliteDish, new List<string>
+      { nameof(OnSatDishEventStart), nameof(OnSatDishEventEnd)
+      }
+    },
+    { PvpLocationEventType.Supermarket, new List<string>
+      { nameof(OnSupermarketEventStart), nameof(OnSupermarketEventEnd)
+      }
+    },
+    { PvpLocationEventType.Water, new List<string>
+      { nameof(OnWaterEventStart), nameof(OnWaterEventEnd)
+      }
+    }
+  };
+
 
   [PluginReference] Plugin
     AbandonedBases, DynamicPVP, DangerousTreasures, PlayerBasePvpZones,
@@ -112,6 +203,103 @@ public class SuperPVxInfo : RustPlugin
   #endregion Plugin Data
 
   #region Utility Methods
+
+  private bool IsEventEnabled(PvpBubbleTypes type) => type switch
+  {
+    PvpBubbleTypes.None
+      => true, // return true to avoid a _pvpBubbleEventHooks dictionary lookup
+    PvpBubbleTypes.ArmoredTrain
+      => _configData?.PvpPlugins?.ArmoredTrain is true,
+    PvpBubbleTypes.Caravan
+      => _configData?.PvpPlugins?.Caravan is true,
+    PvpBubbleTypes.CargoTrainEvent
+      => true, // always enabled because it provides PVP specific hooks
+    PvpBubbleTypes.Convoy
+      => _configData?.PvpPlugins?.Convoy is true,
+    PvpBubbleTypes.DefendableHomes
+      => _configData?.PvpPlugins?.DefendableHomes is true,
+    PvpBubbleTypes.Shipwreck
+      => _configData?.PvpPlugins?.Shipwreck is true,
+    PvpBubbleTypes.Space
+      => _configData?.PvpPlugins?.Space is true,
+    PvpBubbleTypes.Sputnik
+      => _configData?.PvpPlugins?.Sputnik is true,
+    PvpBubbleTypes.Triangulation
+      => _configData?.PvpPlugins?.Triangulation is true
+  };
+
+  private bool IsEventEnabled(PvpLocationEventType type) => type switch
+  {
+    PvpLocationEventType.Air
+      => _configData?.PvpPlugins?.AirEvent is true,
+    PvpLocationEventType.ArcticBase
+      => _configData?.PvpPlugins?.ArcticBaseEvent is true,
+    PvpLocationEventType.FerryTerminal
+      => _configData?.PvpPlugins?.FerryTerminalEvent is true,
+    PvpLocationEventType.GasStation
+      => _configData?.PvpPlugins?.GasStationEvent is true,
+    PvpLocationEventType.Harbor
+      => _configData?.PvpPlugins?.HarborEvent is true,
+    PvpLocationEventType.Junkyard
+      => _configData?.PvpPlugins?.JunkyardEvent is true,
+    PvpLocationEventType.PowerPlant
+      => _configData?.PvpPlugins?.PowerPlantEvent is true,
+    PvpLocationEventType.SatelliteDish
+      => _configData?.PvpPlugins?.SatelliteDishEvent is true,
+    PvpLocationEventType.Supermarket
+      => _configData?.PvpPlugins?.SupermarketEvent is true,
+    PvpLocationEventType.Water
+      => _configData?.PvpPlugins?.WaterEvent is true
+  };
+
+  private bool IsEventEnabled<T>(T type) => type switch
+  {
+    PvpBubbleTypes pvpBubbleTypes
+      => IsEventEnabled(pvpBubbleTypes),
+    PvpLocationEventType pvpLocationEventType
+      => IsEventEnabled(pvpLocationEventType),
+    _
+      => true
+  };
+
+  private void InitEventHooks<T>(Dictionary<T, List<string>> hookDictionary)
+    where T : Enum
+  {
+    // var nameOfT = typeof(T).Name;
+    foreach (
+      T eventType in Enum.GetValues(typeof(T)))
+    {
+      if (IsEventEnabled(eventType))
+      {
+        // Puts($"{nameOfT} event {eventType} support enabled");
+        continue;
+      }
+      // Puts($"Disabling {nameOfT} event {eventType} support:");
+      if (!hookDictionary.TryGetValue(eventType, out var eventHooks))
+      {
+        // PrintWarning($" No hooks defined for {nameOfT} event {eventType}");
+        continue;
+      }
+      foreach (var eventHook in eventHooks)
+      {
+        Unsubscribe(eventHook);
+        // Puts($" Unsubscribed hook {eventHook} for {nameOfT} event {eventType}");
+      }
+    }
+  }
+
+  private int ScrubEventData()
+  {
+    var removeCount = 0;
+    foreach (PvpLocationEventType eventType
+             in Enum.GetValues(typeof(PvpLocationEventType)))
+    {
+      if (IsEventEnabled(eventType)) continue;
+      if (!_storedData.PvpEvents.Remove(eventType)) continue;
+      ++removeCount;
+    }
+    return removeCount;
+  }
 
   private static bool IsValidPlayer(BasePlayer player, bool checkConnected) =>
     player &&
@@ -204,80 +392,8 @@ public class SuperPVxInfo : RustPlugin
       AddCovalenceCommand(_configData?.ToggleCommand, nameof(ToggleUI));
     }
     // only listen to hooks from event plugins that are configured as PVP
-    if (_configData?.PvpPlugins?.AirEvent is not true)
-    {
-      Unsubscribe(nameof(OnAirEventStart));
-      Unsubscribe(nameof(OnAirEventEnd));
-    }
-    if (_configData?.PvpPlugins?.ArcticBaseEvent is not true)
-    {
-      Unsubscribe(nameof(OnArcticBaseEventStart));
-      Unsubscribe(nameof(OnArcticBaseEventEnd));
-    }
-    if (_configData?.PvpPlugins?.ArmoredTrain is not true)
-    {
-      Unsubscribe(nameof(OnPlayerEnterArmoredTrain));
-      Unsubscribe(nameof(OnPlayerExitArmoredTrain));
-      Unsubscribe(nameof(OnArmoredTrainStartMoving));
-      Unsubscribe(nameof(OnArmoredTrainEventStop));
-    }
-    if (_configData?.PvpPlugins?.Caravan is not true)
-    {
-      Unsubscribe(nameof(OnPlayerEnterCaravan));
-      Unsubscribe(nameof(OnPlayerExitCaravan));
-      Unsubscribe(nameof(OnCaravanStop));
-    }
-    if (_configData?.PvpPlugins?.Convoy is not true)
-    {
-      Unsubscribe(nameof(OnPlayerEnterConvoy));
-      Unsubscribe(nameof(OnPlayerExitConvoy));
-      Unsubscribe(nameof(OnConvoyStop));
-    }
-    if (_configData?.PvpPlugins?.FerryTerminalEvent is not true)
-    {
-      Unsubscribe(nameof(OnFerryTerminalEventStart));
-      Unsubscribe(nameof(OnFerryTerminalEventEnd));
-    }
-    if (_configData?.PvpPlugins?.GasStationEvent is not true)
-    {
-      Unsubscribe(nameof(OnGasStationEventStart));
-      Unsubscribe(nameof(OnGasStationEventEnd));
-    }
-    if (_configData?.PvpPlugins?.HarborEvent is not true)
-    {
-      Unsubscribe(nameof(OnHarborEventStart));
-      Unsubscribe(nameof(OnHarborEventEnd));
-    }
-    if (_configData?.PvpPlugins?.JunkyardEvent is not true)
-    {
-      Unsubscribe(nameof(OnJunkyardEventStart));
-      Unsubscribe(nameof(OnJunkyardEventEnd));
-    }
-    if (_configData?.PvpPlugins?.PowerPlantEvent is not true)
-    {
-      Unsubscribe(nameof(OnPowerPlantEventStart));
-      Unsubscribe(nameof(OnPowerPlantEventEnd));
-    }
-    if (_configData?.PvpPlugins?.SatelliteDishEvent is not true)
-    {
-      Unsubscribe(nameof(OnSatDishEventStart));
-      Unsubscribe(nameof(OnSatDishEventEnd));
-    }
-    if (_configData?.PvpPlugins?.Sputnik is not true)
-    {
-      Unsubscribe(nameof(OnPlayerEnterSputnik));
-      Unsubscribe(nameof(OnPlayerExitSputnik));
-    }
-    if (_configData?.PvpPlugins?.SupermarketEvent is not true)
-    {
-      Unsubscribe(nameof(OnSupermarketEventStart));
-      Unsubscribe(nameof(OnSupermarketEventEnd));
-    }
-    if (_configData?.PvpPlugins?.WaterEvent is not true)
-    {
-      Unsubscribe(nameof(OnWaterEventStart));
-      Unsubscribe(nameof(OnWaterEventEnd));
-    }
+    InitEventHooks(_pvpBubbleEventHooks);
+    InitEventHooks(_pvpLocationEventHooks);
   }
 
   private void OnServerInitialized(bool isStartup)
@@ -368,7 +484,7 @@ public class SuperPVxInfo : RustPlugin
         if (isStartup)
         {
           // don't use events from a previous server run
-          PrintWarning($"OnServerInitialized(): Purging {oldEventsCount} obsolete PVP event record(s)");
+          Puts($"OnServerInitialized(): Purging {oldEventsCount} obsolete saved PVP event record(s)");
           saveData = true;
         }
         else
@@ -378,6 +494,7 @@ public class SuperPVxInfo : RustPlugin
           var migratedCount = 0;
           foreach (var (eventType, eventData) in _storedData.PendingPvpEvents)
           {
+            if (!IsEventEnabled(eventType)) continue;
             if (!_storedData.PvpEvents.TryAdd(eventType, eventData)) continue;
             ++migratedCount;
           }
@@ -388,6 +505,15 @@ public class SuperPVxInfo : RustPlugin
         }
         // purge pending list regardless, as we're done with it
         _storedData.PendingPvpEvents.Clear();
+      }
+
+      // be paranoid and scrub any disabled event data, in case it somehow got
+      //  added before we disabled hooks
+      var removeCount = ScrubEventData();
+      if (removeCount > 0)
+      {
+        Puts($"OnServerInitialized(): Purged {removeCount} saved PVP event record(s) for disabled events");
+        saveData = true;
       }
     }
     if (saveData)
@@ -449,9 +575,10 @@ public class SuperPVxInfo : RustPlugin
     if (watcher && watcher.isActiveAndEnabled) return;
 
     watcher = player.gameObject.AddComponent<PlayerWatcher>();
+    HashSet<PvpDelayType> pvpDelays = new();
+    GetPlayerPvpDelays(pvpDelays, player.userID.Get());
     watcher.Init(
-      IsPlayerInBase(player), IsPlayerInPVPDelay(player.userID.Get()),
-      GetPlayerZoneType(player), player);
+      IsPlayerInBase(player), pvpDelays, GetPlayerZoneType(player), player);
     watcher.StartWatching();
   }
 
@@ -749,22 +876,16 @@ public class SuperPVxInfo : RustPlugin
   private void CreateOrUpdatePvpLocationEvent(
     PvpLocationEventType type, Vector3 location, float radius)
   {
+    // Puts($"PVP location event create/update: type={type}, location={location}, radius={radius}");
     if (null == _storedData) return;
-    if (_storedData.PvpEvents.TryGetValue(type, out var eventData))
-    {
-      eventData.Location = location;
-      eventData.Radius = radius;
-    }
-    else
-    {
-      _storedData.PvpEvents.Add(type, new PvpEventData(location, radius));
-    }
+    _storedData.PvpEvents[type] = new PvpEventData(location, radius);
     SaveData();
   }
 
   // delete an event record with the given data, if any
   private void DeleteLocationPvpEvent(PvpLocationEventType type)
   {
+    // Puts($"PVP location event delete: type={type}");
     if (null == _storedData || !_storedData.PvpEvents.Remove(type)) return;
     SaveData();
   }
@@ -830,9 +951,10 @@ public class SuperPVxInfo : RustPlugin
   // check if player has any PVP delays active
   // this should only be called when hook-reported states don't exist yet, or
   //  can't be relied upon for some reason
-  private HashSet<PvpDelayType> IsPlayerInPVPDelay(ulong playerID)
+  private void GetPlayerPvpDelays(
+    HashSet<PvpDelayType> pvpDelays, ulong playerID)
   {
-    var pvpDelays = new HashSet<PvpDelayType>();
+    pvpDelays.Clear();
 
     if (AbandonedBases != null && Convert.ToBoolean(
           AbandonedBases.Call("HasPVPDelay", playerID)))
@@ -863,8 +985,6 @@ public class SuperPVxInfo : RustPlugin
     {
       pvpDelays.Add(PvpDelayType.TruePve);
     }
-
-    return pvpDelays;
   }
 
   // common logic for Abandoned/Raidable Base entry hooks
@@ -897,6 +1017,7 @@ public class SuperPVxInfo : RustPlugin
   private static void SetPvpBubble(
     BasePlayer player, PvpBubbleTypes type, bool state)
   {
+    // PlayerWatcher.Instance?.Puts($"PVP bubble event update: player={player}, type={type}, state={state}");
     if (!IsValidPlayer(player, true)) return;
     var watcher = GetPlayerWatcher(player);
     if (!watcher) return;
@@ -1095,23 +1216,6 @@ public class SuperPVxInfo : RustPlugin
 
   #region PVP Bubble Hook Handlers
 
-  #region Cargo Train Event Hook Handlers
-
-  private void OnPlayerEnterPVPBubble(
-    TrainEngine trainEngine, BasePlayer player) =>
-    NextTick(() => SetPvpBubble(
-      player, PvpBubbleTypes.CargoTrainEvent, true));
-
-  private void OnPlayerExitPVPBubble(
-    TrainEngine trainEngine, BasePlayer player) =>
-    NextTick(() => SetPvpBubble(
-      player, PvpBubbleTypes.CargoTrainEvent, false));
-
-  private void OnTrainEventEnded(TrainEngine trainEngine) =>
-    NextTick(static () => EndPvpBubble(PvpBubbleTypes.CargoTrainEvent));
-
-  #endregion Cargo Train Event Hook Handlers
-
   #region Adem Hook Handlers
 
   private void OnPlayerEnterArmoredTrain(BasePlayer player) =>
@@ -1146,6 +1250,24 @@ public class SuperPVxInfo : RustPlugin
   private void OnConvoyStop() =>
     NextTick(static () => EndPvpBubble(PvpBubbleTypes.Convoy));
 
+  private void OnPlayerEnterShipwreck(BasePlayer player) =>
+    NextTick(() => SetPvpBubble(player, PvpBubbleTypes.Shipwreck, true));
+
+  private void OnPlayerExitShipwreck(BasePlayer player) =>
+    NextTick(() => SetPvpBubble(player, PvpBubbleTypes.Shipwreck, false));
+
+  private void OnShipwreckStop() =>
+    NextTick(static () => EndPvpBubble(PvpBubbleTypes.Shipwreck));
+
+  private void OnPlayerEnterSpace(BasePlayer player) =>
+    NextTick(() => SetPvpBubble(player, PvpBubbleTypes.Space, true));
+
+  private void OnPlayerExitSpace(BasePlayer player) =>
+    NextTick(() => SetPvpBubble(player, PvpBubbleTypes.Space, false));
+
+  private void OnSpaceEventStop() =>
+    NextTick(static () => EndPvpBubble(PvpBubbleTypes.Space));
+
   private void OnPlayerEnterSputnik(BasePlayer player) =>
     NextTick(() => SetPvpBubble(player, PvpBubbleTypes.Sputnik, true));
 
@@ -1153,6 +1275,43 @@ public class SuperPVxInfo : RustPlugin
     NextTick(() => SetPvpBubble(player, PvpBubbleTypes.Sputnik, false));
 
   #endregion Adem Hook Handlers
+
+  #region KpucTaJl Hook Handlers
+
+  private void OnPlayerEnterDefendableHomes(BasePlayer player) =>
+    NextTick(() => SetPvpBubble(player, PvpBubbleTypes.DefendableHomes, true));
+
+  private void OnPlayerExitDefendableHomes(BasePlayer player) =>
+    NextTick(() => SetPvpBubble(
+      player, PvpBubbleTypes.DefendableHomes, false));
+
+  private void OnPlayerEnterTriangulation(BasePlayer player) =>
+    NextTick(() => SetPvpBubble(player, PvpBubbleTypes.Triangulation, true));
+
+  private void OnPlayerExitTriangulation(BasePlayer player) =>
+    NextTick(() => SetPvpBubble(player, PvpBubbleTypes.Triangulation, false));
+
+  private void OnTriangulationEnd() =>
+    NextTick(static () => EndPvpBubble(PvpBubbleTypes.Triangulation));
+
+  #endregion KpucTaJl Hook Handlers
+
+  #region Nikedemos Hook Handlers
+
+  private void OnPlayerEnterPVPBubble(
+    TrainEngine trainEngine, BasePlayer player) =>
+    NextTick(() => SetPvpBubble(
+      player, PvpBubbleTypes.CargoTrainEvent, true));
+
+  private void OnPlayerExitPVPBubble(
+    TrainEngine trainEngine, BasePlayer player) =>
+    NextTick(() => SetPvpBubble(
+      player, PvpBubbleTypes.CargoTrainEvent, false));
+
+  private void OnTrainEventEnded(TrainEngine trainEngine) =>
+    NextTick(static () => EndPvpBubble(PvpBubbleTypes.CargoTrainEvent));
+
+  #endregion Nikedemos Handlers
 
   #endregion PVP Bubble Hook Handlers
 
@@ -1201,91 +1360,95 @@ public class SuperPVxInfo : RustPlugin
 
   #endregion DynamicPVP Hook Handlers
 
+  #region PVP Location Hook Handlers
+
   #region KpucTaJl Hook Handlers
 
   private void OnAirEventStart(
     HashSet<BaseEntity> entities, Vector3 pos, float radius) =>
     NextTick(() => CreateOrUpdatePvpLocationEvent(
-      PvpLocationEventType.AirEvent, pos, radius));
+      PvpLocationEventType.Air, pos, radius));
 
   private void OnAirEventEnd() =>
     NextTick(() => DeleteLocationPvpEvent(
-      PvpLocationEventType.AirEvent));
+      PvpLocationEventType.Air));
 
   private void OnArcticBaseEventStart(Vector3 pos, float radius) =>
     NextTick(() => CreateOrUpdatePvpLocationEvent(
-      PvpLocationEventType.ArcticBaseEvent, pos, radius));
+      PvpLocationEventType.ArcticBase, pos, radius));
 
   private void OnArcticBaseEventEnd() =>
     NextTick(() => DeleteLocationPvpEvent(
-      PvpLocationEventType.ArcticBaseEvent));
+      PvpLocationEventType.ArcticBase));
 
   private void OnFerryTerminalEventStart(Vector3 pos, float radius) =>
     NextTick(() => CreateOrUpdatePvpLocationEvent(
-      PvpLocationEventType.FerryTerminalEvent, pos, radius));
+      PvpLocationEventType.FerryTerminal, pos, radius));
 
   private void OnFerryTerminalEventEnd() =>
     NextTick(() => DeleteLocationPvpEvent(
-      PvpLocationEventType.FerryTerminalEvent));
+      PvpLocationEventType.FerryTerminal));
 
   private void OnGasStationEventStart(Vector3 pos, float radius) =>
     NextTick(() => CreateOrUpdatePvpLocationEvent(
-      PvpLocationEventType.GasStationEvent, pos, radius));
+      PvpLocationEventType.GasStation, pos, radius));
 
   private void OnGasStationEventEnd() =>
     NextTick(() => DeleteLocationPvpEvent(
-      PvpLocationEventType.GasStationEvent));
+      PvpLocationEventType.GasStation));
 
   private void OnHarborEventStart(Vector3 pos, float radius) =>
     NextTick(() => CreateOrUpdatePvpLocationEvent(
-      PvpLocationEventType.HarborEvent, pos, radius));
+      PvpLocationEventType.Harbor, pos, radius));
 
   private void OnHarborEventEnd() =>
     NextTick(() => DeleteLocationPvpEvent(
-      PvpLocationEventType.HarborEvent));
+      PvpLocationEventType.Harbor));
 
   private void OnJunkyardEventStart(Vector3 pos, float radius) =>
     NextTick(() => CreateOrUpdatePvpLocationEvent(
-      PvpLocationEventType.JunkyardEvent, pos, radius));
+      PvpLocationEventType.Junkyard, pos, radius));
 
   private void OnJunkyardEventEnd() =>
     NextTick(() => DeleteLocationPvpEvent(
-      PvpLocationEventType.JunkyardEvent));
+      PvpLocationEventType.Junkyard));
 
   private void OnPowerPlantEventStart(Vector3 pos, float radius) =>
     NextTick(() => CreateOrUpdatePvpLocationEvent(
-      PvpLocationEventType.PowerPlantEvent, pos, radius));
+      PvpLocationEventType.PowerPlant, pos, radius));
 
   private void OnPowerPlantEventEnd() =>
     NextTick(() => DeleteLocationPvpEvent(
-      PvpLocationEventType.PowerPlantEvent));
+      PvpLocationEventType.PowerPlant));
 
   private void OnSatDishEventStart(Vector3 pos, float radius) =>
     NextTick(() => CreateOrUpdatePvpLocationEvent(
-      PvpLocationEventType.SatelliteDishEvent, pos, radius));
+      PvpLocationEventType.SatelliteDish, pos, radius));
 
   private void OnSatDishEventEnd() =>
     NextTick(() => DeleteLocationPvpEvent(
-      PvpLocationEventType.SatelliteDishEvent));
+      PvpLocationEventType.SatelliteDish));
 
   private void OnSupermarketEventStart(Vector3 pos, float radius) =>
     NextTick(() => CreateOrUpdatePvpLocationEvent(
-      PvpLocationEventType.SupermarketEvent, pos, radius));
+      PvpLocationEventType.Supermarket, pos, radius));
 
   private void OnSupermarketEventEnd() =>
     NextTick(() => DeleteLocationPvpEvent(
-      PvpLocationEventType.SupermarketEvent));
+      PvpLocationEventType.Supermarket));
 
   private void OnWaterEventStart(
     HashSet<BaseEntity> entities, Vector3 pos, float radius) =>
     NextTick(() => CreateOrUpdatePvpLocationEvent(
-      PvpLocationEventType.WaterEvent, pos, radius));
+      PvpLocationEventType.Water, pos, radius));
 
   private void OnWaterEventEnd() =>
     NextTick(() => DeleteLocationPvpEvent(
-      PvpLocationEventType.WaterEvent));
+      PvpLocationEventType.Water));
 
   #endregion KpucTaJl Hook Handlers
+
+  #endregion PVP Location Hook Handlers
 
   #endregion PVP Plugin Integrations
 
@@ -1549,6 +1712,9 @@ public class SuperPVxInfo : RustPlugin
     [JsonProperty("Convoy")]
     public bool Convoy { get; set; } = true;
 
+    [JsonProperty("Defendable Homes")]
+    public bool DefendableHomes { get; set; } = true;
+
     [JsonProperty("Ferry Terminal Event")]
     public bool FerryTerminalEvent { get; set; } = true;
 
@@ -1567,11 +1733,20 @@ public class SuperPVxInfo : RustPlugin
     [JsonProperty("Satellite Dish Event")]
     public bool SatelliteDishEvent { get; set; } = true;
 
+    [JsonProperty("Shipwreck")]
+    public bool Shipwreck { get; set; } = true;
+
+    [JsonProperty("Space")]
+    public bool Space { get; set; } = true;
+
     [JsonProperty("Sputnik")]
     public bool Sputnik { get; set; } = true;
 
     [JsonProperty("Supermarket Event")]
     public bool SupermarketEvent { get; set; } = true;
+
+    [JsonProperty("Triangulation")]
+    public bool Triangulation { get; set; } = true;
 
     [JsonProperty("Water Event")]
     public bool WaterEvent { get; set; } = true;
@@ -2224,7 +2399,7 @@ public class SuperPVxInfo : RustPlugin
       // PVP delay check
       if (_checkPvpDelay)
       {
-        _pvpDelays = Instance.IsPlayerInPVPDelay(_player.userID.Get());
+        Instance.GetPlayerPvpDelays(_pvpDelays, _player.userID.Get());
         _checkPvpDelay = false;
       }
 
