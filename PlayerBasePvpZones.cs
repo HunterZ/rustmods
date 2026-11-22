@@ -1,4 +1,4 @@
-﻿// Requires: ZoneManager
+// Requires: ZoneManager
 
 using Facepunch;
 using Newtonsoft.Json;
