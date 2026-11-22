@@ -1,4 +1,4 @@
-﻿//Requires: ZoneManager
+//Requires: ZoneManager
 
 using System;
 using System.Collections;

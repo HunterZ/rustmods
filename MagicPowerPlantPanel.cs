@@ -1,4 +1,4 @@
-﻿using HarmonyLib;
+using HarmonyLib;
 using JetBrains.Annotations;
 using Newtonsoft.Json;
 using Oxide.Core.Configuration;

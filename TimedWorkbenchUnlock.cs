@@ -1,4 +1,4 @@
-﻿using Newtonsoft.Json;
+using Newtonsoft.Json;
 using Oxide.Core.Libraries.Covalence;
 using System;
 using System.Collections.Generic;

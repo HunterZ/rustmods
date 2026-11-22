@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using Newtonsoft.Json.Converters;
 using Newtonsoft.Json;
 using Oxide.Core.Configuration;
