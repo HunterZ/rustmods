@@ -164,17 +164,6 @@ public class PlayerBasePvpZones : RustPlugin
     return true;
   }
 
-  // get the toggle dictionary for a given entity
-  private Dictionary<ulong, ToggleData> GetToggleDict(BaseNetworkable entity) =>
-    entity switch
-    {
-      BuildingPrivlidge => _persistData.BuildingToggleData,
-      PlayerBoat => _persistData.ModularBoatToggleData,
-      EntityPrivilege => _persistData.ShelterToggleData,
-      VehiclePrivilege tugboat and not PlayerBoatPrivilege => _persistData.TugboatToggleData,
-      _ => null
-    };
-
   // register a new zone entry with a creation timer
   private void RegisterNewEntry(
     BaseNetworkable entity, ulong? ownerID)
@@ -185,9 +174,7 @@ public class PlayerBasePvpZones : RustPlugin
     if (_zoneRecords.ContainsKey(netID)) return;
 
     // abort if zone toggled off
-    var toggleDict = GetToggleDict(entity);
-    if (toggleDict is not null &&
-        !GetToggleStates(toggleDict, netID).Item1)
+    if (!GetToggleStates(_persistData.ToggleData, netID).Item1)
     {
       return;
     }
@@ -319,9 +306,7 @@ public class PlayerBasePvpZones : RustPlugin
     if (_zoneRecords.ContainsKey(netID)) return;
 
     // abort if zone toggled off
-    var toggleDict = GetToggleDict(entity);
-    if (toggleDict is not null &&
-        !GetToggleStates(toggleDict, netID).Item1)
+    if (!GetToggleStates(_persistData.ToggleData, netID).Item1)
     {
       return;
     }
@@ -805,35 +790,12 @@ public class PlayerBasePvpZones : RustPlugin
       Subscribe(nameof(OnEntityTakeDamage));
     }
 
-    // clean up toggle data dictionaries, and save data file if anything changed
+    // clean up toggle data dictionary, and save data file if anything changed
     // NOTE: this mainly handles the case that a wipe happened between sessions
-    var saveData = false;
-    if (CleanupToggleDict(_persistData.BuildingToggleData) is
-        var defunctBuildings and > 0)
+    if (CleanupToggleDict(_persistData.ToggleData) is
+        var defunct and > 0)
     {
-      Puts($"Removed {defunctBuildings} defunct building zone toggle data entries from data file");
-      saveData = true;
-    }
-    if (CleanupToggleDict(_persistData.ModularBoatToggleData) is
-        var defunctModularBoats and > 0)
-    {
-      Puts($"Removed {defunctModularBoats} defunct modular boat zone toggle data entries from data file");
-      saveData = true;
-    }
-    if (CleanupToggleDict(_persistData.ShelterToggleData) is
-        var defunctShelters and > 0)
-    {
-      Puts($"Removed {defunctShelters} defunct shelter zone toggle data entries from data file");
-      saveData = true;
-    }
-    if (CleanupToggleDict(_persistData.TugboatToggleData) is
-        var defunctTugboats and > 0)
-    {
-      Puts($"Removed {defunctTugboats} defunct tugboat zone toggle data entries from data file");
-      saveData = true;
-    }
-    if (saveData)
-    {
+      Puts($"Removed {defunct} defunct zone toggle data entries from data file");
       SaveData();
     }
 
@@ -990,7 +952,52 @@ public class PlayerBasePvpZones : RustPlugin
       Puts($"LoadData(): Error reading data file: {ex}");
       _persistData = null;
     }
-    if (_persistData == null) ClearData();
+
+    // migrate from legacy 4-dictionary format if needed
+    if (_persistData is null ||
+        _persistData.ToggleData is null ||
+        _persistData.ToggleData.Count == 0)
+    {
+      try
+      {
+        var legacy =
+          Interface.Oxide.DataFileSystem.ReadObject<LegacyPersistData>(Name);
+        if (legacy is not null)
+        {
+          _persistData = new PersistData();
+          _persistData.ToggleData = new Dictionary<ulong, ToggleData>();
+          MergeDict(_persistData.ToggleData, legacy.BuildingToggleData);
+          MergeDict(_persistData.ToggleData, legacy.ModularBoatToggleData);
+          MergeDict(_persistData.ToggleData, legacy.ShelterToggleData);
+          MergeDict(_persistData.ToggleData, legacy.TugboatToggleData);
+          Puts($"LoadData(): Migrated {
+            _persistData.ToggleData.Count} toggle entries to combined format");
+          SaveData();
+          return;
+        }
+      }
+      catch (Exception ex)
+      {
+        Puts($"LoadData(): Error reading legacy data file: {ex}");
+      }
+    }
+
+    // both reads failed — start fresh
+    if (_persistData is null)
+    {
+      ClearData();
+    }
+  }
+
+  // merge a source dictionary into a target dictionary
+  private static void MergeDict(
+    Dictionary<ulong, ToggleData> target, Dictionary<ulong, ToggleData> source)
+  {
+    if (source is null) return;
+    foreach (var kvp in source)
+    {
+      target[kvp.Key] = kvp.Value;
+    }
   }
 
   private void ClearData()
@@ -1311,7 +1318,7 @@ public class PlayerBasePvpZones : RustPlugin
       // record damage lockout
       // NOTE: state=true is specified because we've verified that a zone exists
       SetToggleStates(
-        _persistData.BuildingToggleData, toolCupboardID, true,
+        _persistData.ToggleData, toolCupboardID, true,
         LockoutReason.Damage);
     });
 
@@ -1336,7 +1343,7 @@ public class PlayerBasePvpZones : RustPlugin
       // record damage lockout
       // NOTE: state=true is specified because we've verified that a zone exists
       SetToggleStates(
-        _persistData.BuildingToggleData, toolCupboardID, true,
+        _persistData.ToggleData, toolCupboardID, true,
         LockoutReason.Damage);
     });
 
@@ -1361,7 +1368,7 @@ public class PlayerBasePvpZones : RustPlugin
       // record damage lockout
       // NOTE: state=true is specified because we've verified that a zone exists
       SetToggleStates(
-        _persistData.ModularBoatToggleData, modularBoatID, true,
+        _persistData.ToggleData, modularBoatID, true,
         LockoutReason.Damage);
     });
 
@@ -1387,7 +1394,7 @@ public class PlayerBasePvpZones : RustPlugin
       // record damage lockout
       // NOTE: state=true is specified because we've verified that a zone exists
       SetToggleStates(
-        _persistData.ShelterToggleData, legacyShelterID, true,
+        _persistData.ToggleData, legacyShelterID, true,
         LockoutReason.Damage);
     });
 
@@ -1411,7 +1418,7 @@ public class PlayerBasePvpZones : RustPlugin
       // record damage lockout
       // NOTE: state=true is specified because we've verified that a zone exists
       SetToggleStates(
-        _persistData.TugboatToggleData, tugboatID, true, LockoutReason.Damage);
+        _persistData.ToggleData, tugboatID, true, LockoutReason.Damage);
     });
 
     return null;
@@ -1484,12 +1491,11 @@ public class PlayerBasePvpZones : RustPlugin
   // apply zone toggle logic for given player and zone record
   private void ToggleZone(
     BasePlayer player, ZoneRecord record,
-    Dictionary<ulong, ToggleData> toggleDict,
     BaseNetworkable entity)
   {
     if (!player || !player.userID.IsSteamId()) return;
     var netID = GetNetworkableID(entity);
-    var toggleStates = GetToggleStates(toggleDict, netID);
+    var toggleStates = GetToggleStates(_persistData.ToggleData, netID);
 
     // abort if lockout in progress
     var lockoutMessage = GetLockoutMessageName(toggleStates.Item2);
@@ -1508,7 +1514,7 @@ public class PlayerBasePvpZones : RustPlugin
           this, player.UserIDString)));
 
         // record disabled state and apply toggle lockout (if applicable)
-        SetToggleStates(toggleDict, netID, false, LockoutReason.Toggle);
+        SetToggleStates(_persistData.ToggleData, netID, false, LockoutReason.Toggle);
 
         // cancel zone creation to keep it as PVE
         CancelZoneTimer(ref record);
@@ -1521,7 +1527,7 @@ public class PlayerBasePvpZones : RustPlugin
           this, player.UserIDString)));
 
         // record toggle state and apply lockout (if applicable)
-        SetToggleStates(toggleDict, netID, true, LockoutReason.Toggle);
+        SetToggleStates(_persistData.ToggleData, netID, true, LockoutReason.Toggle);
 
         // cancel zone delete to keep it as PVP
         CancelZoneTimer(ref record);
@@ -1534,7 +1540,7 @@ public class PlayerBasePvpZones : RustPlugin
           this, player.UserIDString)));
 
         // record toggle state and apply lockout (if applicable)
-        SetToggleStates(toggleDict, netID, false, LockoutReason.Toggle);
+        SetToggleStates(_persistData.ToggleData, netID, false, LockoutReason.Toggle);
 
         // schedule zone delete to convert it to PVE
         switch (entity)
@@ -1565,7 +1571,7 @@ public class PlayerBasePvpZones : RustPlugin
           this, player.UserIDString)));
 
         // record toggle state and apply lockout (if applicable)
-        SetToggleStates(toggleDict, netID, true, LockoutReason.Toggle);
+        SetToggleStates(_persistData.ToggleData, netID, true, LockoutReason.Toggle);
 
         // schedule zone create to convert it to PVP
         switch (entity)
@@ -1615,8 +1621,7 @@ public class PlayerBasePvpZones : RustPlugin
       var netID = GetNetworkableID(modularBoat);
       if (_zoneRecords.TryGetValue(netID, out var record))
       {
-        ToggleZone(player, record,
-          _persistData.ModularBoatToggleData, modularBoat);
+        ToggleZone(player, record, modularBoat);
       }
       return;
     }
@@ -1627,8 +1632,7 @@ public class PlayerBasePvpZones : RustPlugin
       var netID = GetNetworkableID(tugboat);
       if (_zoneRecords.TryGetValue(netID, out var record))
       {
-        ToggleZone(player, record,
-          _persistData.TugboatToggleData, tugboat);
+        ToggleZone(player, record, tugboat);
       }
       return;
     }
@@ -1641,8 +1645,7 @@ public class PlayerBasePvpZones : RustPlugin
       var netID = GetNetworkableID(building);
       if (_zoneRecords.TryGetValue(netID, out var record))
       {
-        ToggleZone(player, record,
-          _persistData.BuildingToggleData, building);
+        ToggleZone(player, record, building);
       }
       return;
     }
@@ -1653,8 +1656,7 @@ public class PlayerBasePvpZones : RustPlugin
       var netID = GetNetworkableID(shelter);
       if (_zoneRecords.TryGetValue(netID, out var record))
       {
-        ToggleZone(player, record,
-          _persistData.ShelterToggleData, shelter);
+        ToggleZone(player, record, shelter);
       }
       return;
     }
@@ -2366,13 +2368,20 @@ public class PlayerBasePvpZones : RustPlugin
   private sealed class PersistData
   {
     public Dictionary<ulong, ToggleData>
-      BuildingToggleData    { get; set; } = new();
+      ToggleData { get; set; } = new();
+  }
+
+  // legacy data file format (pre-migration)
+  private sealed class LegacyPersistData
+  {
     public Dictionary<ulong, ToggleData>
-      ModularBoatToggleData { get; set; } = new();
+      BuildingToggleData    { get; set; }
     public Dictionary<ulong, ToggleData>
-      ShelterToggleData     { get; set; } = new();
+      ModularBoatToggleData { get; set; }
     public Dictionary<ulong, ToggleData>
-      TugboatToggleData     { get; set; } = new();
+      ShelterToggleData     { get; set; }
+    public Dictionary<ulong, ToggleData>
+      TugboatToggleData     { get; set; }
   }
 
   // state data pertaining to zone toggling
