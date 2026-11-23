@@ -156,12 +156,11 @@ public class PlayerBasePvpZones : RustPlugin
   }
 
   // cancel the check timer on a zone record, returning true if one was found
-  private static bool CancelCheckTimer(ref ZoneRecord record)
+  private static void CancelCheckTimer(ref ZoneRecord record)
   {
-    if (record.CheckTimer is null) return false;
+    if (record.CheckTimer is null) return;
     DestroyTimer(record.CheckTimer);
     record.CheckTimer = null;
-    return true;
   }
 
   // register a new zone entry with a creation timer
@@ -792,12 +791,7 @@ public class PlayerBasePvpZones : RustPlugin
 
     // clean up toggle data dictionary, and save data file if anything changed
     // NOTE: this mainly handles the case that a wipe happened between sessions
-    if (CleanupToggleDict(_persistData.ToggleData) is
-        var defunct and > 0)
-    {
-      Puts($"Removed {defunct} defunct zone toggle data entries from data file");
-      SaveData();
-    }
+    CleanupToggleDict();
 
     NextTick(() =>
     {
@@ -841,11 +835,8 @@ public class PlayerBasePvpZones : RustPlugin
         var record = kvp.Value;
         CancelZoneTimer(ref record);
         CancelCheckTimer(ref record);
-        if (record.Data is not null)
-        {
-          record.Data.Free();
-          record.Data = null;
-        }
+        record.Data?.Free();
+        record.Data = null;
         bulkDeleteList.Add(GetZoneID(kvp.Key));
       }
       _zoneRecords.Clear();
@@ -942,6 +933,9 @@ public class PlayerBasePvpZones : RustPlugin
 
   private void LoadData()
   {
+    var tryMigrate = false;
+    _persistData = null;
+
     try
     {
       _persistData =
@@ -949,14 +943,12 @@ public class PlayerBasePvpZones : RustPlugin
     }
     catch (Exception ex)
     {
-      Puts($"LoadData(): Error reading data file: {ex}");
-      _persistData = null;
+      PrintWarning($"LoadData(): Error reading data file - will try to migrate: {ex}");
+      tryMigrate = true;
     }
 
     // migrate from legacy 4-dictionary format if needed
-    if (_persistData is null ||
-        _persistData.ToggleData is null ||
-        _persistData.ToggleData.Count == 0)
+    if (tryMigrate)
     {
       try
       {
@@ -964,21 +956,22 @@ public class PlayerBasePvpZones : RustPlugin
           Interface.Oxide.DataFileSystem.ReadObject<LegacyPersistData>(Name);
         if (legacy is not null)
         {
-          _persistData = new PersistData();
-          _persistData.ToggleData = new Dictionary<ulong, ToggleData>();
+          _persistData = new PersistData
+          {
+            ToggleData = new Dictionary<ulong, ToggleData>()
+          };
           MergeDict(_persistData.ToggleData, legacy.BuildingToggleData);
           MergeDict(_persistData.ToggleData, legacy.ModularBoatToggleData);
           MergeDict(_persistData.ToggleData, legacy.ShelterToggleData);
           MergeDict(_persistData.ToggleData, legacy.TugboatToggleData);
-          Puts($"LoadData(): Migrated {
-            _persistData.ToggleData.Count} toggle entries to combined format");
+          Puts($"LoadData(): Migrated {_persistData.ToggleData.Count} toggle entries to combined format");
           SaveData();
           return;
         }
       }
       catch (Exception ex)
       {
-        Puts($"LoadData(): Error reading legacy data file: {ex}");
+        PrintWarning($"LoadData(): Error reading legacy data file: {ex}");
       }
     }
 
@@ -2446,16 +2439,17 @@ public class PlayerBasePvpZones : RustPlugin
     return retVal;
   }
 
-  // prune any dead entities from given toggle dictionary
+  // prune any dead entities from toggle dictionary, and save on change
+  //
   // NOTE: doesn't bother expiring lockouts or pruning redundant entries, as
   //  this will get done when checking remaining entries during zone creation
-  private static int CleanupToggleDict(
-    Dictionary<ulong, ToggleData> toggleDict)
+  private void CleanupToggleDict()
   {
-    // not worth using pooling here, as it will be 3 lists per plugin lifetime
+    // not worth using pooling for one instance per plugin run
     HashSet<ulong> deadKeys = new();
 
-    foreach (var id in toggleDict.Keys)
+  var toggleData = _persistData.ToggleData;
+    foreach (var id in toggleData.Keys)
     {
       if (!BaseNetworkable.serverEntities.Contains(GetNetworkableID(id)))
       {
@@ -2467,10 +2461,14 @@ public class PlayerBasePvpZones : RustPlugin
     // trash any dead keys
     foreach (var key in deadKeys)
     {
-      toggleDict.Remove(key);
+      toggleData.Remove(key);
     }
 
-    return deadKeys.Count;
+    var deadCount = deadKeys.Count;
+    if (deadCount is <= 0) return;
+
+    Puts($"Removed {deadCount} defunct zone toggle data entries from data file");
+    SaveData();
   }
 
   private readonly (bool, LockoutReason, float) _defaultToggleStates =
