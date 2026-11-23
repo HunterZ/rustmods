@@ -25,7 +25,7 @@ public class PlayerBasePvpZones : RustPlugin
   private ConfigData _configData = new();
 
   // persistent data
-  private PersistData _persistData = new();
+  private PersistData _persistData;
 
   // _persistData disk write delay timer
   private Timer _saveDataTimer;
@@ -933,7 +933,6 @@ public class PlayerBasePvpZones : RustPlugin
 
   private void LoadData()
   {
-    var tryMigrate = false;
     _persistData = null;
 
     try
@@ -944,42 +943,38 @@ public class PlayerBasePvpZones : RustPlugin
     catch (Exception ex)
     {
       PrintWarning($"LoadData(): Error reading data file - will try to migrate: {ex}");
-      tryMigrate = true;
+      _persistData = null;
     }
 
-    // migrate from legacy 4-dictionary format if needed
-    if (tryMigrate)
+    if (_persistData is not null) return;
+
+    // attempt to migrate from legacy 4-dictionary format
+    try
     {
-      try
+      var legacyData =
+        Interface.Oxide.DataFileSystem.ReadObject<LegacyPersistData>(Name);
+      if (legacyData is not null)
       {
-        var legacy =
-          Interface.Oxide.DataFileSystem.ReadObject<LegacyPersistData>(Name);
-        if (legacy is not null)
-        {
-          _persistData = new PersistData
-          {
-            ToggleData = new Dictionary<ulong, ToggleData>()
-          };
-          MergeDict(_persistData.ToggleData, legacy.BuildingToggleData);
-          MergeDict(_persistData.ToggleData, legacy.ModularBoatToggleData);
-          MergeDict(_persistData.ToggleData, legacy.ShelterToggleData);
-          MergeDict(_persistData.ToggleData, legacy.TugboatToggleData);
-          Puts($"LoadData(): Migrated {_persistData.ToggleData.Count} toggle entries to combined format");
-          SaveData();
-          return;
-        }
-      }
-      catch (Exception ex)
-      {
-        PrintWarning($"LoadData(): Error reading legacy data file: {ex}");
+        _persistData = new PersistData();
+        MergeDict(_persistData.ToggleData, legacyData.BuildingToggleData);
+        MergeDict(_persistData.ToggleData, legacyData.ModularBoatToggleData);
+        MergeDict(_persistData.ToggleData, legacyData.ShelterToggleData);
+        MergeDict(_persistData.ToggleData, legacyData.TugboatToggleData);
+        Puts($"LoadData(): Migrated {_persistData.ToggleData.Count} toggle entries to combined format");
+        SaveData();
+        return;
       }
     }
+    catch (Exception ex)
+    {
+      PrintWarning($"LoadData(): Error migrating data file: {ex}");
+      _persistData = null;
+    }
+
+    if (_persistData is not null) return;
 
     // both reads failed — start fresh
-    if (_persistData is null)
-    {
-      ClearData();
-    }
+    ClearData();
   }
 
   // merge a source dictionary into a target dictionary
@@ -2360,21 +2355,16 @@ public class PlayerBasePvpZones : RustPlugin
   // data file structure
   private sealed class PersistData
   {
-    public Dictionary<ulong, ToggleData>
-      ToggleData { get; set; } = new();
+    public Dictionary<ulong, ToggleData> ToggleData { get; set; } = new();
   }
 
-  // legacy data file format (pre-migration)
+  // legacy data file format to support migration
   private sealed class LegacyPersistData
   {
-    public Dictionary<ulong, ToggleData>
-      BuildingToggleData    { get; set; }
-    public Dictionary<ulong, ToggleData>
-      ModularBoatToggleData { get; set; }
-    public Dictionary<ulong, ToggleData>
-      ShelterToggleData     { get; set; }
-    public Dictionary<ulong, ToggleData>
-      TugboatToggleData     { get; set; }
+    public Dictionary<ulong, ToggleData> BuildingToggleData    { get; set; }
+    public Dictionary<ulong, ToggleData> ModularBoatToggleData { get; set; }
+    public Dictionary<ulong, ToggleData> ShelterToggleData     { get; set; }
+    public Dictionary<ulong, ToggleData> TugboatToggleData     { get; set; }
   }
 
   // state data pertaining to zone toggling
