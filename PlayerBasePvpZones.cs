@@ -164,20 +164,20 @@ public class PlayerBasePvpZones : RustPlugin
     return true;
   }
 
-  // get the toggle dictionary for a given zone type
-  private Dictionary<ulong, ToggleData> GetToggleDict(ZoneType type) =>
-    type switch
+  // get the toggle dictionary for a given entity
+  private Dictionary<ulong, ToggleData> GetToggleDict(BaseNetworkable entity) =>
+    entity switch
     {
-      ZoneType.Building => _persistData.BuildingToggleData,
-      ZoneType.ModularBoat => _persistData.ModularBoatToggleData,
-      ZoneType.Shelter => _persistData.ShelterToggleData,
-      ZoneType.Tugboat => _persistData.TugboatToggleData,
+      BuildingPrivlidge => _persistData.BuildingToggleData,
+      PlayerBoat => _persistData.ModularBoatToggleData,
+      EntityPrivilege => _persistData.ShelterToggleData,
+      VehiclePrivilege tugboat and not PlayerBoatPrivilege => _persistData.TugboatToggleData,
       _ => null
     };
 
   // register a new zone entry with a creation timer
   private void RegisterNewEntry(
-    ZoneType type, BaseNetworkable entity, ulong? ownerID)
+    BaseNetworkable entity, ulong? ownerID)
   {
     var netID = GetNetworkableID(entity);
 
@@ -185,7 +185,7 @@ public class PlayerBasePvpZones : RustPlugin
     if (_zoneRecords.ContainsKey(netID)) return;
 
     // abort if zone toggled off
-    var toggleDict = GetToggleDict(type);
+    var toggleDict = GetToggleDict(entity);
     if (toggleDict is not null &&
         !GetToggleStates(toggleDict, netID).Item1)
     {
@@ -193,7 +193,7 @@ public class PlayerBasePvpZones : RustPlugin
     }
 
     // create the zone record
-    var record = new ZoneRecord(type);
+    var record = new ZoneRecord();
     _zoneRecords.Add(netID, record);
 
     // schedule creation
@@ -241,40 +241,36 @@ public class PlayerBasePvpZones : RustPlugin
     if (notifyZone) NotifyZoneDelete(netID);
   }
 
-  // create the appropriate BaseData for a given zone record and entity
-  private BaseData CreateBaseData(ZoneRecord record, BaseNetworkable entity)
+  // create the appropriate BaseData for a given entity
+  private BaseData CreateBaseData(BaseNetworkable entity)
   {
-    switch (record.Type)
+    switch (entity)
     {
-      case ZoneType.Building:
+      case BuildingPrivlidge toolCupboard:
       {
-        var toolCupboard = entity as BuildingPrivlidge;
         if (!IsValid(toolCupboard)) return null;
         var (position, radius) = CalculateBuildingSphere(toolCupboard);
         var data = Pool.Get<BuildingData>();
         data.Init(toolCupboard, position, radius);
         return data;
       }
-      case ZoneType.ModularBoat:
+      case PlayerBoat boat:
       {
-        var boat = entity as PlayerBoat;
         if (!IsValid(boat)) return null;
         var data = Pool.Get<ModularBoatData>();
         data.Init(boat, _configData.ModularBoat.Radius);
         return data;
       }
-      case ZoneType.Shelter:
+      case EntityPrivilege shelter:
       {
-        var shelter = entity as EntityPrivilege;
         if (!IsValid(shelter)) return null;
         var data = Pool.Get<ShelterData>();
         data.Init(shelter, _configData.Shelter.Radius);
         return data;
       }
-      case ZoneType.Tugboat:
+      case VehiclePrivilege tugboat and not PlayerBoatPrivilege:
       {
-        var tugboat = entity as VehiclePrivilege;
-        if (!IsValid(tugboat) || tugboat is PlayerBoatPrivilege) return null;
+        if (!IsValid(tugboat)) return null;
         var data = Pool.Get<TugboatData>();
         data.Init(
           tugboat, _configData.Tugboat.Radius,
@@ -296,7 +292,7 @@ public class PlayerBasePvpZones : RustPlugin
     CancelZoneTimer(ref record);
 
     // create the base data
-    var data = CreateBaseData(record, entity);
+    var data = CreateBaseData(entity);
     if (null == data) return;
     record.Data = data;
 
@@ -307,7 +303,7 @@ public class PlayerBasePvpZones : RustPlugin
     }
 
     // schedule check for buildings
-    if (record.Type == ZoneType.Building)
+    if (record.Data is BuildingData)
     {
       ScheduleCheckBuildingData(netID);
     }
@@ -315,7 +311,7 @@ public class PlayerBasePvpZones : RustPlugin
 
   // immediately create a zone (no delay) for startup or tugboat spawn
   private void ImmediateCreateZone(
-    ZoneType type, BaseNetworkable entity, ulong? ownerID)
+    BaseNetworkable entity, ulong? ownerID)
   {
     var netID = GetNetworkableID(entity);
 
@@ -323,7 +319,7 @@ public class PlayerBasePvpZones : RustPlugin
     if (_zoneRecords.ContainsKey(netID)) return;
 
     // abort if zone toggled off
-    var toggleDict = GetToggleDict(type);
+    var toggleDict = GetToggleDict(entity);
     if (toggleDict is not null &&
         !GetToggleStates(toggleDict, netID).Item1)
     {
@@ -331,11 +327,11 @@ public class PlayerBasePvpZones : RustPlugin
     }
 
     // create the zone record
-    var record = new ZoneRecord(type);
+    var record = new ZoneRecord();
     _zoneRecords.Add(netID, record);
 
     // create the base data immediately
-    var data = CreateBaseData(record, entity);
+    var data = CreateBaseData(entity);
     if (null == data)
     {
       _zoneRecords.Remove(netID);
@@ -350,7 +346,7 @@ public class PlayerBasePvpZones : RustPlugin
     }
 
     // schedule check for buildings
-    if (record.Type == ZoneType.Building)
+    if (record.Data is BuildingData)
     {
       ScheduleCheckBuildingData(netID);
     }
@@ -386,8 +382,7 @@ public class PlayerBasePvpZones : RustPlugin
   {
     // abort if base is unknown, or if any timers are already running
     if (!_zoneRecords.TryGetValue(toolCupboardID, out var record) ||
-        record.Type != ZoneType.Building ||
-        record.Data is null ||
+        record.Data is not BuildingData ||
         record.LifecycleTimer is not null ||
         record.CheckTimer is not null)
     {
@@ -680,7 +675,7 @@ public class PlayerBasePvpZones : RustPlugin
     {
       var toolCupboard = GetToolCupboard(building);
       if (!IsPlayerOwned(toolCupboard)) continue;
-      ImmediateCreateZone(ZoneType.Building, toolCupboard, toolCupboard.OwnerID);
+      ImmediateCreateZone(toolCupboard, toolCupboard.OwnerID);
       yield return DynamicYield();
     }
 
@@ -690,7 +685,7 @@ public class PlayerBasePvpZones : RustPlugin
     {
       if (serverEntity is PlayerBoat modularBoat)
       {
-        ImmediateCreateZone(ZoneType.ModularBoat, modularBoat, GetOwnerID(modularBoat));
+        ImmediateCreateZone(modularBoat, GetOwnerID(modularBoat));
         yield return DynamicYield();
       }
       else if (
@@ -698,7 +693,7 @@ public class PlayerBasePvpZones : RustPlugin
         //  to ignore those
         serverEntity is VehiclePrivilege tugboat and not PlayerBoatPrivilege)
       {
-        ImmediateCreateZone(ZoneType.Tugboat, tugboat, tugboat.OwnerID);
+        ImmediateCreateZone(tugboat, tugboat.OwnerID);
         yield return DynamicYield();
       }
     }
@@ -714,7 +709,7 @@ public class PlayerBasePvpZones : RustPlugin
         {
           continue;
         }
-        ImmediateCreateZone(ZoneType.Shelter, legacyShelter, GetOwnerID(legacyShelter));
+        ImmediateCreateZone(legacyShelter, GetOwnerID(legacyShelter));
         yield return DynamicYield();
       }
     }
@@ -1239,7 +1234,7 @@ public class PlayerBasePvpZones : RustPlugin
 
     // schedule creation of new player base record + zone
     NextTick(() => RegisterNewEntry(
-      ZoneType.Building, toolCupboard, toolCupboard.OwnerID));
+      toolCupboard, toolCupboard.OwnerID));
   }
 
   // called when a modular boat is spawned
@@ -1252,7 +1247,7 @@ public class PlayerBasePvpZones : RustPlugin
       // schedule creation of new modular boat record + zone
       if (!IsPlayerOwned(modularBoat)) return;
       RegisterNewEntry(
-        ZoneType.ModularBoat, modularBoat, GetOwnerID(modularBoat));
+        modularBoat, GetOwnerID(modularBoat));
     });
   }
 
@@ -1270,7 +1265,7 @@ public class PlayerBasePvpZones : RustPlugin
       if (!IsPlayerOwned(legacyShelter)) return;
       // schedule creation of new player base record + zone
       RegisterNewEntry(
-        ZoneType.Shelter, legacyShelter, GetOwnerID(legacyShelter));
+        legacyShelter, GetOwnerID(legacyShelter));
     });
   }
 
@@ -1284,7 +1279,7 @@ public class PlayerBasePvpZones : RustPlugin
     // (tugboats have no creation delay because players can't normally (de)spawn
     //  them at will)
     NextTick(() => ImmediateCreateZone(
-      ZoneType.Tugboat, tugboat, tugboat.OwnerID));
+      tugboat, tugboat.OwnerID));
   }
 
   // called when a building block is damaged
@@ -1762,12 +1757,12 @@ public class PlayerBasePvpZones : RustPlugin
   {
     if (null == record?.Data) return false;
 
-    var zoneName = record.Type switch
+    var zoneName = record.Data switch
     {
-      ZoneType.Building => "building",
-      ZoneType.ModularBoat => "modularboat",
-      ZoneType.Shelter => "shelter",
-      ZoneType.Tugboat => "tugboat",
+      BuildingData => "building",
+      ModularBoatData => "modularboat",
+      ShelterData => "shelter",
+      TugboatData => "tugboat",
       _ => "unknown"
     };
 
@@ -1781,12 +1776,10 @@ public class PlayerBasePvpZones : RustPlugin
     }
 
     // tether ZoneManager zone to entity if applicable
-    var transform = record.Type switch
+    var transform = record.Data switch
     {
-      ZoneType.ModularBoat =>
-        (record.Data as ModularBoatData)?.ModularBoat?.transform,
-      ZoneType.Tugboat =>
-        (record.Data as TugboatData)?.Tugboat?.GetParentEntity()?.transform,
+      ModularBoatData boatData => boatData.ModularBoat?.transform,
+      TugboatData tugboatData => tugboatData.Tugboat?.GetParentEntity()?.transform,
       _ => null
     };
     if (transform) TetherZone(zoneID, transform);
@@ -1963,15 +1956,6 @@ public class PlayerBasePvpZones : RustPlugin
     }
   }
 
-  // zone type enumeration
-  private enum ZoneType
-  {
-    Building,
-    ModularBoat,
-    Shelter,
-    Tugboat
-  }
-
   // zone lifecycle state
   private enum ZoneState
   {
@@ -1988,15 +1972,9 @@ public class PlayerBasePvpZones : RustPlugin
   // unified zone record container
   private sealed class ZoneRecord
   {
-    public ZoneType Type { get; }
     public BaseData Data { get; set; }
     public Timer LifecycleTimer { get; set; }
     public Timer CheckTimer { get; set; }
-
-    public ZoneRecord(ZoneType type)
-    {
-      Type = type;
-    }
 
     public ZoneState GetZoneState()
     {
