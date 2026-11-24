@@ -179,7 +179,7 @@ public class PlayerBasePvpZones : RustPlugin
     }
 
     // create the zone record
-    var record = new ZoneRecord();
+    var record = Pool.Get<ZoneRecord>();
     _zoneRecords.Add(netID, record);
 
     // schedule creation
@@ -310,18 +310,17 @@ public class PlayerBasePvpZones : RustPlugin
       return;
     }
 
-    // create the zone record
-    var record = new ZoneRecord();
-    _zoneRecords.Add(netID, record);
-
     // create the base data immediately
     var data = CreateBaseData(entity);
     if (null == data)
     {
-      _zoneRecords.Remove(netID);
       return;
     }
+
+    // create the zone record
+    var record = Pool.Get<ZoneRecord>();
     record.Data = data;
+    _zoneRecords.Add(netID, record);
 
     // create the zone
     if (ZM_CreateOrUpdateZone(record, netID))
@@ -341,13 +340,16 @@ public class PlayerBasePvpZones : RustPlugin
     NetworkableId netID, List<string> bulkDeleteList = null)
   {
     // abort if unknown
-    if (!_zoneRecords.TryGetValue(netID, out var record)) return;
+    if (!_zoneRecords.Remove(netID, out var record)) return;
 
     // clean up the deletion timer
     CancelZoneTimer(ref record);
 
-    // remove the record
-    _zoneRecords.Remove(netID);
+    // free the base data, if any
+    record.Data?.Free();
+
+    // free the record
+    record.Free();
 
     // destroy the zone
     if (null == bulkDeleteList)
@@ -836,8 +838,8 @@ public class PlayerBasePvpZones : RustPlugin
         CancelZoneTimer(ref record);
         CancelCheckTimer(ref record);
         record.Data?.Free();
-        record.Data = null;
         bulkDeleteList.Add(GetZoneID(kvp.Key));
+        record.Free();
       }
       _zoneRecords.Clear();
     }
@@ -1960,7 +1962,7 @@ public class PlayerBasePvpZones : RustPlugin
   }
 
   // unified zone record container
-  private sealed class ZoneRecord
+  private sealed class ZoneRecord : Pool.IPooled
   {
     public BaseData Data { get; set; }
     public Timer LifecycleTimer { get; set; }
@@ -1972,6 +1974,24 @@ public class PlayerBasePvpZones : RustPlugin
       if (Data is not null && LifecycleTimer is not null) return ZoneState.PendingDeletion;
       if (Data is not null) return ZoneState.Active;
       return ZoneState.Inactive;
+    }
+
+    public void EnterPool()
+    {
+      Data = null;
+      LifecycleTimer = null;
+      CheckTimer = null;
+    }
+
+    public void LeavePool()
+    {
+      // nothing to do
+    }
+
+    public void Free()
+    {
+      var self = this;
+      Pool.Free(ref self);
     }
   }
 
@@ -2368,12 +2388,10 @@ public class PlayerBasePvpZones : RustPlugin
   }
 
   // state data pertaining to zone toggling
-  private sealed class ToggleData
+  // NOTE: struct (value type) so dictionary entries carry no per-entry heap
+  //  allocation, and Newtonsoft.Json deserialization is unaffected by pooling
+  private struct ToggleData
   {
-    public ToggleData()
-    {
-    }
-
     public ToggleData(
       LockoutReason lockReason, DateTime unlockTime, bool zoneEnabled)
     {
@@ -2406,7 +2424,7 @@ public class PlayerBasePvpZones : RustPlugin
   }
 
   private static CleanupToggleResults CleanupToggleData(
-    ToggleData toggleData, DateTime curTime)
+    ref ToggleData toggleData, DateTime curTime)
   {
     var retVal = CleanupToggleResults.None;
 
@@ -2483,7 +2501,7 @@ public class PlayerBasePvpZones : RustPlugin
 
     var changed = false;
     var curTime = DateTime.UtcNow;
-    var cleanupState = CleanupToggleData(toggleData, curTime);
+    var cleanupState = CleanupToggleData(ref toggleData, curTime);
     if (cleanupState.HasFlag(CleanupToggleResults.Defunct))
     {
       toggleDict.Remove(netId.Value);
@@ -2491,6 +2509,7 @@ public class PlayerBasePvpZones : RustPlugin
     }
     else if (cleanupState.HasFlag(CleanupToggleResults.Changed))
     {
+      toggleDict[netId.Value] = toggleData;
       changed = true;
     }
     if (changed)
@@ -2567,6 +2586,7 @@ public class PlayerBasePvpZones : RustPlugin
 
     if (!changed) return;
 
+    toggleDict[netId.Value] = toggleData;
     SaveData();
   }
 
