@@ -90,11 +90,12 @@ public class PlayerBasePvpZones : RustPlugin
     var radius = _configData.Building.MinimumBuildingRadius;
 
     // get building, aborting if not found
-    var building = toolCupboard?.GetBuilding();
+    var building = toolCupboard ? toolCupboard.GetBuilding() : null;
     if (building is null)
     {
       PrintError($"Tool cupboard {toolCupboard} has no attached building; aborting");
-      return (toolCupboard?.CenterPoint() ?? Vector3.zero, radius);
+      return
+        (toolCupboard ? toolCupboard.CenterPoint() : Vector3.zero, radius);
     }
 
     // get an overall building center by averaging all relevant building
@@ -117,7 +118,8 @@ public class PlayerBasePvpZones : RustPlugin
     {
       foreach (var entity in building.decayEntities)
       {
-        if (entity is not AutoTurret turret) continue;
+        var turret = entity as AutoTurret;
+        if (!turret) continue;
         var position = turret.CenterPoint();
         positionSum += position;
         _decayEntityData.Add(
@@ -167,32 +169,31 @@ public class PlayerBasePvpZones : RustPlugin
     if (!GetToggleStates(netID).Item1) return;
 
     // create the zone record
-    var record = Pool.Get<ZoneRecord>();
-    _zoneRecords.Add(netID, record);
+    var zoneRecord = Pool.Get<ZoneRecord>();
+    _zoneRecords.Add(netID, zoneRecord);
 
     // schedule creation
-    record.LifecycleTimer = timer.Once(
-      _configData.CreateDelaySeconds,
-      () => CreateZone(netID, entity));
+    zoneRecord.LifecycleTimer = timer.Once(
+      _configData.CreateDelaySeconds, () => CreateZone(netID, entity));
 
     // notify owner
-    if (_configData.CreateNotify && ownerID is not null)
-    {
-      NotifyOwnerCreate((ulong)ownerID);
-    }
+    if (!_configData.CreateNotify || ownerID is null) return;
+    NotifyOwnerCreate((ulong)ownerID);
   }
 
   // initiate the deletion sequence for a zone
   private void ScheduleDeleteZone(
     NetworkableId netID, ulong? ownerID)
   {
-    // abort if unknown
-    if (!_zoneRecords.TryGetValue(netID, out var record)) return;
+    // abort if unknown or already pending deletion
+    if (!_zoneRecords.TryGetValue(netID, out var record) ||
+        record.GetZoneState() is ZoneState.PendingDeletion) return;
 
     var notifyZone = _configData.DeleteNotify;
 
     // notify owner if this was pending creation
-    if (CancelTimer(ref record.LifecycleTimer) && _configData.CreateNotify &&
+    if (CancelTimer(ref record.LifecycleTimer) &&
+        _configData.CreateNotify &&
         ownerID is not null)
     {
       NotifyOwnerAbort((ulong)ownerID);
@@ -202,9 +203,6 @@ public class PlayerBasePvpZones : RustPlugin
 
     // cancel any check timer
     CancelTimer(ref record.CheckTimer);
-
-    // abort if deletion timer is already running
-    if (record.LifecycleTimer is not null) return;
 
     // schedule deletion
     record.LifecycleTimer = timer.Once(
@@ -272,7 +270,7 @@ public class PlayerBasePvpZones : RustPlugin
 
     // create the base data
     var data = CreateBaseData(entity);
-    if (null == data) return;
+    if (data is null) return;
     record.Data = data;
 
     // create the zone
@@ -300,11 +298,7 @@ public class PlayerBasePvpZones : RustPlugin
     if (!GetToggleStates(netID).Item1) return;
 
     // create the base data immediately
-    var data = CreateBaseData(entity);
-    if (null == data)
-    {
-      return;
-    }
+    if (CreateBaseData(entity) is not { } data) return;
 
     // create the zone record
     var record = Pool.Get<ZoneRecord>();
@@ -335,7 +329,7 @@ public class PlayerBasePvpZones : RustPlugin
     record.Free();
 
     // destroy the zone
-    if (null == bulkDeleteList)
+    if (bulkDeleteList is null)
     {
       TP_RemoveMapping(netID);
       ZM_EraseZone(netID);
@@ -378,8 +372,8 @@ public class PlayerBasePvpZones : RustPlugin
     }
 
     // get building record, aborting if unknown or no TC reference
-    var buildingData = record.Data as BuildingData;
-    if (null == buildingData || !IsValid(buildingData.ToolCupboard))
+    if (record.Data is not BuildingData buildingData ||
+        !IsValid(buildingData.ToolCupboard))
     {
       return;
     }
@@ -388,8 +382,7 @@ public class PlayerBasePvpZones : RustPlugin
     var toolCupboard = buildingData.ToolCupboard;
 
     // get building record, aborting if not found
-    var building = toolCupboard.GetBuilding();
-    if (null == building) return;
+    if (toolCupboard.GetBuilding() is null) return;
 
     // get updated building footprint data
     var (position, radius) = CalculateBuildingSphere(toolCupboard);
@@ -749,7 +742,7 @@ public class PlayerBasePvpZones : RustPlugin
 
     permission.RegisterPermission(GetPermission(TogglePermission), this);
 
-    if (null == _configData) return;
+    if (_configData is null) return;
     _decayEntityData.Clear();
     BaseData.SphereDarkness = _configData.SphereDarkness;
   }
@@ -835,8 +828,7 @@ public class PlayerBasePvpZones : RustPlugin
       Puts($"Unload():  Destroying {_playerZones.Count} player-in-zones records...");
       foreach (var playerZoneData in _playerZones)
       {
-        var zones = playerZoneData.Value;
-        if (null == zones) continue;
+        if (playerZoneData.Value is not { } zones) continue;
         Pool.FreeUnmanaged(ref zones);
       }
       _playerZones.Clear();
@@ -869,7 +861,7 @@ public class PlayerBasePvpZones : RustPlugin
     try
     {
       _configData = Config.ReadObject<ConfigData>();
-      if (null == _configData)
+      if (_configData is null)
       {
         LoadDefaultConfig();
       }
@@ -938,11 +930,11 @@ public class PlayerBasePvpZones : RustPlugin
       if (legacyData is not null)
       {
         _persistData = new PersistData();
-        MergeDict(_persistData.ToggleData, legacyData.BuildingToggleData);
-        MergeDict(_persistData.ToggleData, legacyData.ModularBoatToggleData);
-        MergeDict(_persistData.ToggleData, legacyData.ShelterToggleData);
-        MergeDict(_persistData.ToggleData, legacyData.TugboatToggleData);
-        Puts($"LoadData(): Migrated {_persistData.ToggleData.Count} toggle entries to combined format");
+        MergeDict(_persistData.ZoneToggleData, legacyData.BuildingToggleData);
+        MergeDict(_persistData.ZoneToggleData, legacyData.ModularBoatToggleData);
+        MergeDict(_persistData.ZoneToggleData, legacyData.ShelterToggleData);
+        MergeDict(_persistData.ZoneToggleData, legacyData.TugboatToggleData);
+        Puts($"LoadData(): Migrated {_persistData.ZoneToggleData.Count} toggle entries to combined format");
         SaveData();
         return;
       }
@@ -1008,8 +1000,7 @@ public class PlayerBasePvpZones : RustPlugin
     // cache modular boat ID
     var modularBoatID = GetNetworkableID(modularBoat);
     // owner player ID too
-    var ownerID = GetOwnerID(modularBoat);
-    if (ownerID is null) return;
+    if (GetOwnerID(modularBoat) is not { } ownerID) return;
 
     // if we have a record on this modular boat, clear its entity reference ASAP
     //  to minimize side effects
@@ -1050,13 +1041,15 @@ public class PlayerBasePvpZones : RustPlugin
 
     // if we have a record on this tugboat, clear its entity reference ASAP to
     //  minimize side effects
-    // NOTE: we can abort here if we have no record, because tugboats have no
-    //  creation delay
+    //
+    // NOTE: we can abort here if we have no record or data, because tugboats
+    //  have no creation delay
     if (!_zoneRecords.TryGetValue(tugboatID, out var record) ||
         record.Data is null)
     {
       return;
     }
+
     // disconnect sphere(s) and/or zone if requested
     if (disconnect)
     {
@@ -1700,16 +1693,21 @@ public class PlayerBasePvpZones : RustPlugin
   // credit: CatMeat & Arainrr for examples via DynamicPVP
   private static void TetherZone(string zoneID, Transform parentTransform)
   {
-    var zoneTransform = ZM_GetZoneByID(zoneID)?.transform;
-    if (zoneTransform is null || !zoneTransform) return;
+    var zone = ZM_GetZoneByID(zoneID);
+    if (!zone) return;
+    var zoneTransform = zone.transform;
     zoneTransform.SetParent(parentTransform);
     zoneTransform.rotation = parentTransform.rotation;
     zoneTransform.position = parentTransform.position;
   }
 
   // untether a ZoneManager zone from its parent transform (if any)
-  private static void UntetherZone(string zoneID) =>
-    ZM_GetZoneByID(zoneID)?.transform.SetParent(null, true);
+  private static void UntetherZone(string zoneID)
+  {
+    var zone = ZM_GetZoneByID(zoneID);
+    if (!zone) return;
+    zone.transform.SetParent(null, true);
+  }
 
   // create or update a ZoneManager zone
   private bool ZM_CreateOrUpdateZone(
@@ -1720,9 +1718,9 @@ public class PlayerBasePvpZones : RustPlugin
   // create or update a ZoneManager zone for given zone record
   private bool ZM_CreateOrUpdateZone(ZoneRecord record, NetworkableId netID)
   {
-    if (null == record?.Data) return false;
+    if (record?.Data is not { } baseData) return false;
 
-    var zoneName = record.Data switch
+    var zoneName = baseData switch
     {
       BuildingData => "building",
       ModularBoatData => "modularboat",
@@ -1734,20 +1732,15 @@ public class PlayerBasePvpZones : RustPlugin
     var zoneID = GetZoneID(netID);
     if (!ZM_CreateOrUpdateZone(
           zoneID,
-          GetZoneOptions(ZoneIdPrefix + zoneName, record.Data.Radius),
-          record.Data.Location))
+          GetZoneOptions(ZoneIdPrefix + zoneName, baseData.Radius),
+          baseData.Location))
     {
       return false;
     }
 
     // tether ZoneManager zone to entity if applicable
-    var transform = record.Data switch
-    {
-      ModularBoatData boatData => boatData.ModularBoat?.transform,
-      TugboatData tugboatData => tugboatData.Tugboat?.GetParentEntity()?.transform,
-      _ => null
-    };
-    if (transform) TetherZone(zoneID, transform);
+    var tetherTransform = baseData.GetTetherTransform();
+    if (tetherTransform) TetherZone(zoneID, tetherTransform);
 
     return true;
   }
@@ -1792,9 +1785,8 @@ public class PlayerBasePvpZones : RustPlugin
     if (!playerID.IsSteamId()) return;
 
     // abort if not one of ours
-    var networkableId = GetNetworkableID(zoneID);
-    if (null == networkableId ||
-        !IsKnownPlayerBaseId((NetworkableId)networkableId))
+    if (GetNetworkableID(zoneID) is not { } networkableId ||
+        !IsKnownPlayerBaseId(networkableId))
     {
       return;
     }
@@ -1806,7 +1798,7 @@ public class PlayerBasePvpZones : RustPlugin
       zones = Pool.Get<HashSet<NetworkableId>>();
       _playerZones.Add(playerID, zones);
     }
-    zones.Add((NetworkableId)networkableId);
+    zones.Add(networkableId);
 
     // cancel any active pvp delay
     PlayerBasePvpDelayStop(playerID);
@@ -1821,9 +1813,8 @@ public class PlayerBasePvpZones : RustPlugin
     if (!playerID.IsSteamId()) return;
 
     // abort if not one of ours
-    var networkableId = GetNetworkableID(zoneID);
-    if (null == networkableId ||
-        !IsKnownPlayerBaseId((NetworkableId)networkableId))
+    if (GetNetworkableID(zoneID) is not { } networkableId ||
+        !IsKnownPlayerBaseId(networkableId))
     {
       return;
     }
@@ -1832,7 +1823,7 @@ public class PlayerBasePvpZones : RustPlugin
     var stillInZone = false;
     if (_playerZones.TryGetValue(playerID, out var zones) && null != zones)
     {
-      zones.Remove((NetworkableId)networkableId);
+      zones.Remove(networkableId);
       // player may still be in an overlapping base zone
       if (zones.Count > 0) stillInZone = true;
     }
@@ -2004,7 +1995,7 @@ public class PlayerBasePvpZones : RustPlugin
 
     private void CreateSpheres()
     {
-      if (null == SphereList) return;
+      if (SphereList is null) return;
       for (var i = 0; i < SphereDarkness; ++i)
       {
         var sphere = GameManager.server.CreateEntity(
@@ -2020,7 +2011,7 @@ public class PlayerBasePvpZones : RustPlugin
 
     private void DestroySpheres()
     {
-      if (null == SphereList) return;
+      if (SphereList is null) return;
       foreach (var sphere in SphereList)
       {
         if (!IsValid(sphere)) continue;
@@ -2048,7 +2039,7 @@ public class PlayerBasePvpZones : RustPlugin
     // needs to initialize instances for use
     public void LeavePool()
     {
-      if (null == SphereList && SphereDarkness > 0)
+      if (SphereList is null && SphereDarkness > 0)
       {
         SphereList = Pool.Get<List<SphereEntity>>();
       }
@@ -2059,12 +2050,11 @@ public class PlayerBasePvpZones : RustPlugin
     //  iterate over a list of spheres
     public void Update(Vector3? location = null, float? radius = null)
     {
-      if (null == location && null == radius) return;
+      if (location is null && radius is null) return;
+      if (location is not null) Location = (Vector3)location;
+      if (radius is not null)   Radius   = (float)radius;
 
-      if (null != location) Location = (Vector3)location;
-      if (null != radius) Radius = (float)radius;
-
-      if (null == SphereList) return;
+      if (SphereList is null) return;
       foreach (var sphere in SphereList)
       {
         if (!IsValid(sphere)) continue;
@@ -2072,6 +2062,8 @@ public class PlayerBasePvpZones : RustPlugin
         if (null != radius) sphere.LerpRadiusTo(Radius * 2.0f, Radius / 2.0f);
       }
     }
+
+    public abstract Transform GetTetherTransform();
   }
 
   // extension of BaseData to track tool cupboard based player buildings
@@ -2098,6 +2090,8 @@ public class PlayerBasePvpZones : RustPlugin
       var self = this;
       Pool.Free(ref self);
     }
+
+    public override Transform GetTetherTransform() => null;
   }
 
   // extension of BaseData to track modular boats
@@ -2113,7 +2107,7 @@ public class PlayerBasePvpZones : RustPlugin
       ModularBoat = modularBoat;
 
       // parent spheres to the modular boat for now
-      if (null == SphereList) return;
+      if (SphereList is null) return;
       foreach (var sphere in SphereList)
       {
         if (!IsValid(sphere)) continue;
@@ -2137,7 +2131,7 @@ public class PlayerBasePvpZones : RustPlugin
 
       ModularBoat = null;
 
-      if (null == SphereList) return;
+      if (SphereList is null) return;
       // un-tether any spheres from the tugboat, and put them at its position
       foreach (var sphere in SphereList)
       {
@@ -2153,6 +2147,9 @@ public class PlayerBasePvpZones : RustPlugin
       var self = this;
       Pool.Free(ref self);
     }
+
+    public override Transform GetTetherTransform() =>
+      ModularBoat ? ModularBoat.transform : null;
   }
 
   // extension of BaseData to track legacy shelters
@@ -2179,6 +2176,8 @@ public class PlayerBasePvpZones : RustPlugin
       var self = this;
       Pool.Free(ref self);
     }
+
+    public override Transform GetTetherTransform() => null;
   }
 
   // extension of BaseData to track tugboats
@@ -2213,7 +2212,7 @@ public class PlayerBasePvpZones : RustPlugin
         }
       }
       // parent spheres to the tugboat
-      if (null == SphereList) return;
+      if (SphereList is null) return;
       foreach (var sphere in SphereList)
       {
         if (!IsValid(sphere)) continue;
@@ -2238,7 +2237,7 @@ public class PlayerBasePvpZones : RustPlugin
 
       Tugboat = null;
 
-      if (null == SphereList) return;
+      if (SphereList is null) return;
       // un-tether any spheres from the tugboat, and put them at its position
       foreach (var sphere in SphereList)
       {
@@ -2253,6 +2252,12 @@ public class PlayerBasePvpZones : RustPlugin
     {
       var self = this;
       Pool.Free(ref self);
+    }
+
+    public override Transform GetTetherTransform()
+    {
+      var tugboatParent = Tugboat ? Tugboat.GetParentEntity() : null;
+      return tugboatParent ? tugboatParent.transform : null;
     }
   }
 
@@ -2354,7 +2359,7 @@ public class PlayerBasePvpZones : RustPlugin
   // data file structure
   private sealed class PersistData
   {
-    public Dictionary<ulong, ToggleData> ToggleData { get; set; } = new();
+    public Dictionary<ulong, ToggleData> ZoneToggleData { get; set; } = new();
   }
 
   // legacy data file format to support migration
@@ -2416,7 +2421,7 @@ public class PlayerBasePvpZones : RustPlugin
       retVal |= CleanupToggleResults.Changed;
     }
 
-    if (LockoutReason.None == toggleData.LockReason && toggleData.ZoneEnabled)
+    if (toggleData is { LockReason: LockoutReason.None, ZoneEnabled: true })
     {
       // no reason to track enabled zone with no lockout in effect, as this is
       //  the default state
@@ -2435,7 +2440,7 @@ public class PlayerBasePvpZones : RustPlugin
     // not worth using pooling for one instance per plugin run
     HashSet<ulong> deadKeys = new();
 
-    var toggleData = _persistData.ToggleData;
+    var toggleData = _persistData.ZoneToggleData;
     foreach (var id in toggleData.Keys)
     {
       if (!BaseNetworkable.serverEntities.Contains(GetNetworkableID(id)))
@@ -2472,7 +2477,7 @@ public class PlayerBasePvpZones : RustPlugin
   private (bool, LockoutReason, float) GetToggleStates(NetworkableId netId)
   {
     // if no toggle entry, zone should be enabled
-    var toggleDict = _persistData.ToggleData;
+    var toggleDict = _persistData.ZoneToggleData;
     if (!toggleDict.TryGetValue(netId.Value, out var toggleData))
     {
       return _defaultToggleStates;
@@ -2532,7 +2537,7 @@ public class PlayerBasePvpZones : RustPlugin
       DateTime.MinValue : DateTime.UtcNow.AddSeconds(lockoutTime);
 
     // if no existing record, add one, schedule save, and return
-    var toggleDict = _persistData.ToggleData;
+    var toggleDict = _persistData.ZoneToggleData;
     if (!toggleDict.TryGetValue(netId.Value, out var toggleData))
     {
       // ...unless the record would be redundant
