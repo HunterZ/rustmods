@@ -146,21 +146,13 @@ public class PlayerBasePvpZones : RustPlugin
   }
 
 
-  // cancel the lifecycle timer, returning true if one was found
-  private static bool CancelZoneTimer(ref Timer timer)
+  // cancel and null the given timer, returning true unless already null
+  private static bool CancelTimer(ref Timer timer)
   {
     if (timer is null) return false;
     DestroyTimer(timer);
     timer = null;
     return true;
-  }
-
-  // cancel the check timer, returning true if one was found
-  private static void CancelCheckTimer(ref Timer timer)
-  {
-    if (timer is null) return;
-    DestroyTimer(timer);
-    timer = null;
   }
 
   // register a new zone entry with a creation timer
@@ -181,7 +173,7 @@ public class PlayerBasePvpZones : RustPlugin
     // schedule creation
     record.LifecycleTimer = timer.Once(
       _configData.CreateDelaySeconds,
-      () => CreateZoneData(netID, entity));
+      () => CreateZone(netID, entity));
 
     // notify owner
     if (_configData.CreateNotify && ownerID is not null)
@@ -200,7 +192,7 @@ public class PlayerBasePvpZones : RustPlugin
     var notifyZone = _configData.DeleteNotify;
 
     // notify owner if this was pending creation
-    if (CancelZoneTimer(ref record.LifecycleTimer) && _configData.CreateNotify &&
+    if (CancelTimer(ref record.LifecycleTimer) && _configData.CreateNotify &&
         ownerID is not null)
     {
       NotifyOwnerAbort((ulong)ownerID);
@@ -209,7 +201,7 @@ public class PlayerBasePvpZones : RustPlugin
     }
 
     // cancel any check timer
-    CancelCheckTimer(ref record.CheckTimer);
+    CancelTimer(ref record.CheckTimer);
 
     // abort if deletion timer is already running
     if (record.LifecycleTimer is not null) return;
@@ -217,7 +209,7 @@ public class PlayerBasePvpZones : RustPlugin
     // schedule deletion
     record.LifecycleTimer = timer.Once(
       _configData.DeleteDelaySeconds,
-      () => DeleteZoneData(netID));
+      () => DeleteZone(netID));
 
     // notify players in zone
     if (notifyZone) NotifyZoneDelete(netID);
@@ -270,13 +262,13 @@ public class PlayerBasePvpZones : RustPlugin
   }
 
   // create the zone data for a pending entry
-  private void CreateZoneData(NetworkableId netID, BaseNetworkable entity)
+  private void CreateZone(NetworkableId netID, BaseNetworkable entity)
   {
     // abort if unknown
     if (!_zoneRecords.TryGetValue(netID, out var record)) return;
 
     // clean up the creation timer
-    CancelZoneTimer(ref record.LifecycleTimer);
+    CancelTimer(ref record.LifecycleTimer);
 
     // create the base data
     var data = CreateBaseData(entity);
@@ -333,7 +325,7 @@ public class PlayerBasePvpZones : RustPlugin
   }
 
   // delete the zone data for a pending entry
-  private void DeleteZoneData(
+  private void DeleteZone(
     NetworkableId netID, List<string> bulkDeleteList = null)
   {
     // abort if unknown
@@ -377,7 +369,7 @@ public class PlayerBasePvpZones : RustPlugin
   {
     // clean up any check timer that may have invoked this
     if (!_zoneRecords.TryGetValue(toolCupboardID, out var record)) return;
-    CancelCheckTimer(ref record.CheckTimer);
+    CancelTimer(ref record.CheckTimer);
 
     // abort if this building is pending creation or deletion
     if (record.LifecycleTimer is not null || record.Data is null)
@@ -1484,7 +1476,7 @@ public class PlayerBasePvpZones : RustPlugin
         SetToggleStates(netID, false, LockoutReason.Toggle);
 
         // cancel zone creation to keep it as PVE
-        CancelZoneTimer(ref record.LifecycleTimer);
+        CancelTimer(ref record.LifecycleTimer);
 
         break;
       }
@@ -1498,7 +1490,7 @@ public class PlayerBasePvpZones : RustPlugin
         SetToggleStates(netID, true, LockoutReason.Toggle);
 
         // cancel zone delete to keep it as PVP
-        CancelZoneTimer(ref record.LifecycleTimer);
+        CancelTimer(ref record.LifecycleTimer);
 
         break;
       }
@@ -1966,8 +1958,8 @@ public class PlayerBasePvpZones : RustPlugin
     {
       Data?.Free();
       Data = null;
-      CancelZoneTimer(ref LifecycleTimer);
-      CancelCheckTimer(ref CheckTimer);
+      CancelTimer(ref LifecycleTimer);
+      CancelTimer(ref CheckTimer);
     }
 
     public void LeavePool()
