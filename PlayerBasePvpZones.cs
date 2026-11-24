@@ -146,21 +146,21 @@ public class PlayerBasePvpZones : RustPlugin
   }
 
 
-  // cancel the lifecycle timer on a zone record, returning true if one was found
-  private static bool CancelZoneTimer(ref ZoneRecord record)
+  // cancel the lifecycle timer, returning true if one was found
+  private static bool CancelZoneTimer(ref Timer timer)
   {
-    if (record.LifecycleTimer is null) return false;
-    DestroyTimer(record.LifecycleTimer);
-    record.LifecycleTimer = null;
+    if (timer is null) return false;
+    DestroyTimer(timer);
+    timer = null;
     return true;
   }
 
-  // cancel the check timer on a zone record, returning true if one was found
-  private static void CancelCheckTimer(ref ZoneRecord record)
+  // cancel the check timer, returning true if one was found
+  private static void CancelCheckTimer(ref Timer timer)
   {
-    if (record.CheckTimer is null) return;
-    DestroyTimer(record.CheckTimer);
-    record.CheckTimer = null;
+    if (timer is null) return;
+    DestroyTimer(timer);
+    timer = null;
   }
 
   // register a new zone entry with a creation timer
@@ -204,7 +204,7 @@ public class PlayerBasePvpZones : RustPlugin
     var notifyZone = _configData.DeleteNotify;
 
     // notify owner if this was pending creation
-    if (CancelZoneTimer(ref record) && _configData.CreateNotify &&
+    if (CancelZoneTimer(ref record.LifecycleTimer) && _configData.CreateNotify &&
         ownerID is not null)
     {
       NotifyOwnerAbort((ulong)ownerID);
@@ -213,7 +213,7 @@ public class PlayerBasePvpZones : RustPlugin
     }
 
     // cancel any check timer
-    CancelCheckTimer(ref record);
+    CancelCheckTimer(ref record.CheckTimer);
 
     // abort if deletion timer is already running
     if (record.LifecycleTimer is not null) return;
@@ -275,7 +275,7 @@ public class PlayerBasePvpZones : RustPlugin
     if (!_zoneRecords.TryGetValue(netID, out var record)) return;
 
     // clean up the creation timer
-    CancelZoneTimer(ref record);
+    CancelZoneTimer(ref record.LifecycleTimer);
 
     // create the base data
     var data = CreateBaseData(entity);
@@ -342,13 +342,7 @@ public class PlayerBasePvpZones : RustPlugin
     // abort if unknown
     if (!_zoneRecords.Remove(netID, out var record)) return;
 
-    // clean up the deletion timer
-    CancelZoneTimer(ref record);
-
-    // free the base data, if any
-    record.Data?.Free();
-
-    // free the record
+    // free the record (EnterPool() cancels timers and releases Data)
     record.Free();
 
     // destroy the zone
@@ -386,7 +380,7 @@ public class PlayerBasePvpZones : RustPlugin
   {
     // clean up any check timer that may have invoked this
     if (!_zoneRecords.TryGetValue(toolCupboardID, out var record)) return;
-    CancelCheckTimer(ref record);
+    CancelCheckTimer(ref record.CheckTimer);
 
     // abort if this building is pending creation or deletion
     if (record.LifecycleTimer is not null || record.Data is null)
@@ -835,9 +829,6 @@ public class PlayerBasePvpZones : RustPlugin
       foreach (var kvp in _zoneRecords)
       {
         var record = kvp.Value;
-        CancelZoneTimer(ref record);
-        CancelCheckTimer(ref record);
-        record.Data?.Free();
         bulkDeleteList.Add(GetZoneID(kvp.Key));
         record.Free();
       }
@@ -1507,7 +1498,7 @@ public class PlayerBasePvpZones : RustPlugin
         SetToggleStates(_persistData.ToggleData, netID, false, LockoutReason.Toggle);
 
         // cancel zone creation to keep it as PVE
-        CancelZoneTimer(ref record);
+        CancelZoneTimer(ref record.LifecycleTimer);
 
         break;
       }
@@ -1520,7 +1511,7 @@ public class PlayerBasePvpZones : RustPlugin
         SetToggleStates(_persistData.ToggleData, netID, true, LockoutReason.Toggle);
 
         // cancel zone delete to keep it as PVP
-        CancelZoneTimer(ref record);
+        CancelZoneTimer(ref record.LifecycleTimer);
 
         break;
       }
@@ -1965,8 +1956,8 @@ public class PlayerBasePvpZones : RustPlugin
   private sealed class ZoneRecord : Pool.IPooled
   {
     public BaseData Data { get; set; }
-    public Timer LifecycleTimer { get; set; }
-    public Timer CheckTimer { get; set; }
+    public Timer LifecycleTimer;
+    public Timer CheckTimer;
 
     public ZoneState GetZoneState()
     {
@@ -1978,9 +1969,10 @@ public class PlayerBasePvpZones : RustPlugin
 
     public void EnterPool()
     {
+      Data?.Free();
       Data = null;
-      LifecycleTimer = null;
-      CheckTimer = null;
+      CancelZoneTimer(ref LifecycleTimer);
+      CancelCheckTimer(ref CheckTimer);
     }
 
     public void LeavePool()
