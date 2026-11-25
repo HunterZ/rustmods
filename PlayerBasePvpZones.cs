@@ -557,17 +557,21 @@ public class PlayerBasePvpZones : RustPlugin
   //   BaseNetworkable baseNetworkable) where T : BaseNetworkable =>
   //   baseNetworkable is T entity ? GetValidOrNull(entity) : null;
 
-  private static (bool, ulong) IsValidPlayer(BasePlayer player)
+  private static bool TryGetUserID(BasePlayer player, out ulong userID)
   {
-    if (!player) return (false, 0UL);
-    var userID = player.userID.Get();
-    return (userID.IsSteamId(), userID);
+    userID = 0UL;
+    if (!player) return false;
+    userID = player.userID.Get();
+    return userID.IsSteamId();
   }
+
+  private static bool IsValidPlayer(BasePlayer player) =>
+    TryGetUserID(player, out _);
 
   private void NotifyOwnerAbort(ulong ownerID)
   {
     var player = BasePlayer.FindByID(ownerID);
-    if (!IsValidPlayer(player).Item1) return;
+    if (!IsValidPlayer(player)) return;
     var message = lang.GetMessage(
       "NotifyOwnerAbort", this, player.UserIDString);
     SendReply(player, string.Format(message, _configData.PrefixNotify));
@@ -576,7 +580,7 @@ public class PlayerBasePvpZones : RustPlugin
   private void NotifyOwnerCreate(ulong ownerID)
   {
     var player = BasePlayer.FindByID(ownerID);
-    if (!IsValidPlayer(player).Item1) return;
+    if (!IsValidPlayer(player)) return;
     var message = lang.GetMessage(
       "NotifyOwnerCreate", this, player.UserIDString);
     SendReply(player, string.Format(
@@ -590,7 +594,7 @@ public class PlayerBasePvpZones : RustPlugin
     ZM_GetPlayersInZone(GetZoneID(baseID), playersInZone);
     foreach (var player in playersInZone)
     {
-      if (!IsValidPlayer(player).Item1) continue;
+      if (!IsValidPlayer(player)) continue;
       var message =
         lang.GetMessage("NotifyZoneDelete", this, player.UserIDString);
       SendReply(player, string.Format(
@@ -1426,7 +1430,7 @@ public class PlayerBasePvpZones : RustPlugin
   // get TC that player is within interaction range of, looking at, and
   //  authorized to, or null if none
   private BaseNetworkable GetPlayerBuilding(BasePlayer player) =>
-    IsValidPlayer(player).Item1 &&
+    IsValidPlayer(player) &&
     Physics.Raycast(
       player.eyes.HeadRay(), out var hit, BuildingToggleRadius,
       _buildingLayerMask) &&
@@ -1441,7 +1445,7 @@ public class PlayerBasePvpZones : RustPlugin
   // don't bother checking auth; mounting requires code lock access, and I'm not
   //  entirely sure how build privileges work for modular boats
   private static BaseNetworkable GetPlayerModularBoat(BasePlayer player) =>
-    IsValidPlayer(player).Item1 &&
+    IsValidPlayer(player) &&
     // NOTE: IsValid() will Unity null-check wheel
     player.GetMounted() is SteeringWheel wheel && IsValid(wheel) &&
     IsValid(wheel.ParentBoat) && !wheel.ParentBoat.IsDying
@@ -1453,7 +1457,7 @@ public class PlayerBasePvpZones : RustPlugin
   private static BaseNetworkable GetPlayerShelter(BasePlayer player) =>
     // this first step is really here to force a
     //  player.cachedEntityBuildingPrivilege cache update when applicable
-    IsValidPlayer(player).Item1 &&
+    IsValidPlayer(player) &&
     !player.IsBuildingBlockedByEntity(true) &&
     // NOTE: IsPlayerOwned() will Unity null-check privilege
     GetShelterPrivilege(
@@ -1466,7 +1470,7 @@ public class PlayerBasePvpZones : RustPlugin
   // get non-dying tugboat that player is mounted and authorized to, or null if
   //  none
   private static BaseNetworkable GetPlayerTugboat(BasePlayer player) =>
-    IsValidPlayer(player).Item1 &&
+    IsValidPlayer(player) &&
     // NOTE: IsValid() will Unity null-check tugboat
     player.GetMountedVehicle() is Tugboat tugboat && IsValid(tugboat) &&
     !tugboat.IsDying &&
@@ -1489,7 +1493,7 @@ public class PlayerBasePvpZones : RustPlugin
   private void ToggleZone(
     BasePlayer player, ZoneRecord record, BaseNetworkable entity)
   {
-    if (IsValidPlayer(player).Item1) return;
+    if (IsValidPlayer(player)) return;
     var netID = GetNetworkableID(entity);
     var (_, lockReason, remainingSec) = GetToggleStates(netID);
 
@@ -1657,7 +1661,7 @@ public class PlayerBasePvpZones : RustPlugin
   // chat command handler
   private void HandleCommand(IPlayer iPlayer, string _, string[] args)
   {
-    if (iPlayer.Object is not BasePlayer player || !IsValidPlayer(player).Item1)
+    if (iPlayer.Object is not BasePlayer player || !IsValidPlayer(player))
     {
       return;
     }
@@ -1819,8 +1823,7 @@ public class PlayerBasePvpZones : RustPlugin
   // called when a player enters any ZoneManager zone
   private void OnEnterZone(string zoneID, BasePlayer player)
   {
-    var (validPlayer, userID) = IsValidPlayer(player);
-    if (!validPlayer) return;
+    if (!TryGetUserID(player, out var userID)) return;
 
     // abort if not one of ours
     if (GetNetworkableID(zoneID) is not { } networkableId ||
@@ -1845,8 +1848,7 @@ public class PlayerBasePvpZones : RustPlugin
   // called when a player exits any ZoneManager zone
   private void OnExitZone(string zoneID, BasePlayer player)
   {
-    var (validPlayer, userID) = IsValidPlayer(player);
-    if (!validPlayer) return;
+    if (!TryGetUserID(player, out var userID)) return;
 
     // abort if not one of ours
     if (GetNetworkableID(zoneID) is not { } networkableId ||
@@ -1897,13 +1899,11 @@ public class PlayerBasePvpZones : RustPlugin
       return null;
     }
 
-    // get attacker userID
-    var (attackerValid, attackerID) = IsValidPlayer(hitInfo?.InitiatorPlayer);
-    if (!attackerValid) return null;
-
-    // get target userID
-    var (targetValid, targetID) = IsValidPlayer(player);
-    if (!targetValid) return null;
+    if (!TryGetUserID(hitInfo?.InitiatorPlayer, out var attackerID) ||
+        !TryGetUserID(player, out var targetID))
+    {
+      return null;
+    }
 
     // return true if both players are in some kind of PvP state, else null
     return IsPvpPlayer(attackerID) && IsPvpPlayer(targetID) ? true : null;
