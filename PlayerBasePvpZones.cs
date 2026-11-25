@@ -76,6 +76,33 @@ public class PlayerBasePvpZones : RustPlugin
 
   private readonly List<DecayEntityData> _decayEntityData = new(1000);
 
+  // template zone options
+  private readonly string[] _zoneOptionsBasic =
+  {
+    "name",   string.Empty,
+    "radius", string.Empty
+  };
+
+  // template zone options including enter/leave messages
+  private readonly string[] _zoneOptionsFull =
+  {
+    "name",          string.Empty,
+    "radius",        string.Empty,
+    "enter_message", string.Empty,
+    "leave_message", string.Empty
+  };
+
+  // pre-baked zone names
+  private readonly Dictionary<string, string> _zoneNames = new()
+  {
+    { nameof(BuildingData),    ZoneIdPrefix + "building" },
+    { nameof(ModularBoatData), ZoneIdPrefix + "modularboat" },
+    { nameof(ShelterData),     ZoneIdPrefix + "shelter" },
+    { nameof(TugboatData),     ZoneIdPrefix + "tugboat" }
+  };
+
+  private const string ZoneNameUnknown = ZoneIdPrefix + "unknown";
+
   #endregion Fields
 
   #region Core Methods
@@ -205,9 +232,8 @@ public class PlayerBasePvpZones : RustPlugin
     CancelTimer(ref record.CheckTimer);
 
     // schedule deletion
-    record.LifecycleTimer = timer.Once(
-      _configData.DeleteDelaySeconds,
-      () => DeleteZone(netID));
+    record.LifecycleTimer =
+      timer.Once(_configData.DeleteDelaySeconds, () => DeleteZone(netID));
 
     // notify players in zone
     if (notifyZone) NotifyZoneDelete(netID);
@@ -218,6 +244,7 @@ public class PlayerBasePvpZones : RustPlugin
   {
     switch (entity)
     {
+      // NOTE: IsValid() handles Unity lifetime check
       case BuildingPrivlidge toolCupboard:
       {
         if (!IsValid(toolCupboard)) return null;
@@ -227,6 +254,7 @@ public class PlayerBasePvpZones : RustPlugin
         return data;
       }
 
+      // NOTE: IsValid() handles Unity lifetime check
       case PlayerBoat boat:
       {
         if (!IsValid(boat)) return null;
@@ -235,6 +263,7 @@ public class PlayerBasePvpZones : RustPlugin
         return data;
       }
 
+      // NOTE: IsValid() handles Unity lifetime check
       case EntityPrivilege shelter:
       {
         if (!IsValid(shelter)) return null;
@@ -243,6 +272,7 @@ public class PlayerBasePvpZones : RustPlugin
         return data;
       }
 
+      // NOTE: IsValid() handles Unity lifetime check
       case VehiclePrivilege tugboat and not PlayerBoatPrivilege:
       {
         if (!IsValid(tugboat)) return null;
@@ -366,10 +396,7 @@ public class PlayerBasePvpZones : RustPlugin
     CancelTimer(ref record.CheckTimer);
 
     // abort if this building is pending creation or deletion
-    if (record.LifecycleTimer is not null || record.Data is null)
-    {
-      return;
-    }
+    if (record.LifecycleTimer is not null || record.Data is null) return;
 
     // get building record, aborting if unknown or no TC reference
     if (record.Data is not BuildingData buildingData ||
@@ -408,8 +435,8 @@ public class PlayerBasePvpZones : RustPlugin
   //
   // Note that this will return null for entities deployed on bare ground; this
   //  is intentional for now
-  private static BuildingPrivlidge GetToolCupboard(
-    DecayEntity decayEntity) => GetToolCupboard(decayEntity?.GetBuilding());
+  private static BuildingPrivlidge GetToolCupboard(DecayEntity decayEntity) =>
+    decayEntity ? GetToolCupboard(decayEntity.GetBuilding()) : null;
 
   // try to find and return a physically-attached TC for the given building, or
   //  null if no suitable result found
@@ -417,6 +444,7 @@ public class PlayerBasePvpZones : RustPlugin
   // this is our differentiator of whether a building should have a zone
   private static BuildingPrivlidge GetToolCupboard(
     BuildingManager.Building building) =>
+    // NOTE: IsPlayerOwned() will perform Unity null check on toolCupboard
     building?.GetDominatingBuildingPrivilege() is { } toolCupboard &&
     IsPlayerOwned(toolCupboard) ? toolCupboard : null;
 
@@ -428,9 +456,6 @@ public class PlayerBasePvpZones : RustPlugin
   // construct NetworkableId from the given unsigned long integer value
   private static NetworkableId GetNetworkableID(ulong value) => new(value);
 
-  private bool IsKnownPlayerBaseId(NetworkableId networkableId) =>
-    _zoneRecords.ContainsKey(networkableId);
-
   private static ulong? GetOwnerID(PlayerBoat modularBoat)
   {
     // OwnerID is not set for modular boats for some reason, so find the first
@@ -440,8 +465,7 @@ public class PlayerBasePvpZones : RustPlugin
     // first check cached wheels
     // these won't be cached on boat spawn, but is needed on boat EOL because
     //  children will already be gone for some reason
-    var wheels = modularBoat.SteeringWheels?.Cached;
-    if (null != wheels)
+    if (modularBoat.SteeringWheels?.Cached is { } wheels)
     {
       foreach (var wheel in wheels)
       {
@@ -472,9 +496,9 @@ public class PlayerBasePvpZones : RustPlugin
     // only one player can normally auth to a shelter, but we also want to
     //  account for the possibility of plugin-spawned shelters that are authed
     //  to non-player(s)
-    foreach (var playerNameID in legacyShelter.authorizedPlayers)
+    foreach (var userID in legacyShelter.authorizedPlayers)
     {
-      if (playerNameID.IsSteamId()) return playerNameID;
+      if (userID.IsSteamId()) return userID;
     }
     return null;
   }
@@ -490,6 +514,7 @@ public class PlayerBasePvpZones : RustPlugin
     if (!IsValid(vehicle)) return null;
     foreach (var child in vehicle.children)
     {
+      // NOTE: caller will perform Unity lifecycle check
       if (child is VehiclePrivilege privilege) return privilege;
     }
     return null;
@@ -502,21 +527,47 @@ public class PlayerBasePvpZones : RustPlugin
 
   // OwnerID is zero for shelters for some reason, so check auth list instead
   private static bool IsPlayerOwned(EntityPrivilege legacyShelter) =>
-    IsValid(legacyShelter) && null != GetOwnerID(legacyShelter);
+    IsValid(legacyShelter) && GetOwnerID(legacyShelter) is not null;
 
   private static bool IsPlayerOwned(DecayEntity decayEntity) =>
     IsValid(decayEntity) && decayEntity.OwnerID.IsSteamId();
 
+  [Obsolete("Use IsValidPlayer() instead.", true)]
+  private static bool IsValid(BasePlayer player) => false;
+
   private static bool IsValid(BaseNetworkable baseNetworkable) =>
     baseNetworkable &&
     !baseNetworkable.IsDestroyed &&
-    null != baseNetworkable.net &&
+    baseNetworkable.net is not null &&
     baseNetworkable.transform;
+
+  // validity check a BaseNetworkable derivative without casting
+  //
+  // this overload is needed when the derivative type is already known
+  // private static T GetValidOrNull<T>(
+  //   T baseNetworkable) where T : BaseNetworkable =>
+  //   IsValid(baseNetworkable) ? baseNetworkable : null;
+
+  // validity check a BaseNetworkable derivative with casting
+  //
+  // some IDEs complain that casting omits Unity lifecycle checks, but we're
+  //  doing it after casting; this method consolidates the complaint to a single
+  //  line of code
+  // private static T GetValidOrNull<T>(
+  //   BaseNetworkable baseNetworkable) where T : BaseNetworkable =>
+  //   baseNetworkable is T entity ? GetValidOrNull(entity) : null;
+
+  private static (bool, ulong) IsValidPlayer(BasePlayer player)
+  {
+    if (!player) return (false, 0UL);
+    var userID = player.userID.Get();
+    return (userID.IsSteamId(), userID);
+  }
 
   private void NotifyOwnerAbort(ulong ownerID)
   {
     var player = BasePlayer.FindByID(ownerID);
-    if (!player || !player.userID.IsSteamId()) return;
+    if (!IsValidPlayer(player).Item1) return;
     var message = lang.GetMessage(
       "NotifyOwnerAbort", this, player.UserIDString);
     SendReply(player, string.Format(message, _configData.PrefixNotify));
@@ -525,7 +576,7 @@ public class PlayerBasePvpZones : RustPlugin
   private void NotifyOwnerCreate(ulong ownerID)
   {
     var player = BasePlayer.FindByID(ownerID);
-    if (!player || !player.userID.IsSteamId()) return;
+    if (!IsValidPlayer(player).Item1) return;
     var message = lang.GetMessage(
       "NotifyOwnerCreate", this, player.UserIDString);
     SendReply(player, string.Format(
@@ -539,7 +590,7 @@ public class PlayerBasePvpZones : RustPlugin
     ZM_GetPlayersInZone(GetZoneID(baseID), playersInZone);
     foreach (var player in playersInZone)
     {
-      if (!player || !player.userID.IsSteamId()) continue;
+      if (!IsValidPlayer(player).Item1) continue;
       var message =
         lang.GetMessage("NotifyZoneDelete", this, player.UserIDString);
       SendReply(player, string.Format(
@@ -554,12 +605,12 @@ public class PlayerBasePvpZones : RustPlugin
   // restarts delay if already active
   // sends stop notification for old zoneID, plus start notification for new
   //  one, if zoneID changes with an already-active delay
-  private void PlayerBasePvpDelayStart(ulong playerID, string zoneID)
+  private void PlayerBasePvpDelayStart(ulong userID, string zoneID)
   {
     // abort if no delay configured
     if (_configData.PvpDelaySeconds <= 0.0f) return;
 
-    if (_pvpDelayTimers.TryGetValue(playerID, out var delayData))
+    if (_pvpDelayTimers.TryGetValue(userID, out var delayData))
     {
       // delay already active - reset timer
       delayData.Item1.Reset(_configData.PvpDelaySeconds);
@@ -569,7 +620,7 @@ public class PlayerBasePvpZones : RustPlugin
       {
         // fire notification hook for old zone
         Interface.CallHook("OnPlayerBasePvpDelayStop",
-          playerID, delayData.Item2);
+          userID, delayData.Item2);
 
         // record new zone
         delayData.Item2 = zoneID;
@@ -578,52 +629,54 @@ public class PlayerBasePvpZones : RustPlugin
     else
     {
       // no delay active - start+record one
-      _pvpDelayTimers.Add(playerID, (timer.Once(
+      _pvpDelayTimers.Add(userID, (timer.Once(
         _configData.PvpDelaySeconds, () => PlayerBasePvpDelayStop(
-          playerID)), zoneID));
+          userID)), zoneID));
     }
 
     // fire notification hook
-    Interface.CallHook("OnPlayerBasePvpDelayStart", playerID, zoneID);
+    Interface.CallHook("OnPlayerBasePvpDelayStart", userID, zoneID);
 
     // also notify TruePVE if we're doing that
     if (_useExcludePlayer)
     {
       Interface.CallHook("ExcludePlayer",
-        playerID, _configData.PvpDelaySeconds, this);
+        userID, _configData.PvpDelaySeconds, this);
     }
   }
 
   // stop/end PvP delay for given player and send notification
-  private void PlayerBasePvpDelayStop(ulong playerID)
+  private void PlayerBasePvpDelayStop(ulong userID)
   {
     // abort if no delay record exists
-    if (!_pvpDelayTimers.Remove(playerID, out var delayData)) return;
+    if (!_pvpDelayTimers.Remove(userID, out var delayData)) return;
 
     // clean up timer
     DestroyTimer(delayData.Item1);
 
     // fire notification hook
-    Interface.CallHook("OnPlayerBasePvpDelayStop", playerID, delayData.Item2);
+    Interface.CallHook("OnPlayerBasePvpDelayStop", userID, delayData.Item2);
 
     // also notify TruePVE if we're doing that
     if (_useExcludePlayer)
     {
-      Interface.CallHook("ExcludePlayer", playerID, 0.0f, this);
+      Interface.CallHook("ExcludePlayer", userID, 0.0f, this);
     }
+  }
+
+  private float GetTargetFPS()
+  {
+    // perform one-time caching of target FPS
+    if (_targetFps <= 0) _targetFps = Mathf.Min(ConVar.FPS.limit, 30);
+    return _targetFps;
   }
 
   // utility method to return an appropriate yield instruction based on whether
   //  this is a long pause for debug logging to catch up, whether current server
   //  framerate is too low, etc.
-  private YieldInstruction DynamicYield()
-  {
-    // perform one-time caching of target FPS
-    if (_targetFps <= 0) _targetFps = Mathf.Min(ConVar.FPS.limit, 30);
-
-    return
-      Performance.report.frameRate >= _targetFps ? _fastYield : _throttleYield;
-  }
+  private YieldInstruction DynamicYield() =>
+    Performance.report.frameRate >= GetTargetFPS() ?
+      _fastYield : _throttleYield;
 
   // coroutine method to asynchronously create zones for all existing bases
   private IEnumerator CreateDataCoroutine()
@@ -645,18 +698,26 @@ public class PlayerBasePvpZones : RustPlugin
     // done together so only one pass over the global entity list is needed
     foreach (var serverEntity in BaseNetworkable.serverEntities)
     {
-      if (serverEntity is PlayerBoat modularBoat)
+      switch (serverEntity)
       {
-        ImmediateCreateZone(modularBoat);
-        yield return DynamicYield();
-      }
-      else if (
-        // modular boat build privileges are also VehiclePrivilege, so we have
-        //  to ignore those
-        serverEntity is VehiclePrivilege tugboat and not PlayerBoatPrivilege)
-      {
-        ImmediateCreateZone(tugboat);
-        yield return DynamicYield();
+        case PlayerBoat modularBoat when IsValid(modularBoat):
+        {
+          ImmediateCreateZone(modularBoat);
+          yield return DynamicYield();
+          continue;
+        }
+
+        // VehiclePrivilege also covers modular boat wheels and who knows what
+        //  in the future, so ensure this is a tugboat wheel by checking parent
+        case VehiclePrivilege tugboatPrivilege when
+          // NOTE: don't really care if parent tugboat is fully valid
+          tugboatPrivilege.GetParentEntity() is Tugboat &&
+          IsValid(tugboatPrivilege):
+        {
+          ImmediateCreateZone(tugboatPrivilege);
+          yield return DynamicYield();
+          break;
+        }
       }
     }
 
@@ -666,12 +727,12 @@ public class PlayerBasePvpZones : RustPlugin
       foreach (var shelter in shelterList)
       {
         if (!IsValid(shelter) ||
-            !shelter.entityPrivilege.TryGet(true, out var legacyShelter) ||
-            !IsPlayerOwned(legacyShelter))
+            !shelter.entityPrivilege.TryGet(true, out var shelterPrivilege) ||
+            !IsPlayerOwned(shelterPrivilege))
         {
           continue;
         }
-        ImmediateCreateZone(legacyShelter);
+        ImmediateCreateZone(shelterPrivilege);
         yield return DynamicYield();
       }
     }
@@ -750,7 +811,7 @@ public class PlayerBasePvpZones : RustPlugin
   private void OnServerInitialized()
   {
     _useExcludePlayer =
-      null != TruePVE && TruePVE.Version >= new VersionNumber(2, 2, 3);
+      TruePVE && TruePVE.Version >= new VersionNumber(2, 2, 3);
     if (_useExcludePlayer)
     {
       Puts("OnServerInitialized(): TruePVE 2.2.3+ detected! TruePVE PVP delays will be used");
@@ -788,7 +849,7 @@ public class PlayerBasePvpZones : RustPlugin
 
   private void Unload()
   {
-    if (null != _createDataCoroutine)
+    if (_createDataCoroutine is not null)
     {
       ServerMgr.Instance.StopCoroutine(_createDataCoroutine);
       _createDataCoroutine = null;
@@ -805,25 +866,24 @@ public class PlayerBasePvpZones : RustPlugin
     Puts("Unload(): Cleaning up...");
     // cleanup base zones
     var bulkDeleteList = Pool.Get<List<string>>();
-    if (_zoneRecords.Count > 0)
+    if (!_zoneRecords.IsEmpty())
     {
       Puts($"Unload():  Destroying {_zoneRecords.Count} zone records...");
-      foreach (var kvp in _zoneRecords)
+      foreach (var (key, record) in _zoneRecords)
       {
-        var record = kvp.Value;
-        bulkDeleteList.Add(GetZoneID(kvp.Key));
+        bulkDeleteList.Add(GetZoneID(key));
         record.Free();
       }
       _zoneRecords.Clear();
     }
-    if (bulkDeleteList.Count > 0)
+    if (!bulkDeleteList.IsEmpty())
     {
       TP_RemoveMappings(bulkDeleteList);
       ZM_EraseZones(bulkDeleteList);
     }
     Pool.FreeUnmanaged(ref bulkDeleteList);
     // cleanup player records
-    if (_playerZones.Count > 0)
+    if (!_playerZones.IsEmpty())
     {
       Puts($"Unload():  Destroying {_playerZones.Count} player-in-zones records...");
       foreach (var playerZoneData in _playerZones)
@@ -833,7 +893,7 @@ public class PlayerBasePvpZones : RustPlugin
       }
       _playerZones.Clear();
     }
-    if (_pvpDelayTimers.Count > 0)
+    if (!_pvpDelayTimers.IsEmpty())
     {
       Puts($"Unload():  Destroying {_pvpDelayTimers.Count} player PvP delay timers...");
       foreach (var timerData in _pvpDelayTimers.Values)
@@ -934,7 +994,7 @@ public class PlayerBasePvpZones : RustPlugin
         MergeDict(_persistData.ZoneToggleData, legacyData.ModularBoatToggleData);
         MergeDict(_persistData.ZoneToggleData, legacyData.ShelterToggleData);
         MergeDict(_persistData.ZoneToggleData, legacyData.TugboatToggleData);
-        Puts($"LoadData(): Migrated {_persistData.ZoneToggleData.Count} toggle entries to combined format");
+        Puts($"LoadData(): Migrated {_persistData.ZoneToggleData.Count} toggle entries to new data format");
         SaveData();
         return;
       }
@@ -1002,25 +1062,23 @@ public class PlayerBasePvpZones : RustPlugin
     // owner player ID too
     if (GetOwnerID(modularBoat) is not { } ownerID) return;
 
-    // if we have a record on this modular boat, clear its entity reference ASAP
-    //  to minimize side effects
-    // NOTE: don't abort here if we have no record, as we need to also handle
-    //  the case of a modular boat that is pending creation
-    if (disconnect &&
-        _zoneRecords.TryGetValue(modularBoatID, out var record) &&
-        record.Data is not null)
+    // abort if we have no record at all on this modular boat
+    // NOTE: don't abort here if we have no data in the record, as we need to
+    //  also handle the case of a modular boat that is pending creation
+    if (!_zoneRecords.TryGetValue(modularBoatID, out var record)) return;
+
+    // disconnect sphere(s) and/or zone if requested
+    if (disconnect)
     {
-      // release entity reference and disconnect spheres immediately to
-      //  minimize side effects
-      record.Data.ClearEntity();
-      // also untether ZoneManager zone if present, so that it doesn't
-      //  disappear
+      // release entity reference immediately to minimize side effects
+      // this will also untether spheres
+      record.Data?.ClearEntity();
+
       UntetherZone(GetZoneID(modularBoatID));
     }
 
     // schedule deletion of the dropped modular boat
-    NextTick(() =>
-      ScheduleDeleteZone(modularBoatID, ownerID));
+    NextTick(() => ScheduleDeleteZone(modularBoatID, ownerID));
   }
 
   // called when a modular boat reaches zero health and sinks
@@ -1039,11 +1097,9 @@ public class PlayerBasePvpZones : RustPlugin
     if (!tugboatPrivilege) return;
     var tugboatID = GetNetworkableID(tugboatPrivilege);
 
-    // if we have a record on this tugboat, clear its entity reference ASAP to
-    //  minimize side effects
-    //
-    // NOTE: we can abort here if we have no record or data, because tugboats
-    //  have no creation delay
+    // abort if we have no record or data on this tugboat
+    // NOTE: tugboat zones have no creation delay, so null-checking record.Data
+    //  is just for safety
     if (!_zoneRecords.TryGetValue(tugboatID, out var record) ||
         record.Data is null)
     {
@@ -1054,8 +1110,9 @@ public class PlayerBasePvpZones : RustPlugin
     if (disconnect)
     {
       // release entity reference immediately to minimize side effects
+      // this will also untether spheres
       record.Data.ClearEntity();
-      // also untether ZoneManager zone if present, so that it doesn't disappear
+
       UntetherZone(GetZoneID(tugboatID));
     }
 
@@ -1094,6 +1151,7 @@ public class PlayerBasePvpZones : RustPlugin
   private void OnEntityKill(BuildingBlock buildingBlock)
   {
     // abort if this is a modular boat or non-player-owned building block
+    // NOTE: don't care about BoatBuildingBlock Unity lifecycle state
     if (buildingBlock is BoatBuildingBlock || !IsPlayerOwned(buildingBlock))
     {
       return;
@@ -1123,16 +1181,11 @@ public class PlayerBasePvpZones : RustPlugin
     // owner player ID too
     var ownerID = toolCupboard.OwnerID;
 
-    // if we have a record on this base, clear its TC reference ASAP to minimize
-    //  side effects
-    // NOTE: don't abort here if we have no record, as we need to also handle
-    //  the case of a base that is pending creation
-    if (_zoneRecords.TryGetValue(toolCupboardID, out var record) &&
-        record.Data is not null)
-    {
-      // release TC reference immediately to minimize side effects
-      record.Data.ClearEntity();
-    }
+    // abort if we have no record at all on this TC
+    if (!_zoneRecords.TryGetValue(toolCupboardID, out var record)) return;
+
+    // release entity reference immediately to minimize side effects
+    record.Data?.ClearEntity();
 
     // schedule deletion of the dropped base
     NextTick(() => ScheduleDeleteZone(toolCupboardID, ownerID));
@@ -1153,16 +1206,11 @@ public class PlayerBasePvpZones : RustPlugin
     // owner player ID too
     var ownerID = GetOwnerID(legacyShelter);
 
-    // if we have a record on this shelter, clear its entity reference ASAP to
-    //  minimize side effects
-    // NOTE: don't abort here if we have no record, as we need to also handle
-    //  the case of a base that is pending creation
-    if (_zoneRecords.TryGetValue(legacyShelterID, out var record) &&
-        record.Data is not null)
-    {
-      // release entity reference immediately to minimize side effects
-      record.Data.ClearEntity();
-    }
+    // abort if we have no record at all on this shelter
+    if (!_zoneRecords.TryGetValue(legacyShelterID, out var record)) return;
+
+    // release entity reference immediately to minimize side effects
+    record.Data?.ClearEntity();
 
     // schedule deletion of the dropped base
     NextTick(() => ScheduleDeleteZone(legacyShelterID, ownerID));
@@ -1177,21 +1225,17 @@ public class PlayerBasePvpZones : RustPlugin
   // this is preferred over OnEntityBuilt both because it's more
   //  straightforward, and because it catches things like CopyPaste spawning
   //  with player owner set
-  private void OnEntitySpawned(AutoTurret autoTurret)
-  {
+  private void OnEntitySpawned(AutoTurret autoTurret) =>
     // same logic for spawn or kill
     OnEntityKill(autoTurret);
-  }
 
   // called when a building block or modular boat block is spawned
   // this is preferred over OnEntityBuilt both because it's more
   //  straightforward, and because it catches things like CopyPaste spawning
   //  with player owner set
-  private void OnEntitySpawned(BuildingBlock buildingBlock)
-  {
+  private void OnEntitySpawned(BuildingBlock buildingBlock) =>
     // same logic for spawn or kill
     OnEntityKill(buildingBlock);
-  }
 
   // called when a TC is spawned
   // this is preferred over OnEntityBuilt both because it's more
@@ -1203,53 +1247,43 @@ public class PlayerBasePvpZones : RustPlugin
     if (!IsPlayerOwned(toolCupboard)) return;
 
     // schedule creation of new player base record + zone
-    NextTick(() => ScheduleCreateZone(
-      toolCupboard, toolCupboard.OwnerID));
+    NextTick(() => ScheduleCreateZone(toolCupboard, toolCupboard.OwnerID));
   }
 
   // called when a modular boat is spawned
-  private void OnEntitySpawned(PlayerBoat modularBoat)
-  {
+  private void OnEntitySpawned(PlayerBoat modularBoat) =>
     // this needs to be wrapped in NextTick() because boat children are not
     //  attached at the time the hook fires
     NextTick(() =>
     {
-      // schedule creation of new modular boat record + zone
+      // abort if this isn't a player-owned modular boat
       if (!IsPlayerOwned(modularBoat)) return;
-      ScheduleCreateZone(
-        modularBoat, GetOwnerID(modularBoat));
+
+      // schedule creation of new modular boat record + zone
+      ScheduleCreateZone(modularBoat, GetOwnerID(modularBoat));
     });
-  }
 
   // called when a legacy shelter is spawned
   // this is preferred over OnEntityBuilt both because it's more
   //  straightforward, and because it catches things like CopyPaste spawning
   //  with player owner set
-  private void OnEntitySpawned(EntityPrivilege legacyShelter)
-  {
+  private void OnEntitySpawned(EntityPrivilege legacyShelter) =>
     // this needs to be wrapped in NextTick() because Raidable Shelters does not
     //  clear auth until after spawning
     NextTick(() =>
     {
       // abort if this isn't a player-owned shelter
       if (!IsPlayerOwned(legacyShelter)) return;
+
       // schedule creation of new player base record + zone
-      ScheduleCreateZone(
-        legacyShelter, GetOwnerID(legacyShelter));
+      ScheduleCreateZone(legacyShelter, GetOwnerID(legacyShelter));
     });
-  }
 
   // called when a tugboat is spawned
-  // this is preferred over OnEntityBuilt both because it's more
-  //  straightforward, and because it catches things like CopyPaste spawning
-  //  with player owner set
-  private void OnEntitySpawned(VehiclePrivilege tugboat)
-  {
-    // immediately create new player base record + zone
-    // (tugboats have no creation delay because players can't normally (de)spawn
-    //  them at will)
+  private void OnEntitySpawned(VehiclePrivilege tugboat) =>
+    // immediately create new player base record + zone, as these aren't
+    //  typically spawned by players
     NextTick(() => ImmediateCreateZone(tugboat));
-  }
 
   // called when a building block is damaged
   // NOTE: fires for both land and modular boat building blocks
@@ -1259,6 +1293,8 @@ public class PlayerBasePvpZones : RustPlugin
     {
       // ignore boat building blocks, as this only fires if they take damage in
       //  edit mode
+      //
+      // NOTE: don't care about Unity lifecycle state for these
       if (buildingBlock is BoatBuildingBlock) return;
 
       // abort if this isn't a player-owned building block
@@ -1379,8 +1415,8 @@ public class PlayerBasePvpZones : RustPlugin
 
   // custom hook defined by this plugin to return originating zoneID if player
   //  has an active PvP delay, or an empty string if not
-  private string OnPlayerBasePvpDelayQuery(ulong playerID) =>
-    _pvpDelayTimers.TryGetValue(playerID, out var delayData) ?
+  private string OnPlayerBasePvpDelayQuery(ulong userID) =>
+    _pvpDelayTimers.TryGetValue(userID, out var delayData) ?
       delayData.Item2 : string.Empty;
 
   // custom hook defined by this plugin to return whether TruePVE ExcludePlayer
@@ -1389,11 +1425,12 @@ public class PlayerBasePvpZones : RustPlugin
 
   // get TC that player is within interaction range of, looking at, and
   //  authorized to, or null if none
-  private BuildingPrivlidge GetPlayerBuilding(BasePlayer player) =>
-    player &&
+  private BaseNetworkable GetPlayerBuilding(BasePlayer player) =>
+    IsValidPlayer(player).Item1 &&
     Physics.Raycast(
       player.eyes.HeadRay(), out var hit, BuildingToggleRadius,
       _buildingLayerMask) &&
+    // NOTE: IsPlayerOwned() will Unity null-check toolCupboard
     hit.GetEntity() is BuildingPrivlidge toolCupboard &&
     IsPlayerOwned(toolCupboard) &&
     toolCupboard.IsAuthed(player)
@@ -1403,21 +1440,24 @@ public class PlayerBasePvpZones : RustPlugin
   // get non-dying modular boat that player is mounted to
   // don't bother checking auth; mounting requires code lock access, and I'm not
   //  entirely sure how build privileges work for modular boats
-  private static PlayerBoat GetPlayerModularBoat(BasePlayer player) =>
-    player?.GetMounted() is SteeringWheel wheel &&
-    IsValid(wheel) &&
-    wheel.ParentBoat is { IsDying: false }
+  private static BaseNetworkable GetPlayerModularBoat(BasePlayer player) =>
+    IsValidPlayer(player).Item1 &&
+    // NOTE: IsValid() will Unity null-check wheel
+    player.GetMounted() is SteeringWheel wheel && IsValid(wheel) &&
+    IsValid(wheel.ParentBoat) && !wheel.ParentBoat.IsDying
       ? wheel.ParentBoat
       : null;
 
   // get legacy shelter whose build privilege the player is both inside of and
   //  authorized to
-  private static EntityPrivilege GetPlayerShelter(BasePlayer player) =>
+  private static BaseNetworkable GetPlayerShelter(BasePlayer player) =>
     // this first step is really here to force a
     //  player.cachedEntityBuildingPrivilege cache update when applicable
-    player &&
+    IsValidPlayer(player).Item1 &&
     !player.IsBuildingBlockedByEntity(true) &&
-    GetShelterPrivilege(player.cachedEntityBuildingPrivilege) is {} privilege &&
+    // NOTE: IsPlayerOwned() will Unity null-check privilege
+    GetShelterPrivilege(
+      player.cachedEntityBuildingPrivilege) is { } privilege &&
     IsPlayerOwned(privilege) &&
     privilege.IsAuthed(player)
       ? privilege
@@ -1425,9 +1465,13 @@ public class PlayerBasePvpZones : RustPlugin
 
   // get non-dying tugboat that player is mounted and authorized to, or null if
   //  none
-  private static VehiclePrivilege GetPlayerTugboat(BasePlayer player) =>
-    player?.GetMountedVehicle() is Tugboat { IsDying: false } tugboat &&
-    GetVehiclePrivilege(tugboat) is {} privilege &&
+  private static BaseNetworkable GetPlayerTugboat(BasePlayer player) =>
+    IsValidPlayer(player).Item1 &&
+    // NOTE: IsValid() will Unity null-check tugboat
+    player.GetMountedVehicle() is Tugboat tugboat && IsValid(tugboat) &&
+    !tugboat.IsDying &&
+    // NOTE: IsValid() will Unity null-check privilege
+    GetVehiclePrivilege(tugboat) is { } privilege && IsValid(privilege) &&
     privilege.IsAuthed(player)
       ? privilege
       : null;
@@ -1445,13 +1489,13 @@ public class PlayerBasePvpZones : RustPlugin
   private void ToggleZone(
     BasePlayer player, ZoneRecord record, BaseNetworkable entity)
   {
-    if (!player || !player.userID.IsSteamId()) return;
+    if (IsValidPlayer(player).Item1) return;
     var netID = GetNetworkableID(entity);
     var (_, lockReason, remainingSec) = GetToggleStates(netID);
 
     // abort if lockout in progress
     var lockoutMessage = GetLockoutMessageName(lockReason);
-    if (null != lockoutMessage)
+    if (lockoutMessage is not null)
     {
       SendReply(player, string.Format(lang.GetMessage(lockoutMessage,
         this, player.UserIDString), Mathf.CeilToInt(remainingSec)));
@@ -1500,23 +1544,32 @@ public class PlayerBasePvpZones : RustPlugin
         switch (entity)
         {
           case BuildingPrivlidge building:
+          {
             OnEntityKill(building);
             break;
+          }
 
           case PlayerBoat modularBoat:
+          {
             // call modular boat end-of-life logic, but leave zone/sphere(s)
-            //  connected
+            //  connected so that they keep moving together until deletion
             HandleModularBoatEol(modularBoat, false);
             break;
+          }
 
           case EntityPrivilege shelter:
+          {
             OnEntityKill(shelter);
             break;
+          }
 
           case VehiclePrivilege tugboat and not PlayerBoatPrivilege:
-            // call tugboat end-of-life logic, but leave zone/sphere(s) connected
+          {
+            // call tugboat end-of-life logic, but leave zone/sphere(s)
+            //  connected so that they keep moving together until deletion
             HandleTugboatEol(tugboat.GetParentEntity() as Tugboat, false);
             break;
+          }
         }
 
         break;
@@ -1535,20 +1588,28 @@ public class PlayerBasePvpZones : RustPlugin
         switch (entity)
         {
           case BuildingPrivlidge building:
+          {
             OnEntitySpawned(building);
             break;
+          }
 
           case PlayerBoat modularBoat:
+          {
             OnEntitySpawned(modularBoat);
             break;
+          }
 
           case EntityPrivilege shelter:
+          {
             OnEntitySpawned(shelter);
             break;
+          }
 
           case VehiclePrivilege tugboat and not PlayerBoatPrivilege:
+          {
             OnEntitySpawned(tugboat);
             break;
+          }
         }
 
         break;
@@ -1571,61 +1632,32 @@ public class PlayerBasePvpZones : RustPlugin
 
   private void HandleCommandToggle(BasePlayer player)
   {
-    // handle player mounted to modular boat
-    if (GetPlayerModularBoat(player) is {} modularBoat)
+    // try to get target entity of toggle command
+    // NOTE: methods handle Unity lifecycle checking
+    var baseNetworkable =
+      GetPlayerModularBoat(player) ??
+      GetPlayerTugboat(player)     ??
+      // do this before shelter because it's possible to put a TC inside a
+      //  shelter if you're a goofball like hJune
+      GetPlayerBuilding(player)    ??
+      GetPlayerShelter(player);
+
+    if (!baseNetworkable)
     {
-      var netID = GetNetworkableID(modularBoat);
-      if (_zoneRecords.TryGetValue(netID, out var record))
-      {
-        ToggleZone(player, record, modularBoat);
-      }
+      SendReply(player, string.Format(lang.GetMessage("ToggleFail",
+        this, player.UserIDString)));
       return;
     }
 
-    // handle player mounted to tugboat
-    if (GetPlayerTugboat(player) is {} tugboat)
-    {
-      var netID = GetNetworkableID(tugboat);
-      if (_zoneRecords.TryGetValue(netID, out var record))
-      {
-        ToggleZone(player, record, tugboat);
-      }
-      return;
-    }
-
-    // handle player looking at TC
-    // do this before shelter because it's possible to put a TC inside a shelter
-    //  if you're a goofball like hJune
-    if (GetPlayerBuilding(player) is {} building)
-    {
-      var netID = GetNetworkableID(building);
-      if (_zoneRecords.TryGetValue(netID, out var record))
-      {
-        ToggleZone(player, record, building);
-      }
-      return;
-    }
-
-    // handle player looking at legacy shelter
-    if (GetPlayerShelter(player) is {} shelter)
-    {
-      var netID = GetNetworkableID(shelter);
-      if (_zoneRecords.TryGetValue(netID, out var record))
-      {
-        ToggleZone(player, record, shelter);
-      }
-      return;
-    }
-
-    SendReply(player, string.Format(lang.GetMessage("ToggleFail",
-      this, player.UserIDString)));
+    var netID = GetNetworkableID(baseNetworkable);
+    if (!_zoneRecords.TryGetValue(netID, out var record)) return;
+    ToggleZone(player, record, baseNetworkable);
   }
 
   // chat command handler
   private void HandleCommand(IPlayer iPlayer, string _, string[] args)
   {
-    if (iPlayer.Object is not BasePlayer player ||
-        !player || !player.userID.IsSteamId())
+    if (iPlayer.Object is not BasePlayer player || !IsValidPlayer(player).Item1)
     {
       return;
     }
@@ -1640,10 +1672,13 @@ public class PlayerBasePvpZones : RustPlugin
     switch (args[0])
     {
       case CommandHelp:
+      {
         HandleCommandHelp(iPlayer, player);
         return;
+      }
 
       case CommandToggle:
+      {
         if (iPlayer.HasPermission(GetPermission(TogglePermission)))
         {
           HandleCommandToggle(player);
@@ -1653,7 +1688,9 @@ public class PlayerBasePvpZones : RustPlugin
           SendReply(player, string.Format(lang.GetMessage("CmdNoPerm",
             this, player.UserIDString), CommandRoot, CommandHelp));
         }
+
         return;
+      }
     }
 
     SendReply(player, string.Format(lang.GetMessage("CmdUnknown",
@@ -1677,17 +1714,25 @@ public class PlayerBasePvpZones : RustPlugin
   private static string GetZoneID(NetworkableId networkableID) =>
     ZoneIdPrefix + networkableID;
 
-  // get options array for ZoneManager zone creation
-  private string[] GetZoneOptions(string zoneName, float radius) =>
-    _configData.ZoneMessages ?
-      new[]
-      {
-        "name", zoneName,
-        "radius", radius.ToString(CultureInfo.InvariantCulture),
-        "enter_message", lang.GetMessage("MessageZoneEnter", this),
-        "leave_message", lang.GetMessage("MessageZoneExit", this)
-      } :
-      new[] { "radius", radius.ToString(CultureInfo.InvariantCulture) };
+  private string GetZoneName(BaseData data) =>
+    _zoneNames.GetValueOrDefault(data.GetType().Name, ZoneNameUnknown);
+
+  // populate and return options array for ZoneManager zone creation
+  private string[] GetZoneOptions(string zoneName, float radius)
+  {
+    var zoneOptions =
+      _configData.ZoneMessages ? _zoneOptionsFull : _zoneOptionsBasic;
+    zoneOptions[1] = zoneName;
+    zoneOptions[3] = radius.ToString(CultureInfo.InvariantCulture);
+    if (_configData.ZoneMessages &&
+        (string.IsNullOrEmpty(zoneOptions[5]) ||
+         string.IsNullOrEmpty(zoneOptions[7])))
+    {
+      zoneOptions[5] = lang.GetMessage("MessageZoneEnter", this);
+      zoneOptions[7] = lang.GetMessage("MessageZoneExit", this);
+    }
+    return zoneOptions;
+  }
 
   // tether a ZoneManager zone to a transform
   // credit: CatMeat & Arainrr for examples via DynamicPVP
@@ -1696,6 +1741,7 @@ public class PlayerBasePvpZones : RustPlugin
     var zone = ZM_GetZoneByID(zoneID);
     if (!zone) return;
     var zoneTransform = zone.transform;
+    if (!zoneTransform) return;
     zoneTransform.SetParent(parentTransform);
     zoneTransform.rotation = parentTransform.rotation;
     zoneTransform.position = parentTransform.position;
@@ -1706,7 +1752,9 @@ public class PlayerBasePvpZones : RustPlugin
   {
     var zone = ZM_GetZoneByID(zoneID);
     if (!zone) return;
-    zone.transform.SetParent(null, true);
+    var zoneTransform = zone.transform;
+    if (!zoneTransform) return;
+    zoneTransform.SetParent(null, true);
   }
 
   // create or update a ZoneManager zone
@@ -1720,19 +1768,11 @@ public class PlayerBasePvpZones : RustPlugin
   {
     if (record?.Data is not { } baseData) return false;
 
-    var zoneName = baseData switch
-    {
-      BuildingData => "building",
-      ModularBoatData => "modularboat",
-      ShelterData => "shelter",
-      TugboatData => "tugboat",
-      _ => "unknown"
-    };
-
+    var zoneName = GetZoneName(baseData);
     var zoneID = GetZoneID(netID);
     if (!ZM_CreateOrUpdateZone(
           zoneID,
-          GetZoneOptions(ZoneIdPrefix + zoneName, baseData.Radius),
+          GetZoneOptions(zoneName, baseData.Radius),
           baseData.Location))
     {
       return false;
@@ -1779,60 +1819,56 @@ public class PlayerBasePvpZones : RustPlugin
   // called when a player enters any ZoneManager zone
   private void OnEnterZone(string zoneID, BasePlayer player)
   {
-    var playerID = player.userID.Get();
-
-    // abort if not a real player
-    if (!playerID.IsSteamId()) return;
+    var (validPlayer, userID) = IsValidPlayer(player);
+    if (!validPlayer) return;
 
     // abort if not one of ours
     if (GetNetworkableID(zoneID) is not { } networkableId ||
-        !IsKnownPlayerBaseId(networkableId))
+        !_zoneRecords.ContainsKey(networkableId))
     {
       return;
     }
 
     // record player in zone set
-    if (!_playerZones.TryGetValue(playerID, out var zones))
+    if (!_playerZones.TryGetValue(userID, out var zones))
     {
       // no zone record - create one
       zones = Pool.Get<HashSet<NetworkableId>>();
-      _playerZones.Add(playerID, zones);
+      _playerZones.Add(userID, zones);
     }
     zones.Add(networkableId);
 
     // cancel any active pvp delay
-    PlayerBasePvpDelayStop(playerID);
+    PlayerBasePvpDelayStop(userID);
   }
 
   // called when a player exits any ZoneManager zone
   private void OnExitZone(string zoneID, BasePlayer player)
   {
-    var playerID = player.userID.Get();
-
-    // abort if not a real player
-    if (!playerID.IsSteamId()) return;
+    var (validPlayer, userID) = IsValidPlayer(player);
+    if (!validPlayer) return;
 
     // abort if not one of ours
     if (GetNetworkableID(zoneID) is not { } networkableId ||
-        !IsKnownPlayerBaseId(networkableId))
+        !_zoneRecords.ContainsKey(networkableId))
     {
       return;
     }
 
     // remove player from zone set
     var stillInZone = false;
-    if (_playerZones.TryGetValue(playerID, out var zones) && null != zones)
+    if (_playerZones.TryGetValue(userID, out var zones) && zones is not null)
     {
       zones.Remove(networkableId);
       // player may still be in an overlapping base zone
-      if (zones.Count > 0) stillInZone = true;
+      if (!zones.IsEmpty()) stillInZone = true;
     }
 
     // abort if player is asleep or dead
     if (player.IsDead() || player.IsSleeping()) return;
 
     // (re)start pvp delay, but only if not still in a base zone
-    if (!stillInZone) PlayerBasePvpDelayStart(playerID, zoneID);
+    if (!stillInZone) PlayerBasePvpDelayStart(userID, zoneID);
   }
 
   #endregion ZoneManager Hooks
@@ -1843,15 +1879,16 @@ public class PlayerBasePvpZones : RustPlugin
 
   // helper method to determine whether a player ID has PvP status
   // returns true iff player is in a base zone or has PvP delay
-  // assumes playerID is valid
-  private bool IsPvpPlayer(ulong playerID) =>
-    _pvpDelayTimers.ContainsKey(playerID) ||
-    (_playerZones.TryGetValue(playerID, out var zones) && zones?.Count > 0);
+  // assumes userID is valid
+  private bool IsPvpPlayer(ulong userID) =>
+    _pvpDelayTimers.ContainsKey(userID) ||
+    (_playerZones.TryGetValue(userID, out var zones) &&
+     zones?.IsEmpty() is false);
 
   // called when TruePVE wants to know if a player can take damage
   // returns true if both attacker and target are players with PvP status,
   //  else returns null
-  private object CanEntityTakeDamage(BasePlayer entity, HitInfo hitInfo)
+  private object CanEntityTakeDamage(BasePlayer player, HitInfo hitInfo)
   {
     // pathological: abort if we're using TruePVE's PVP delay API
     if (_useExcludePlayer)
@@ -1860,14 +1897,13 @@ public class PlayerBasePvpZones : RustPlugin
       return null;
     }
 
-    // return unknown if either attacker or target is null / not a player
-    if (!entity || !hitInfo.InitiatorPlayer) return null;
+    // get attacker userID
+    var (attackerValid, attackerID) = IsValidPlayer(hitInfo?.InitiatorPlayer);
+    if (!attackerValid) return null;
 
-    var attackerID = hitInfo.InitiatorPlayer.userID.Get();
-    var targetID = entity.userID.Get();
-
-    // return unknown if either player is not a real player
-    if (!attackerID.IsSteamId() || !targetID.IsSteamId()) return null;
+    // get target userID
+    var (targetValid, targetID) = IsValidPlayer(player);
+    if (!targetValid) return null;
 
     // return true if both players are in some kind of PvP state, else null
     return IsPvpPlayer(attackerID) && IsPvpPlayer(targetID) ? true : null;
@@ -1925,11 +1961,14 @@ public class PlayerBasePvpZones : RustPlugin
     Inactive
   }
 
-  // unified zone record container
+  // player base zone state record
   private sealed class ZoneRecord : Pool.IPooled
   {
-    public BaseData Data { get; set; }
+    // player base data, or null if none (e.g. when creation pending)
+    public BaseData Data;
+    // create/delete timer, or null if none active
     public Timer LifecycleTimer;
+    // building geometry check timer, or null if none active
     public Timer CheckTimer;
 
     public ZoneState GetZoneState() =>
@@ -1995,7 +2034,7 @@ public class PlayerBasePvpZones : RustPlugin
 
     private void CreateSpheres()
     {
-      if (SphereList is null) return;
+      if (SphereList?.IsEmpty() is not true) return;
       for (var i = 0; i < SphereDarkness; ++i)
       {
         var sphere = GameManager.server.CreateEntity(
@@ -2011,7 +2050,7 @@ public class PlayerBasePvpZones : RustPlugin
 
     private void DestroySpheres()
     {
-      if (SphereList is null) return;
+      if (SphereList?.IsEmpty() is not false) return;
       foreach (var sphere in SphereList)
       {
         if (!IsValid(sphere)) continue;
@@ -2026,19 +2065,17 @@ public class PlayerBasePvpZones : RustPlugin
     {
       ClearEntity(true);
       DestroySpheres();
-      if (null != SphereList)
-      {
-        Pool.FreeUnmanaged(ref SphereList);
-        SphereList = null;
-      }
-      Location = Vector3.zero;
-      Radius = 0.0f;
+      if (SphereList is null) return;
+      Pool.FreeUnmanaged(ref SphereList);
+      SphereList = null;
     }
 
     // called automatically when Pool.Get() is called
     // needs to initialize instances for use
     public void LeavePool()
     {
+      Location = Vector3.zero;
+      Radius = 0.0f;
       if (SphereList is null && SphereDarkness > 0)
       {
         SphereList = Pool.Get<List<SphereEntity>>();
@@ -2050,16 +2087,22 @@ public class PlayerBasePvpZones : RustPlugin
     //  iterate over a list of spheres
     public void Update(Vector3? location = null, float? radius = null)
     {
-      if (location is null && radius is null) return;
-      if (location is not null) Location = (Vector3)location;
-      if (radius is not null)   Radius   = (float)radius;
+      // abort if nothing updated
+      var updateLocation = location is not null;
+      var updateRadius = radius is not null;
+      if (!updateLocation && !updateRadius) return;
 
+      // store updated location and/or radius
+      if (updateLocation) Location = (Vector3)location;
+      if (updateRadius)   Radius   = (float)  radius;
+
+      // apply new location and/or radius to sphere(s)
       if (SphereList is null) return;
       foreach (var sphere in SphereList)
       {
         if (!IsValid(sphere)) continue;
-        if (null != location) sphere.ServerPosition = Location;
-        if (null != radius) sphere.LerpRadiusTo(Radius * 2.0f, Radius / 2.0f);
+        if (updateLocation) sphere.ServerPosition = Location;
+        if (updateRadius)   sphere.LerpRadiusTo(Radius * 2.0f, Radius / 2.0f);
       }
     }
 
@@ -2076,7 +2119,7 @@ public class PlayerBasePvpZones : RustPlugin
     public void Init(
       BuildingPrivlidge toolCupboard, Vector3 location, float radius = 1.0f)
     {
-      Init(location, radius);
+      base.Init(location, radius);
       ToolCupboard = toolCupboard;
     }
 
@@ -2099,11 +2142,11 @@ public class PlayerBasePvpZones : RustPlugin
   {
     // reference to modular boat
     // if null, the base is pending deletion
-    public PlayerBoat ModularBoat { get; private set; }
+    private PlayerBoat ModularBoat { get; set; }
 
     public void Init(PlayerBoat modularBoat, float radius = 1.0f)
     {
-      Init(modularBoat.CenterPoint(), radius);
+      base.Init(modularBoat.CenterPoint(), radius);
       ModularBoat = modularBoat;
 
       // parent spheres to the modular boat for now
@@ -2124,9 +2167,9 @@ public class PlayerBasePvpZones : RustPlugin
     {
       if (!destroying)
       {
-        // modular boat is sinking; save its approximate position
-        var location = ModularBoat?.CenterPoint();
-        if (null != location) Location = (Vector3)location;
+        // modular boat is sinking; save its approximate final position
+        Vector3? location = ModularBoat ? ModularBoat.CenterPoint() : null;
+        if (location is { } sunkenLocation) Location = sunkenLocation;
       }
 
       ModularBoat = null;
@@ -2157,19 +2200,20 @@ public class PlayerBasePvpZones : RustPlugin
   {
     // reference to legacy shelter entity
     // if null, the base is pending deletion
-    public EntityPrivilege LegacyShelter { get; private set; }
+    // public EntityPrivilege LegacyShelter { get; private set; }
 
-    public void Init(
-      EntityPrivilege legacyShelter, float radius = 1.0f)
+    public void Init(EntityPrivilege legacyShelter, float radius = 1.0f)
     {
-      Init(legacyShelter.CenterPoint(), radius);
-      LegacyShelter = legacyShelter;
+      base.Init(legacyShelter.CenterPoint(), radius);
+      // LegacyShelter = legacyShelter;
     }
 
     // clear base entity reference
     // should be called when the entity is killed
-    public override void ClearEntity(bool destroying = false) =>
-      LegacyShelter = null;
+    public override void ClearEntity(bool destroying = false)
+    {
+      // LegacyShelter = null;
+    }
 
     public override void Free()
     {
@@ -2185,17 +2229,17 @@ public class PlayerBasePvpZones : RustPlugin
   {
     // reference to tugboat wheel entity
     // if null, the base is pending deletion
-    public VehiclePrivilege Tugboat { get; private set; }
+    private VehiclePrivilege Tugboat { get; set; }
 
     public void Init(
       VehiclePrivilege tugboat, float radius = 1.0f,
       bool? forceNetworking = null, bool forceBuoyancy = false)
     {
-      Init(tugboat.GetParentEntity().CenterPoint(), radius);
+      base.Init(tugboat.GetParentEntity().CenterPoint(), radius);
       Tugboat = tugboat;
       var tugboatParent = tugboat.GetParentEntity();
       if (!tugboatParent) return;
-      if (null != forceNetworking && SphereDarkness > 0)
+      if (forceNetworking is not null && SphereDarkness > 0)
       {
         // this keeps the spheres from disappearing by also keeping the
         //  tugboat from de-rendering (credit: bmgjet & Karuza)
@@ -2230,9 +2274,10 @@ public class PlayerBasePvpZones : RustPlugin
     {
       if (!destroying)
       {
-        // tugboat is sinking; save its position
-        var location = Tugboat?.GetParentEntity()?.CenterPoint();
-        if (null != location) Location = (Vector3)location;
+        // tugboat is sinking; save its approximate final position
+        var tugboatParent = Tugboat ? Tugboat.GetParentEntity() : null;
+        Vector3? location = tugboatParent ? tugboatParent.CenterPoint() : null;
+        if (location is { } sunkenLocation) Location = sunkenLocation;
       }
 
       Tugboat = null;
@@ -2392,9 +2437,6 @@ public class PlayerBasePvpZones : RustPlugin
     public bool ZoneEnabled { get; set; } = true;
   }
 
-  private readonly ToggleData _defaultToggleData =
-    new(LockoutReason.None, DateTime.MinValue, true);
-
   // reasons that toggling of a zone may be locked out
   private enum LockoutReason { None, Damage, Toggle }
 
@@ -2456,10 +2498,9 @@ public class PlayerBasePvpZones : RustPlugin
       toggleData.Remove(key);
     }
 
-    var deadCount = deadKeys.Count;
-    if (deadCount is <= 0) return;
+    if (deadKeys.IsEmpty()) return;
 
-    Puts($"Removed {deadCount} defunct zone toggle data entries from data file");
+    Puts($"Removed {deadKeys.Count} defunct zone toggle data entries from data file");
     SaveData();
   }
 
@@ -2523,10 +2564,10 @@ public class PlayerBasePvpZones : RustPlugin
     // get configured lockout duration for requested lockout reason
     var lockoutTime = reason switch
     {
-      LockoutReason.None    => 0.0f,
-      LockoutReason.Damage  => _configData.Toggle.DamageLockoutSeconds,
+      LockoutReason.None   => 0.0f,
+      LockoutReason.Damage => _configData.Toggle.DamageLockoutSeconds,
       LockoutReason.Toggle => _configData.Toggle.ToggleLockoutSeconds,
-      _                     => 0.0f
+      _                    => 0.0f
     };
     if (LockoutReason.None != reason && lockoutTime <= 0.0f)
     {
