@@ -69,9 +69,11 @@ public class PlayerBasePvpZones : RustPlugin
   //  tugboats use player being mounted at the wheel as a requirement, in lieu
   //   of raycast/distance checks
 
-  private const string CommandRoot = "pbpz";
   private const string CommandHelp = "help";
+  private const string CommandRoot = "pbpz";
+  private const string CommandShow = "show";
   private const string CommandToggle = "toggle";
+  private const string ShowPermission = "showZones";
   private const string TogglePermission = "toggleZones";
 
   private readonly List<DecayEntityData> _decayEntityData = new(1000);
@@ -597,7 +599,7 @@ public class PlayerBasePvpZones : RustPlugin
       if (!IsValidPlayer(player)) continue;
       var message =
         lang.GetMessage("NotifyZoneDelete", this, player.UserIDString);
-      SendReply(player, string.Format(
+      SendReply(player, string.Format(CultureInfo.InvariantCulture,
         message, _configData.PrefixNotify, _configData.DeleteDelaySeconds));
     }
     Pool.FreeUnmanaged(ref playersInZone);
@@ -779,10 +781,14 @@ public class PlayerBasePvpZones : RustPlugin
         "Player Base PvP Zone creation triggered due to toggle command",
       ["ToggleFail"] =
         "No togglable Player Base PvP Zone here",
+      ["HelpShow"] =
+        "  /{0} {1} - show Player Base PvP Zone geometries within range",
       ["HelpToggle"] =
         "  /{0} {1} - toggle Player Base PvP Zone for authorized nearby shelter, looked-at TC, or mounted tugboat",
       ["HelpNoPerms"] =
         "You do not have permission to run any Player Base PvP Zone commands",
+      ["ShowZones"] =
+        "Showing Player Base PvP Zones within {0}m for {1} second(s)",
       ["CmdNoParams"] =
         "Valid parameter(s) required; type the following chat command for help: /{0} {1}",
       ["CmdNoPerm"] =
@@ -805,6 +811,7 @@ public class PlayerBasePvpZones : RustPlugin
 
     AddCovalenceCommand(CommandRoot, nameof(HandleCommand));
 
+    permission.RegisterPermission(GetPermission(ShowPermission), this);
     permission.RegisterPermission(GetPermission(TogglePermission), this);
 
     if (_configData is null) return;
@@ -951,6 +958,9 @@ public class PlayerBasePvpZones : RustPlugin
         ClampToZero(ref _configData.ModularBoat.Radius, "modularBoat.radius");
         ClampToZero(ref _configData.Shelter.Radius, "shelter.radius");
         ClampToZero(ref _configData.Tugboat.Radius, "tugboat.radius");
+        ClampToZero(ref _configData.Show.Radius, "show.radius");
+        ClampToZero(ref _configData.Show.Duration, "show.duration");
+        ClampToZero(ref _configData.Show.TextScale, "show.textScale");
       }
     }
     catch (Exception ex)
@@ -1623,15 +1633,26 @@ public class PlayerBasePvpZones : RustPlugin
 
   private void HandleCommandHelp(IPlayer iPlayer, BasePlayer player)
   {
-    if (iPlayer.HasPermission(GetPermission(TogglePermission)))
+    var hasShow = iPlayer.HasPermission(GetPermission(ShowPermission));
+    var hasToggle = iPlayer.HasPermission(GetPermission(TogglePermission));
+    if (!hasShow && !hasToggle)
     {
-      SendReply(player, string.Format(lang.GetMessage("HelpToggle",
-        this, player.UserIDString), CommandRoot, CommandToggle));
+      SendReply(player, lang.GetMessage("HelpNoPerms",
+        this, player.UserIDString));
       return;
     }
 
-    SendReply(player, lang.GetMessage("HelpNoPerms",
-      this, player.UserIDString));
+    if (hasShow)
+    {
+      SendReply(player, string.Format(lang.GetMessage("HelpShow",
+        this, player.UserIDString), CommandRoot, CommandShow));
+    }
+
+    if (hasToggle)
+    {
+      SendReply(player, string.Format(lang.GetMessage("HelpToggle",
+        this, player.UserIDString), CommandRoot, CommandToggle));
+    }
   }
 
   private void HandleCommandToggle(BasePlayer player)
@@ -1658,6 +1679,98 @@ public class PlayerBasePvpZones : RustPlugin
     ToggleZone(player, record, baseNetworkable);
   }
 
+  // visualize PBPZ zones within a 2D radius of the player using ddraw
+  private void HandleCommandShow(BasePlayer player)
+  {
+    var showRadius = _configData.Show.Radius;
+    var showDuration = _configData.Show.Duration;
+    var textScale = _configData.Show.TextScale;
+    var playerPos2D = player.transform.position.XZ2D();
+
+    SendReply(player, string.Format(CultureInfo.InvariantCulture,
+      lang.GetMessage("ShowZones", this, player.UserIDString),
+      showRadius, showDuration));
+
+    foreach (var (netID, record) in _zoneRecords)
+    {
+      if (record.Data is not { } baseData) continue;
+
+      var position = baseData.Location;
+      if (Vector2.Distance(playerPos2D, position.XZ2D()) > showRadius)
+      {
+        continue;
+      }
+
+      var zoneID = GetZoneID(netID);
+      var zoneName = GetZoneName(baseData);
+      var tetherTransform = baseData.GetTetherTransform();
+      var tetherBase =
+        tetherTransform ? tetherTransform.gameObject.ToBaseEntity() : null;
+      var parentID = tetherBase ? tetherBase.net?.ID.Value ?? 0UL : 0UL;
+
+      var color = baseData switch
+      {
+        BuildingData    => Color.red,
+        ShelterData     => Color.yellow,
+        ModularBoatData => Color.green,
+        TugboatData     => Color.blue,
+        _               => Color.white
+      };
+
+      var pos = position;
+      if (parentID != 0UL && tetherTransform)
+      {
+        // parented: offset position relative to parent
+        pos -= tetherTransform.position;
+      }
+
+      DrawSphere(
+        player, showDuration, color, pos, baseData.Radius, zoneID, parentID);
+      DrawText(
+        player, showDuration, color, pos, $"{zoneID}\n{zoneName}",
+        textScale, zoneID, parentID);
+    }
+  }
+
+  // draw a ddraw sphere, optionally parented to an entity
+  // zoneID is a group identifier that associates ddraw elements for
+  //  unified cleanup when the duration expires
+  private static void DrawSphere(
+    BasePlayer player, float duration, Color color,
+    Vector3 pos, float radius, string zoneID,
+    ulong parentID = 0UL)
+  {
+    if (parentID != 0UL)
+    {
+      player.SendConsoleCommand("ddraw.sphere", duration, color, pos, radius,
+        true, false, parentID, zoneID);
+    }
+    else
+    {
+      player.SendConsoleCommand("ddraw.sphere", duration, color, pos, radius);
+    }
+  }
+
+  // draw a ddraw text label, optionally parented to an entity
+  // zoneID is a group identifier that associates ddraw elements for
+  //  unified cleanup when the duration expires
+  private static void DrawText(
+    BasePlayer player, float duration, Color color,
+    Vector3 pos, string text, float textScale, string zoneID,
+    ulong parentID = 0UL)
+  {
+    if (parentID != 0UL)
+    {
+      player.SendConsoleCommand("ddraw.text",
+        duration, color, pos, text, true, false, textScale, parentID, zoneID);
+    }
+    else
+    {
+      player.SendConsoleCommand("ddraw.text",
+        duration, color, pos, text, true, false, textScale);
+    }
+  }
+
   // chat command handler
   private void HandleCommand(IPlayer iPlayer, string _, string[] args)
   {
@@ -1678,6 +1791,21 @@ public class PlayerBasePvpZones : RustPlugin
       case CommandHelp:
       {
         HandleCommandHelp(iPlayer, player);
+        return;
+      }
+
+      case CommandShow:
+      {
+        if (iPlayer.HasPermission(GetPermission(ShowPermission)))
+        {
+          HandleCommandShow(player);
+        }
+        else
+        {
+          SendReply(player, string.Format(lang.GetMessage("CmdNoPerm",
+            this, player.UserIDString), CommandRoot, CommandHelp));
+        }
+
         return;
       }
 
@@ -2349,6 +2477,9 @@ public class PlayerBasePvpZones : RustPlugin
 
     [JsonProperty(PropertyName = "Zone toggle settings")]
     public ToggleConfigData Toggle = new();
+
+    [JsonProperty(PropertyName = "Zone show settings")]
+    public ShowConfigData Show = new();
   }
 
   private sealed class BuildingConfigData
@@ -2399,6 +2530,18 @@ public class PlayerBasePvpZones : RustPlugin
     public float DamageLockoutSeconds = 60.0f;
     [JsonProperty(PropertyName = "Zone toggle lockout seconds after toggle")]
     public float ToggleLockoutSeconds = 60.0f;
+  }
+
+  private sealed class ShowConfigData
+  {
+    [JsonProperty(PropertyName = "Zone show 2D radius in meters")]
+    public float Radius = 500.0f;
+
+    [JsonProperty(PropertyName = "Zone show duration in seconds")]
+    public float Duration = 15.0f;
+
+    [JsonProperty(PropertyName = "Zone show text scale")]
+    public float TextScale = 1.0f;
   }
 
   // data file structure
