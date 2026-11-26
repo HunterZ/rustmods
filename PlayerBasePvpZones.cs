@@ -14,7 +14,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Player Base PvP Zones", "HunterZ", "1.7.1")]
+[Info("Player Base PvP Zones", "HunterZ", "1.7.2")]
 [Description("Maintains Zone Manager / TruePVE exclusion zones around player bases")]
 public class PlayerBasePvpZones : RustPlugin
 {
@@ -1049,7 +1049,9 @@ public class PlayerBasePvpZones : RustPlugin
     success |= TryMergeDict(dataFile, "TugboatToggleData", out var countT);
     count += countT;
 
-    if (!success) return false;
+    // also return false if nothing was migrated, to ensure the new dictionary
+    //  gets instantiated
+    if (!success || count is 0) return false;
 
     Puts($"LoadData(): Migrated {count} total legacy record(s) to new zone toggle database with {_persistData?.ZoneToggleData?.Count} record(s)");
     SaveData();
@@ -2653,7 +2655,6 @@ public class PlayerBasePvpZones : RustPlugin
     HashSet<ulong> deadKeys = new();
 
     var toggleData = _persistData?.ZoneToggleData;
-    if (toggleData is null) return;
 
     foreach (var id in toggleData.Keys)
     {
