@@ -2,19 +2,19 @@
 
 using Facepunch;
 using Newtonsoft.Json;
+using Oxide.Core;
 using Oxide.Core.Configuration;
 using Oxide.Core.Libraries.Covalence;
 using Oxide.Core.Plugins;
-using Oxide.Core;
-using System.Collections.Generic;
-using System.Collections;
-using System.Globalization;
 using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Globalization;
 using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Player Base PvP Zones", "HunterZ", "1.6.0")]
+[Info("Player Base PvP Zones", "HunterZ", "1.7.0")]
 [Description("Maintains Zone Manager / TruePVE exclusion zones around player bases")]
 public class PlayerBasePvpZones : RustPlugin
 {
