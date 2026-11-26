@@ -10,7 +10,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Player Safety Net", "HunterZ", "1.3.0")]
+[Info("Player Safety Net", "HunterZ", "1.3.1")]
 public class PlayerSafetyNet : RustPlugin
 {
   #region Data
@@ -102,6 +102,9 @@ public class PlayerSafetyNet : RustPlugin
     if (startEntity)
     {
       cEntity = collider.ToBaseEntity();
+      // stupid special case: don't move water well vendors on top of their
+      //  invisible vending machines
+      if (cEntity is InvisibleVendingMachine) return (false, collider);
       if (SameOrCorpseOrigin(cEntity, startEntity)) return (false, collider);
     }
 
@@ -361,6 +364,7 @@ public class PlayerSafetyNet : RustPlugin
       RecordUnmoved(entitySignature);
       return;
     }
+
     if (_config.BounceLog && !_config.LogIgnorePrefabs.Contains(prefabName))
     {
       // use StringBuilder scratchpad to build bounce logs, because string
@@ -615,6 +619,8 @@ public class PlayerSafetyNet : RustPlugin
 
   private bool? CanDropActiveItem(BasePlayer player)
   {
+    // special case: ignore NPC shopkeepers
+    if (player is NPCShopKeeper) return null;
     if (ShouldIgnorePlayer(player))
     {
       RecordIgnored(CanDropActiveItemKey);
