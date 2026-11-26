@@ -14,7 +14,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins;
 
-[Info("Player Base PvP Zones", "HunterZ", "1.7.0")]
+[Info("Player Base PvP Zones", "HunterZ", "1.7.1")]
 [Description("Maintains Zone Manager / TruePVE exclusion zones around player bases")]
 public class PlayerBasePvpZones : RustPlugin
 {
@@ -2652,7 +2652,9 @@ public class PlayerBasePvpZones : RustPlugin
     // not worth using pooling for one instance per plugin run
     HashSet<ulong> deadKeys = new();
 
-    var toggleData = _persistData.ZoneToggleData;
+    var toggleData = _persistData?.ZoneToggleData;
+    if (toggleData is null) return;
+
     foreach (var id in toggleData.Keys)
     {
       if (!BaseNetworkable.serverEntities.Contains(GetNetworkableID(id)))
